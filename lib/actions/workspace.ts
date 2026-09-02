@@ -1,7 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { $Enums } from "@prisma/client";
@@ -10,7 +10,7 @@ type MemberRole = $Enums.MemberRole;
 const ROLE_ORDER: MemberRole[] = ["VIEWER", "OPERATOR", "WORKSPACE_ADMIN", "SUPER_ADMIN"];
 
 export async function requireWorkspaceAccess(workspaceId: string, minRole: MemberRole = "VIEWER") {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
   const member = await prisma.workspaceMember.findUnique({
@@ -37,7 +37,7 @@ export async function getActiveWorkspaceId(): Promise<string | null> {
 }
 
 export async function setActiveWorkspace(workspaceId: string) {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) return;
 
   // Verify user is actually a member
@@ -58,7 +58,7 @@ export async function setActiveWorkspace(workspaceId: string) {
 }
 
 export async function getUserWorkspaces() {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) return [];
 
   return prisma.workspace.findMany({
@@ -72,7 +72,7 @@ export async function getUserWorkspaces() {
 }
 
 export async function createWorkspace(formData: FormData) {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
   const name = formData.get("name") as string;

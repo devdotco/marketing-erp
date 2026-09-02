@@ -31,10 +31,11 @@ export default async function DashboardLayout({ children }: { children: React.Re
     if (!valid) activeWorkspaceId = null;
   }
 
-  // Default to first workspace
+  // Default to first workspace (don't call setActiveWorkspace during render —
+  // cookies().set() is forbidden in Server Components; workspace cookie is set
+  // the next time the user switches workspace via a Server Action)
   if (!activeWorkspaceId && workspaces.length > 0) {
     activeWorkspaceId = workspaces[0].id;
-    await setActiveWorkspace(workspaces[0].id);
   }
 
   // Get enabled agent counts per suite for sidebar badges

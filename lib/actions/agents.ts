@@ -1,6 +1,6 @@
 "use server";
 
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "./workspace";
 import { revalidatePath } from "next/cache";
@@ -11,7 +11,7 @@ export async function toggleAgent(
   enabled: boolean,
   agentConfigId?: string
 ) {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) throw new Error("Unauthorized");
   await requireWorkspaceAccess(workspaceId, "OPERATOR");
 
@@ -38,7 +38,7 @@ export async function saveAgentConfig(
   agentSlug: string,
   config: Record<string, unknown>
 ) {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) throw new Error("Unauthorized");
   await requireWorkspaceAccess(workspaceId, "OPERATOR");
 
