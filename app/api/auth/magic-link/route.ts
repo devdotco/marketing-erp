@@ -1,23 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
-import { signIn } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { sendMagicLink } from "@/lib/email";
+import { randomBytes } from "crypto";
 
-// NextAuth v5 Email provider is triggered via signIn("email")
-// This route wraps it so the client can call it as a JSON API
+export const dynamic = "force-dynamic";
+
 export async function POST(req: NextRequest) {
   const { email } = await req.json().catch(() => ({}));
   if (!email || typeof email !== "string") {
-    return NextResponse.json({ error: "Email required" }, { status: 400 });
+    return NextResponse.json({ ok: true }); // don't leak info
   }
 
-  try {
-    await signIn("email", {
-      email: email.toLowerCase().trim(),
-      redirect: false,
-    });
-    return NextResponse.json({ ok: true });
-  } catch (err) {
-    console.error("[magic-link]", err);
-    // Return ok anyway — don't leak whether the email exists
-    return NextResponse.json({ ok: true });
-  }
+  const normalized = email.toLowerCase().trim();
+
+  // Always return ok — don't leak whether email exists
+  const user = await prisma.user.findUnique({ where: { email: normalized } });
+  if (!user) return NextResponse.json({ ok: true });
+
+  // Create a VerificationToken (same table NextAuth Email provider uses)
+  const token = randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+  // Delete any existing token for this email first
+  await prisma.verificationToken.deleteMany({ where: { identifier: normalized } });
+  await prisma.verificationToken.create({ data: { identifier: normalized, token, expires } });
+
+  // Build the NextAuth callback URL (same format NextAuth uses)
+  const appUrl = process.env.NEXTAUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "https://marketing.erp.io";
+  const callbackUrl = `${appUrl}/api/auth/callback/email?callbackUrl=${encodeURIComponent(appUrl)}&token=${token}&email=${encodeURIComponent(normalized)}`;
+
+  await sendMagicLink(normalized, callbackUrl);
+
+  return NextResponse.json({ ok: true });
 }
