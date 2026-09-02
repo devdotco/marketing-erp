@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { notifyNewSignup } from "@/lib/integrations/notify-signup";
 
 const SignUpSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -86,6 +87,14 @@ export async function signUp(formData: FormData) {
         },
       },
     },
+  });
+
+  // Fire-and-forget: push to CRM + alert emails (never blocks signup)
+  void notifyNewSignup({
+    name,
+    email,
+    workspaceName: wsName,
+    referralSource: referralSource ?? null,
   });
 
   // Sign in immediately after registration
