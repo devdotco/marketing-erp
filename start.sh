@@ -3,9 +3,8 @@
 echo "[start] DATABASE_URL prefix: $(echo $DATABASE_URL | cut -c1-40)..."
 echo "[start] Running database migrations..."
 
-# Run migrations but don't crash the container if they fail
-node /app/node_modules/.bin/prisma migrate deploy 2>&1 || {
-  echo "[start] WARNING: migrations failed or already up to date, continuing..."
+node /app/node_modules/prisma/build/index.js migrate deploy 2>&1 || {
+  echo "[start] WARNING: migrations failed, continuing anyway..."
 }
 
 echo "[start] Starting Next.js server..."
