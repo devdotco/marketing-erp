@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
+import SendGridProvider from "next-auth/providers/sendgrid";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { $Enums } from "@prisma/client";
@@ -21,7 +22,9 @@ declare module "next-auth" {
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
-  session: { strategy: "database" },
+  // JWT strategy is required for CredentialsProvider — database sessions don't
+  // support credentials-based auth in NextAuth v5
+  session: { strategy: "jwt" },
 
   // Shared .erp.io cookie so all subdomains share a single session
   cookies: {
@@ -72,15 +75,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
       allowDangerousEmailAccountLinking: true,
     }),
+
+    // SendGrid email provider for magic links — no nodemailer required
+    SendGridProvider({
+      apiKey: process.env.SENDGRID_API_KEY ?? "",
+      from: process.env.EMAIL_FROM ?? "noreply@erp.io",
+    }),
   ],
 
   callbacks: {
-    async session({ session, user }) {
-      if (session.user && user) {
-        session.user.id = user.id;
-        // Check SUPER_ADMIN across any workspace
+    async jwt({ token, user }) {
+      if (user) {
+        token.sub = user.id;
+      }
+      return token;
+    },
+
+    async session({ session, token }) {
+      if (session.user && token?.sub) {
+        session.user.id = token.sub;
         const superAdminMembership = await prisma.workspaceMember.findFirst({
-          where: { userId: user.id, role: "SUPER_ADMIN" as MemberRole },
+          where: { userId: token.sub, role: "SUPER_ADMIN" as MemberRole },
         });
         session.user.isSuperAdmin = !!superAdminMembership;
       }
@@ -91,5 +106,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   pages: {
     signIn: "/login",
     error: "/login",
+    verifyRequest: "/verify-request",
   },
 });
