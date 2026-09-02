@@ -22,6 +22,9 @@ declare module "next-auth" {
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
+  // Required when running behind Cloudflare / Traefik — without this NextAuth v5
+  // throws UntrustedHost on every session check
+  trustHost: true,
   // JWT strategy is required for CredentialsProvider — database sessions don't
   // support credentials-based auth in NextAuth v5
   session: { strategy: "jwt" },
