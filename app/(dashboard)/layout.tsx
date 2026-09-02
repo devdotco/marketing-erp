@@ -6,7 +6,12 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { cookies } from "next/headers";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const session = await auth();
+  let session;
+  try {
+    session = await auth();
+  } catch {
+    redirect("/login");
+  }
   if (!session?.user) redirect("/login");
 
   let workspaces: Awaited<ReturnType<typeof getUserWorkspaces>> = [];
