@@ -9,7 +9,13 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const workspaces = await getUserWorkspaces();
+  let workspaces: Awaited<ReturnType<typeof getUserWorkspaces>> = [];
+  try {
+    workspaces = await getUserWorkspaces();
+  } catch (err) {
+    console.error("[layout] getUserWorkspaces failed:", err);
+    // DB error — show empty state rather than crashing into a redirect loop
+  }
   if (workspaces.length === 0) redirect("/onboarding");
 
   let activeWorkspaceId = await getActiveWorkspaceId();

@@ -56,20 +56,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) return null;
-
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email as string },
-        });
-
-        if (!user?.passwordHash) return null;
-
-        const valid = await bcrypt.compare(
-          credentials.password as string,
-          user.passwordHash
-        );
-        if (!valid) return null;
-
-        return { id: user.id, email: user.email, name: user.name, image: user.image };
+        try {
+          const user = await prisma.user.findUnique({
+            where: { email: credentials.email as string },
+          });
+          if (!user?.passwordHash) return null;
+          const valid = await bcrypt.compare(
+            credentials.password as string,
+            user.passwordHash
+          );
+          if (!valid) return null;
+          return { id: user.id, email: user.email, name: user.name, image: user.image };
+        } catch (err) {
+          console.error("[auth] authorize error:", err);
+          return null;
+        }
       },
     }),
 
@@ -97,10 +98,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async session({ session, token }) {
       if (session.user && token?.sub) {
         session.user.id = token.sub;
-        const superAdminMembership = await prisma.workspaceMember.findFirst({
-          where: { userId: token.sub, role: "SUPER_ADMIN" as MemberRole },
-        });
-        session.user.isSuperAdmin = !!superAdminMembership;
+        try {
+          const superAdminMembership = await prisma.workspaceMember.findFirst({
+            where: { userId: token.sub, role: "SUPER_ADMIN" as MemberRole },
+          });
+          session.user.isSuperAdmin = !!superAdminMembership;
+        } catch {
+          session.user.isSuperAdmin = false;
+        }
       }
       return session;
     },
