@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { enqueueAgentRun } from "@/lib/queue";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
