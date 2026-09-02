@@ -111,7 +111,9 @@ export async function loginWithCredentials(formData: FormData) {
 
   try {
     await signIn("credentials", { email, password, redirectTo: callbackUrl });
-  } catch {
-    return { error: "Invalid email or password." };
+  } catch (err) {
+    // NextAuth v5 throws a NEXT_REDIRECT on success — must re-throw it
+    if ((err as { digest?: string })?.digest?.startsWith("NEXT_REDIRECT")) throw err;
+    redirect(`/login?error=CredentialsSignin&callbackUrl=${encodeURIComponent(callbackUrl)}`);
   }
 }
