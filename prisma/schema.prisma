@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── NextAuth adapter models ───────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────
+
+model User {
+  id            String           @id @default(cuid())
+  name          String?
+  email         String           @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  referralSource String?         // e.g. "digitalmarketers.ai"
+  accounts      Account[]
+  sessions      Session[]
+  memberships   WorkspaceMember[]
+  invitations   Invitation[]     @relation("InvitedBy")
+  notifications Notification[]
+  createdAt     DateTime         @default(now())
+}
+
+// ─── Workspaces ────────────────────────────────────────────────────────────
+
+model Workspace {
+  id              String            @id @default(cuid())
+  name            String
+  slug            String            @unique
+  plan            WorkspacePlan     @default(FREE)
+  members         WorkspaceMember[]
+  agentConfigs    AgentConfig[]
+  runs            AgentRun[]
+  integrations    Integration[]
+  invitations     Invitation[]
+  businessProfile BusinessProfile?
+  notifications   Notification[]
+  oauthStates     OAuthState[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+}
+
+enum WorkspacePlan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+model WorkspaceMember {
+  id          String      @id @default(cuid())
+  workspaceId String
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        MemberRole  @default(VIEWER)
+  createdAt   DateTime    @default(now())
+
+  @@unique([workspaceId, userId])
+}
+
+enum MemberRole {
+  SUPER_ADMIN
+  WORKSPACE_ADMIN
+  OPERATOR
+  VIEWER
+}
+
+// ─── Agent configuration ───────────────────────────────────────────────────
+
+model AgentConfig {
+  id          String      @id @default(cuid())
+  workspaceId String
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentSlug   String
+  enabled     Boolean     @default(false)
+  config      Json        @default("{}")
+  schedule    String?
+  runs        AgentRun[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@unique([workspaceId, agentSlug])
+}
+
+// ─── Agent runs ───────────────────────────────────────────────────────────
+
+model AgentRun {
+  id              String      @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace   @relation(fields: [workspaceId], references: [id])
+  agentConfigId   String
+  agentConfig     AgentConfig @relation(fields: [agentConfigId], references: [id])
+  status          RunStatus   @default(PENDING)
+  input           Json?
+  output          Json?
+  metadata        Json?
+  costUsd         Decimal     @default(0) @db.Decimal(10, 6)
+  triggeredBy     String?
+  approvedBy      String?
+  rejectedBy      String?
+  rejectionNote   String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime    @default(now())
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  AWAITING_APPROVAL
+  APPROVED
+  REJECTED
+  COMPLETED
+  FAILED
+}
+
+// ─── Integrations ─────────────────────────────────────────────────────────
+
+model Integration {
+  id                   String              @id @default(cuid())
+  workspaceId          String
+  workspace            Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  provider             IntegrationProvider
+  label                String?
+  encryptedCredentials String
+  scopes               String[]
+  expiresAt            DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  @@unique([workspaceId, provider])
+}
+
+enum IntegrationProvider {
+  GOOGLE_SEARCH_CONSOLE
+  GOOGLE_ADS
+  GOOGLE_ANALYTICS_4
+  GOOGLE_BUSINESS_PROFILE
+  LINKEDIN
+  META
+  TWITTER_X
+  YOUTUBE
+  REDDIT
+  WORDPRESS
+  STORYBLOK
+  WEBFLOW
+  MAILCHIMP
+  KLAVIYO
+  AHREFS
+  SEMRUSH
+  CARTESIA
+  TRANSISTOR
+  GMAIL
+  MICROSOFT_365
+}
+
+// ─── Invitations ──────────────────────────────────────────────────────────
+
+model Invitation {
+  id          String     @id @default(cuid())
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  email       String
+  role        MemberRole
+  token       String     @unique @default(cuid())
+  invitedById String?
+  invitedBy   User?      @relation("InvitedBy", fields: [invitedById], references: [id])
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime   @default(now())
+}
+
+// ─── Business profile (populated by Onboarder agent) ─────────────────────
+
+model BusinessProfile {
+  id                     String    @id @default(cuid())
+  workspaceId            String    @unique
+  workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  businessName           String
+  websiteUrl             String?
+  industry               String?
+  targetAudience         String?
+  uniqueValueProp        String?
+  brandVoice             Json?
+  goals                  Json?
+  competitors            String[]
+  onboardingCompletedAt  DateTime?
+  onboardingStep         Int       @default(1)
+  lastRefreshedAt        DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────
+
+model Notification {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id])
+  type        String
+  title       String
+  body        String
+  runId       String?
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+// ─── OAuth PKCE state storage ─────────────────────────────────────────────
+
+model OAuthState {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  state         String    @unique
+  provider      String
+  codeVerifier  String?
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+}
