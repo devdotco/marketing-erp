@@ -1,5 +1,5 @@
 import { notFound, redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { getAgent } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
@@ -11,7 +11,7 @@ export default async function ConfigurePage({ params }: { params: Promise<{ slug
   const agent = getAgent(slug);
   if (!agent) notFound();
 
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
   const workspaceId = await getActiveWorkspaceId();

@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { getActiveWorkspaceId, getDashboardStats } from "@/lib/actions/workspace";
 import { AGENTS, SUITES } from "@/lib/agents";
@@ -29,7 +29,7 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 export default async function DashboardPage() {
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
   const workspaceId = await getActiveWorkspaceId();

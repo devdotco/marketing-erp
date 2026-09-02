@@ -1,5 +1,5 @@
 import { notFound, redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { getAgentsBySuite, getSuite, SUITES } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
@@ -14,7 +14,7 @@ export default async function SuiteDetailPage({ params }: { params: Promise<{ su
   const suite = getSuite(suiteSlug);
   if (!suite) notFound();
 
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
   const workspaceId = await getActiveWorkspaceId();

@@ -1,5 +1,5 @@
 import { signUp } from "@/lib/actions/auth";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { signIn } from "@/lib/auth";
@@ -7,7 +7,7 @@ import { signIn } from "@/lib/auth";
 export const metadata = { title: "Create account — marketing.erp.io" };
 
 export default async function SignupPage() {
-  const session = await auth();
+  const session = await getServerSession();
   if (session?.user) redirect("/");
 
   return (

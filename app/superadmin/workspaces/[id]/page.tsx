@@ -1,12 +1,12 @@
 import { notFound, redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 
 export default async function SuperAdminWorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
-  const session = await auth();
+  const session = await getServerSession();
   if (!session?.user) redirect("/login");
   if (!session.user.isSuperAdmin) redirect("/");
 

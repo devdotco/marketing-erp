@@ -6,7 +6,7 @@
 import { signUp } from "@/lib/actions/auth";
 import { signIn } from "@/lib/auth";
 import Link from "next/link";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { AGENTS } from "@/lib/agents";
 
@@ -16,7 +16,7 @@ const ACTIVE_AGENTS = AGENTS.filter((a) => a.status === "ACTIVE");
 const TOTAL_AGENTS = AGENTS.length;
 
 export default async function StartPage() {
-  const session = await auth();
+  const session = await getServerSession();
   if (session?.user) redirect("/");
 
   return (

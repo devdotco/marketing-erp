@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, getUserWorkspaces, setActiveWorkspace } from "@/lib/actions/workspace";
@@ -8,7 +8,7 @@ import { cookies } from "next/headers";
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   let session;
   try {
-    session = await auth();
+    session = await getServerSession();
   } catch {
     redirect("/login");
   }

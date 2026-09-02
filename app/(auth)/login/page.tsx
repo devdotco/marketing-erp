@@ -2,7 +2,7 @@ import { loginWithCredentials } from "@/lib/actions/auth";
 import Link from "next/link";
 import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { getServerSession } from "@/lib/session";
 import { MagicLinkForm } from "./MagicLinkForm";
 
 export const metadata = { title: "Sign in — marketing.erp.io" };
@@ -12,7 +12,7 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<{ callbackUrl?: string; error?: string }>;
 }) {
-  const session = await auth();
+  const session = await getServerSession();
   if (session?.user) redirect("/");
 
   const params = await searchParams;
