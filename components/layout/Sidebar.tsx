@@ -99,6 +99,36 @@ export function Sidebar({ workspaces, activeWorkspaceId, user, enabledCounts }: 
 
   return (
     <aside className="sidebar">
+      {/* App logo — matches app.erp.io header brand treatment */}
+      <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{
+          display: "grid", placeItems: "center",
+          width: 24, height: 24,
+          borderRadius: 6,
+          background: "var(--accent)",
+          color: "var(--accent-fg)",
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "-0.03em",
+          flexShrink: 0,
+        }}>M</span>
+        <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", color: "var(--text)" }}>
+          Marketing
+        </span>
+        <span style={{
+          marginLeft: "auto",
+          fontSize: 9,
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "var(--text-dim)",
+          background: "var(--surface-2)",
+          border: "1px solid var(--border)",
+          borderRadius: 3,
+          padding: "1px 5px",
+        }}>erp.io</span>
+      </div>
+
       {/* Workspace switcher */}
       <div className="sidebar-top">
         <div style={{ position: "relative" }}>
