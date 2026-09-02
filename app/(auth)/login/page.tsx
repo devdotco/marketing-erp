@@ -3,6 +3,7 @@ import Link from "next/link";
 import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
+import { MagicLinkForm } from "./MagicLinkForm";
 
 export const metadata = { title: "Sign in — marketing.erp.io" };
 
@@ -192,13 +193,27 @@ export default async function LoginPage({
               <input id="email" name="email" type="email" required autoComplete="email" className="input" placeholder="you@company.com" />
             </div>
             <div>
-              <label className="input-label" htmlFor="password">Password</label>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                <label className="input-label" htmlFor="password" style={{ margin: 0 }}>Password</label>
+                <Link href="/forgot-password" style={{ fontSize: 11, color: "var(--text-dim)", textDecoration: "underline" }}>
+                  Forgot?
+                </Link>
+              </div>
               <input id="password" name="password" type="password" required autoComplete="current-password" className="input" placeholder="••••••••" />
             </div>
             <button type="submit" className="btn btn-primary" style={{ width: "100%", marginTop: 4 }}>
               Sign in
             </button>
           </form>
+
+          {/* Magic link */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "20px 0 16px", color: "var(--text-dim)", fontSize: 12 }}>
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+            or get a magic link
+            <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          </div>
+
+          <MagicLinkForm />
 
           <p style={{ fontSize: 12, color: "var(--text-dim)", textAlign: "center", marginTop: 20 }}>
             No account?{" "}

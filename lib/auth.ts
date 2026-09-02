@@ -2,8 +2,10 @@ import NextAuth from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
+import EmailProvider from "next-auth/providers/email";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { sendMagicLink } from "@/lib/email";
 import { $Enums } from "@prisma/client";
 type MemberRole = $Enums.MemberRole;
 
@@ -68,9 +70,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
 
     GoogleProvider({
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
       allowDangerousEmailAccountLinking: true,
+    }),
+
+    EmailProvider({
+      from: process.env.EMAIL_FROM ?? "noreply@erp.io",
+      sendVerificationRequest: async ({ identifier, url }) => {
+        await sendMagicLink(identifier, url);
+      },
     }),
   ],
 
@@ -91,5 +100,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   pages: {
     signIn: "/login",
     error: "/login",
+    verifyRequest: "/verify-request",
   },
 });
