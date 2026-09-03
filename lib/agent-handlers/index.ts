@@ -2,6 +2,7 @@ import type { AgentRun, AgentConfig } from "@prisma/client";
 import { blogWriterHandler } from "./blog-writer";
 import { podcastHandler } from "./podcast";
 import { technicalAuditHandler } from "./technical-audit";
+import { onSitePublisherHandler } from "./on-site-publisher";
 import { stubHandler } from "./stub";
 
 export type AgentHandler = (
@@ -11,6 +12,7 @@ export type AgentHandler = (
 
 const HANDLERS: Record<string, AgentHandler> = {
   "blog-writer": blogWriterHandler,
+  "on-site-publisher": onSitePublisherHandler,
   "podcast": podcastHandler,
   "technical-audit": technicalAuditHandler,
 };
