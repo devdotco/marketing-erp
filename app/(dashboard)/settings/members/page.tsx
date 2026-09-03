@@ -1,6 +1,6 @@
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
-import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
+import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { InviteForm } from "./InviteForm";
@@ -18,7 +18,7 @@ export default async function MembersPage() {
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
-  const workspaceId = await getActiveWorkspaceId();
+  const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
   await requireWorkspaceAccess(workspaceId, "WORKSPACE_ADMIN");

@@ -1,6 +1,6 @@
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
-import { getActiveWorkspaceId, getDashboardStats } from "@/lib/actions/workspace";
+import { resolveWorkspaceId, getDashboardStats } from "@/lib/actions/workspace";
 import { AGENTS, SUITES } from "@/lib/agents";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
@@ -32,7 +32,7 @@ export default async function DashboardPage() {
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
-  const workspaceId = await getActiveWorkspaceId();
+  const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
   const [stats, enabledConfigs, workspace] = await Promise.all([

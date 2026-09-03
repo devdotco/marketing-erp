@@ -57,6 +57,28 @@ export async function setActiveWorkspace(workspaceId: string) {
   });
 }
 
+// Resolves the active workspace ID — reads cookie first, falls back to the
+// user's first workspace from DB so pages never redirect-loop to /onboarding
+// just because the cookie isn't set yet.
+export async function resolveWorkspaceId(): Promise<string | null> {
+  const session = await getServerSession();
+  if (!session?.user) return null;
+
+  const fromCookie = await getActiveWorkspaceId();
+  if (fromCookie) {
+    const member = await prisma.workspaceMember.findFirst({
+      where: { workspaceId: fromCookie, userId: session.user.id },
+    });
+    if (member) return fromCookie;
+  }
+
+  const firstMembership = await prisma.workspaceMember.findFirst({
+    where: { userId: session.user.id },
+    orderBy: { createdAt: "asc" },
+  });
+  return firstMembership?.workspaceId ?? null;
+}
+
 export async function getUserWorkspaces() {
   const session = await getServerSession();
   if (!session?.user) return [];

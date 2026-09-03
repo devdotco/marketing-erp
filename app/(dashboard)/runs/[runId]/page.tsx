@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
-import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
+import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
 import { getAgent } from "@/lib/agents";
 import Link from "next/link";
@@ -12,7 +12,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
-  const workspaceId = await getActiveWorkspaceId();
+  const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
   const run = await prisma.agentRun.findUnique({

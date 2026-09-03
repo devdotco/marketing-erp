@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { getAgentsBySuite, getSuite, SUITES } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
-import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
+import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ export default async function SuiteDetailPage({ params }: { params: Promise<{ su
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
-  const workspaceId = await getActiveWorkspaceId();
+  const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
   await requireWorkspaceAccess(workspaceId);

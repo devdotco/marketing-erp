@@ -3,7 +3,7 @@ import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { getAgent } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
-import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
+import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
 import { RunButton } from "@/components/ui/RunButton";
@@ -25,7 +25,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
-  const workspaceId = await getActiveWorkspaceId();
+  const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
   await requireWorkspaceAccess(workspaceId);

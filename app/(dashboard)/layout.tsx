@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, getUserWorkspaces, setActiveWorkspace } from "@/lib/actions/workspace";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -70,6 +71,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="page-shell">
+      {activeWorkspaceId && <WorkspaceCookieSync workspaceId={activeWorkspaceId} />}
       <Sidebar
         workspaces={workspacesForSidebar}
         activeWorkspaceId={activeWorkspaceId}
