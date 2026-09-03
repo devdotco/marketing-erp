@@ -1,16 +1,14 @@
 import { notFound } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
-import { getAgent, AGENTS } from "@/lib/agents";
+import { getAgent } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
 import { RunButton } from "@/components/ui/RunButton";
 
-export async function generateStaticParams() {
-  return AGENTS.map((a) => ({ slug: a.slug }));
-}
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;

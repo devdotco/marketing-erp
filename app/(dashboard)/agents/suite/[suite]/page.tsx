@@ -5,9 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 
-export async function generateStaticParams() {
-  return SUITES.map((s) => ({ suite: s.slug }));
-}
+export const dynamic = "force-dynamic";
 
 export default async function SuiteDetailPage({ params }: { params: Promise<{ suite: string }> }) {
   const { suite: suiteSlug } = await params;
