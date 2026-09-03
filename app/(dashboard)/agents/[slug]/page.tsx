@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { getAgent, AGENTS } from "@/lib/agents";
+import { AGENT_META } from "@/lib/agent-metadata";
 import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
@@ -43,6 +44,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
 
   const isEnabled = agentConfig?.enabled ?? false;
   const isActive = agent.status === "ACTIVE";
+  const meta = AGENT_META[slug];
 
   const STATUS_BADGE: Record<string, string> = {
     PENDING: "badge-pending", RUNNING: "badge-running",
@@ -166,6 +168,98 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
               <Link href={`/agents/${slug}/configure`} className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
                 Pre-configure →
               </Link>
+            </div>
+          )}
+
+          {/* How it works */}
+          {meta && (
+            <div className="card">
+              <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>How it works</h2>
+              <p style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.7, marginBottom: 20 }}>
+                {meta.overview}
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                {meta.steps.map((step, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      gap: 14,
+                      paddingBottom: i < meta.steps.length - 1 ? 16 : 0,
+                      marginBottom: i < meta.steps.length - 1 ? 16 : 0,
+                      borderBottom: i < meta.steps.length - 1 ? "1px solid var(--border)" : "none",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: "50%",
+                        background: "var(--success-bg)",
+                        border: "1px solid var(--success)",
+                        color: "var(--success)",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        marginTop: 1,
+                      }}
+                    >
+                      {i + 1}
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 2 }}>
+                        {step.title}
+                      </p>
+                      <p style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, margin: 0 }}>
+                        {step.detail}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {meta.outputs.length > 0 && (
+                <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                  <p style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-dim)", marginBottom: 10 }}>
+                    Outputs
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {meta.outputs.map((o) => (
+                      <span
+                        key={o}
+                        style={{
+                          fontSize: 11,
+                          background: "var(--surface-2)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          padding: "3px 8px",
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        {o}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {meta.requirements.length > 0 && (
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                  <p style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-dim)", marginBottom: 10 }}>
+                    Requirements
+                  </p>
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {meta.requirements.map((r) => (
+                      <li key={r} style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.7 }}>
+                        {r}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
 

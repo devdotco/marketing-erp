@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { saveAgentConfig } from "@/lib/actions/agents";
+import type { AgentInput } from "@/lib/agent-metadata";
 
 interface ConfigureFormProps {
   workspaceId: string;
@@ -11,41 +12,17 @@ interface ConfigureFormProps {
   agentConfigId?: string;
   currentConfig: Record<string, unknown>;
   integrations: string[];
+  inputs: AgentInput[];
 }
 
-const AGENT_FIELDS: Record<string, { key: string; label: string; placeholder?: string; type?: string }[]> = {
-  "blog-writer": [
-    { key: "wordCount", label: "Target word count", placeholder: "1500", type: "number" },
-    { key: "tone", label: "Tone of voice", placeholder: "Professional, conversational" },
-    { key: "targetKeyword", label: "Default target keyword", placeholder: "optional" },
-    { key: "wpCategoryId", label: "WordPress category ID", placeholder: "1" },
-    { key: "requireApproval", label: "Require approval before publish", type: "checkbox" },
-  ],
-  "on-site-publisher": [
-    { key: "wpUrl", label: "WordPress URL", placeholder: "https://yoursite.com" },
-    { key: "wpUsername", label: "WordPress username" },
-    { key: "publishStatus", label: "Publish status", placeholder: "draft" },
-    { key: "requireApproval", label: "Require approval before publish", type: "checkbox" },
-  ],
-  "technical-audit": [
-    { key: "crawlDepth", label: "Crawl depth", placeholder: "3", type: "number" },
-    { key: "includeScreenshots", label: "Include screenshots", type: "checkbox" },
-    { key: "gscProperty", label: "Google Search Console property", placeholder: "sc-domain:example.com" },
-  ],
-  "podcast": [
-    { key: "voiceId", label: "Cartesia voice ID", placeholder: "sonic" },
-    { key: "episodeLength", label: "Target episode length (minutes)", placeholder: "15", type: "number" },
-    { key: "requireApproval", label: "Require approval before publish", type: "checkbox" },
-  ],
-};
-
-const DEFAULT_FIELDS = [
-  { key: "requireApproval", label: "Require approval before publish", type: "checkbox" },
-  { key: "notes", label: "Notes", placeholder: "Internal notes about this agent configuration" },
-];
-
-export function ConfigureForm({ workspaceId, agentSlug, agentConfigId, currentConfig, integrations }: ConfigureFormProps) {
-  const fields = AGENT_FIELDS[agentSlug] ?? DEFAULT_FIELDS;
+export function ConfigureForm({
+  workspaceId,
+  agentSlug,
+  agentConfigId,
+  currentConfig,
+  integrations,
+  inputs,
+}: ConfigureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(currentConfig);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,34 +48,108 @@ export function ConfigureForm({ workspaceId, agentSlug, agentConfigId, currentCo
     });
   }
 
+  const fields: AgentInput[] = inputs.length > 0 ? inputs : [
+    {
+      key: "requireApproval",
+      label: "Require approval before publishing",
+      type: "boolean",
+      defaultValue: "true",
+      hint: "When enabled, runs pause for human review before any content is published.",
+    },
+    {
+      key: "notes",
+      label: "Internal notes",
+      type: "textarea",
+      placeholder: "Notes about this agent's configuration or usage in your workspace",
+    },
+  ];
+
   return (
     <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div className="card" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-        {fields.map((field) =>
-          field.type === "checkbox" ? (
-            <label key={field.key} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={Boolean(values[field.key])}
-                onChange={(e) => handleChange(field.key, e.target.checked)}
-                style={{ width: 15, height: 15, accentColor: "var(--success)" }}
-              />
-              <span style={{ fontSize: 13, color: "var(--text)" }}>{field.label}</span>
-            </label>
-          ) : (
-            <div key={field.key}>
-              <label className="input-label" htmlFor={field.key}>{field.label}</label>
-              <input
-                id={field.key}
-                type={field.type ?? "text"}
-                value={String(values[field.key] ?? "")}
-                onChange={(e) => handleChange(field.key, e.target.value)}
-                placeholder={field.placeholder}
-                className="input"
-              />
-            </div>
-          )
-        )}
+      <div className="card" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {fields.map((field) => (
+          <div key={field.key}>
+            {field.type === "boolean" ? (
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={
+                    values[field.key] !== undefined
+                      ? Boolean(values[field.key])
+                      : field.defaultValue === "true"
+                  }
+                  onChange={(e) => handleChange(field.key, e.target.checked)}
+                  style={{ width: 15, height: 15, marginTop: 2, accentColor: "var(--success)", flexShrink: 0 }}
+                />
+                <div>
+                  <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{field.label}</span>
+                  {field.hint && (
+                    <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "2px 0 0", lineHeight: 1.5 }}>{field.hint}</p>
+                  )}
+                </div>
+              </label>
+            ) : field.type === "select" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <select
+                  id={field.key}
+                  value={String(values[field.key] ?? field.defaultValue ?? "")}
+                  onChange={(e) => handleChange(field.key, e.target.value)}
+                  className="input"
+                >
+                  <option value="">Select…</option>
+                  {(field.options ?? []).map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            ) : field.type === "textarea" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <textarea
+                  id={field.key}
+                  value={String(values[field.key] ?? field.defaultValue ?? "")}
+                  onChange={(e) => handleChange(field.key, e.target.value)}
+                  placeholder={field.placeholder}
+                  className="input"
+                  rows={4}
+                  style={{ resize: "vertical", minHeight: 88 }}
+                />
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <input
+                  id={field.key}
+                  type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
+                  value={String(values[field.key] ?? field.defaultValue ?? "")}
+                  onChange={(e) => handleChange(field.key, e.target.value)}
+                  placeholder={field.placeholder}
+                  className="input"
+                  required={field.required}
+                />
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
 
       {integrations.length > 0 && (
@@ -118,13 +169,8 @@ export function ConfigureForm({ workspaceId, agentSlug, agentConfigId, currentCo
         </div>
       )}
 
-      {error && (
-        <p style={{ fontSize: 12, color: "var(--danger)" }}>{error}</p>
-      )}
-
-      {saved && (
-        <p style={{ fontSize: 12, color: "var(--success)" }}>Saved! Redirecting…</p>
-      )}
+      {error && <p style={{ fontSize: 12, color: "var(--danger)" }}>{error}</p>}
+      {saved && <p style={{ fontSize: 12, color: "var(--success)" }}>Saved! Redirecting…</p>}
 
       <div style={{ display: "flex", gap: 8 }}>
         <button

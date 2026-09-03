@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { getAgent } from "@/lib/agents";
+import { AGENT_META } from "@/lib/agent-metadata";
 import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
@@ -24,6 +25,7 @@ export default async function ConfigurePage({ params }: { params: Promise<{ slug
   });
 
   const currentConfig = (agentConfig?.config ?? {}) as Record<string, unknown>;
+  const meta = AGENT_META[slug];
 
   return (
     <div className="scrollable">
@@ -51,6 +53,7 @@ export default async function ConfigurePage({ params }: { params: Promise<{ slug
           agentConfigId={agentConfig?.id}
           currentConfig={currentConfig}
           integrations={agent.integrations}
+          inputs={meta?.inputs ?? []}
         />
       </div>
     </div>
