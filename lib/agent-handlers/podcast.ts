@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -88,14 +89,142 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   }
 
   output.voiceId = voiceId;
-  output.ttsStatus = "pending";
-  output.ttsNote = "Script approved — submit to Cartesia TTS to generate audio. Audio will be uploaded to Transistor for review before publishing.";
   output.generatedAt = new Date().toISOString();
 
   // Haiku 4.5 pricing: $0.80/M input, $4/M output
   const inputTokens = message.usage.input_tokens;
   const outputTokens = message.usage.output_tokens;
   const costUsd = (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+
+  // --- Live Cartesia TTS ---
+  let cartesiaLive = false;
+  try {
+    const cartesiaIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "CARTESIA",
+        },
+      },
+    });
+
+    if (cartesiaIntegration?.encryptedCredentials) {
+      const creds = await decryptCredentials<{ apiKey: string }>(
+        cartesiaIntegration.encryptedCredentials
+      );
+
+      const fullScript = String(output.fullScript ?? "");
+      const ttsRes = await fetch("https://api.cartesia.ai/tts/bytes", {
+        method: "POST",
+        headers: {
+          "X-API-Key": creds.apiKey,
+          "Cartesia-Version": "2024-06-10",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model_id: "sonic-english",
+          transcript: fullScript,
+          voice: { mode: "id", id: "a0e99841-438c-4a64-b679-ae501e7d6091" },
+          output_format: { container: "mp3", encoding: "mp3", sample_rate: 44100 },
+        }),
+      });
+
+      if (!ttsRes.ok) {
+        throw new Error(`Cartesia TTS error ${ttsRes.status}: ${await ttsRes.text()}`);
+      }
+
+      const audioBuffer = await ttsRes.arrayBuffer();
+      const audioBytes = Buffer.from(audioBuffer);
+      const maxBytes = 100 * 1024; // 100 KB cap on run output
+      output.audioBase64 = audioBytes.slice(0, maxBytes).toString("base64");
+      output.audioSizeBytes = audioBytes.length;
+      output.audioTruncated = audioBytes.length > maxBytes;
+      output.ttsStatus = "complete";
+      output.source = "live";
+      cartesiaLive = true;
+    }
+  } catch (err) {
+    output.ttsError = err instanceof Error ? err.message : String(err);
+  }
+
+  // --- Live Transistor Episode ---
+  let transistorLive = false;
+  try {
+    const transistorIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "TRANSISTOR",
+        },
+      },
+    });
+
+    if (transistorIntegration?.encryptedCredentials) {
+      const creds = await decryptCredentials<{ apiKey: string }>(
+        transistorIntegration.encryptedCredentials
+      );
+
+      // Use configured show_id or fall back to first show on the account
+      let resolvedShowId = String(config.transistorShowId ?? "");
+
+      if (!resolvedShowId) {
+        const showsRes = await fetch("https://api.transistor.fm/v1/shows", {
+          headers: { "x-api-key": creds.apiKey },
+        });
+        if (showsRes.ok) {
+          const showsData = await showsRes.json() as { data?: Array<{ id: string }> };
+          resolvedShowId = showsData.data?.[0]?.id ?? "";
+        }
+      }
+
+      if (resolvedShowId) {
+        const episodeRes = await fetch("https://api.transistor.fm/v1/episodes", {
+          method: "POST",
+          headers: {
+            "x-api-key": creds.apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            episode: {
+              show_id: resolvedShowId,
+              title: String(output.episodeTitle ?? "New Episode"),
+              summary: String(output.episodeDescription ?? ""),
+              description: String(output.showNotes ?? ""),
+              status: "draft",
+            },
+          }),
+        });
+
+        if (!episodeRes.ok) {
+          throw new Error(`Transistor episode error ${episodeRes.status}: ${await episodeRes.text()}`);
+        }
+
+        const episodeData = await episodeRes.json() as {
+          data?: { id: string; attributes?: { share_url?: string; upload_url?: string } };
+        };
+        output.transistorEpisodeId = episodeData.data?.id;
+        output.transistorShareUrl = episodeData.data?.attributes?.share_url;
+        output.transistorUploadUrl = episodeData.data?.attributes?.upload_url;
+        output.transistorStatus = "draft";
+        output.source = "live";
+        transistorLive = true;
+      }
+    }
+  } catch (err) {
+    output.transistorError = err instanceof Error ? err.message : String(err);
+  }
+
+  // --- Simulation fallback when neither live integration ran ---
+  if (!cartesiaLive && !transistorLive) {
+    output.ttsStatus = "pending";
+    output.ttsNote =
+      "Script approved — submit to Cartesia TTS to generate audio. Audio will be uploaded to Transistor for review before publishing.";
+    output.source = "simulation";
+  } else if (!cartesiaLive) {
+    output.ttsStatus = "pending";
+    output.ttsNote =
+      "Script ready — no Cartesia integration found. Connect Cartesia to generate audio.";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

@@ -1,8 +1,30 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+interface Ga4Row {
+  dimensionValues: Array<{ value: string }>;
+  metricValues: Array<{ value: string }>;
+}
+
+interface Ga4Response {
+  rows?: Ga4Row[];
+}
+
+interface AdsStreamChunk {
+  results?: Array<{
+    campaign: { name: string };
+    metrics: {
+      costMicros: string;
+      clicks: string;
+      impressions: string;
+      conversions: number;
+    };
+  }>;
+}
 
 export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -19,6 +41,125 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
+
+  // --- Live GA4 Data ---
+  let liveGa4Block: string | null = null;
+  let liveAdsBlock: string | null = null;
+  let source = "simulation";
+
+  try {
+    const ga4Integration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "GOOGLE_ANALYTICS_4",
+        },
+      },
+    });
+
+    if (ga4Integration?.encryptedCredentials) {
+      const ga4Creds = await decryptCredentials<{
+        access_token: string;
+        property_id: string;
+      }>(ga4Integration.encryptedCredentials);
+
+      const ga4Res = await fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${ga4Creds.property_id}:runReport`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${ga4Creds.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            dateRanges: [{ startDate: "7daysAgo", endDate: "today" }],
+            dimensions: [{ name: "sessionDefaultChannelGroup" }],
+            metrics: [{ name: "sessions" }, { name: "conversions" }],
+          }),
+        }
+      );
+
+      if (ga4Res.ok) {
+        const ga4Data = (await ga4Res.json()) as Ga4Response;
+        const channelRows = (ga4Data.rows ?? []).map((row) => ({
+          channel: row.dimensionValues[0]?.value ?? "Unknown",
+          sessions: Number(row.metricValues[0]?.value ?? 0),
+          conversions: Number(row.metricValues[1]?.value ?? 0),
+        }));
+        liveGa4Block = `Live GA4 Channel Performance (Last 7 Days):\n${JSON.stringify(channelRows, null, 2)}`;
+        source = "live";
+      }
+    }
+  } catch {
+    // fall through to simulation
+  }
+
+  try {
+    const adsIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "GOOGLE_ADS",
+        },
+      },
+    });
+
+    if (adsIntegration?.encryptedCredentials) {
+      const adsCreds = await decryptCredentials<{
+        access_token: string;
+        customer_id: string;
+      }>(adsIntegration.encryptedCredentials);
+
+      const customerId = adsCreds.customer_id.replace(/-/g, "");
+      const adsRes = await fetch(
+        `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${adsCreds.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query:
+              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
+          }),
+        }
+      );
+
+      if (adsRes.ok) {
+        const chunks = (await adsRes.json()) as AdsStreamChunk[];
+        const campaigns: Array<{
+          name: string;
+          costUsd: number;
+          clicks: number;
+          impressions: number;
+          conversions: number;
+        }> = [];
+
+        for (const chunk of chunks) {
+          for (const row of chunk.results ?? []) {
+            campaigns.push({
+              name: row.campaign.name,
+              costUsd: Number(row.metrics.costMicros) / 1_000_000,
+              clicks: Number(row.metrics.clicks),
+              impressions: Number(row.metrics.impressions),
+              conversions: Number(row.metrics.conversions),
+            });
+          }
+        }
+
+        liveAdsBlock = `Live Google Ads Campaign Performance (Last 30 Days):\n${JSON.stringify(campaigns, null, 2)}`;
+        source = "live";
+      }
+    }
+  } catch {
+    // fall through to simulation
+  }
+
+  const liveDataSection =
+    liveGa4Block || liveAdsBlock
+      ? `\n\nLIVE DATA — use these real figures when populating keyMetrics, significantMovements, paidCampaignSummary, and keywordMovers:\n${[liveGa4Block, liveAdsBlock].filter(Boolean).join("\n\n")}`
+      : "";
 
   const systemPrompt = `You are a senior digital marketing analyst creating a client-ready weekly performance report for ${whiteLabelBrand}.
 You synthesize data from Google Analytics 4, Google Search Console, and Google Ads to produce narrative prose reports highlighting 3 significant movements.
@@ -40,6 +181,7 @@ Report Configuration:
 - Report Period: ${reportPeriod}
 - Prepared by: ${whiteLabelBrand}
 - Prepared for: ${clientName}
+${liveDataSection}
 
 Respond with a JSON object matching this exact structure:
 {
@@ -296,8 +438,12 @@ Make all numbers realistic for a ${businessProfile?.industry ?? "general"} busin
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect GA4, Google Search Console, and Google Ads in Settings to enable live data. Current output is AI-generated using your business profile and industry benchmarks as context.";
+  output.source = source;
+
+  if (source === "simulation") {
+    output.simulationNote =
+      "Connect GA4, Google Search Console, and Google Ads in Settings to enable live data. Current output is AI-generated using your business profile and industry benchmarks as context.";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

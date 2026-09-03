@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -34,6 +35,62 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
     .map((d) => d.trim())
     .filter(Boolean);
 
+  // --- Live API: Ahrefs → Semrush ---
+  let liveDataSection = "";
+  let source: "live" | "simulation" = "simulation";
+
+  const ahrefsIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
+  });
+
+  if (ahrefsIntegration?.encryptedCredentials && domains.length > 0) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
+      const results: Record<string, unknown>[] = [];
+      for (const domain of domains.slice(0, 3)) {
+        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
+        const res = await fetch(url, { headers: { "Accept": "application/json" } });
+        if (res.ok) {
+          const data = await res.json() as unknown;
+          results.push({ domain, data });
+        }
+      }
+      if (results.length > 0) {
+        liveDataSection = `\n\nLIVE AHREFS KEYWORD DATA per competitor:\n${JSON.stringify(results, null, 2)}\n\nUse this real keyword data to identify what each competitor is actually ranking for. Base estimatedNewKeywords on this data.`;
+        source = "live";
+      }
+    } catch {
+      // fall through to Semrush
+    }
+  }
+
+  if (source === "simulation") {
+    const semrushIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
+    });
+    if (semrushIntegration?.encryptedCredentials && domains.length > 0) {
+      try {
+        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
+        const results: { domain: string; data: string }[] = [];
+        for (const domain of domains.slice(0, 3)) {
+          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const text = await res.text();
+            results.push({ domain, data: text });
+          }
+        }
+        if (results.length > 0) {
+          liveDataSection = `\n\nLIVE SEMRUSH DOMAIN ORGANIC DATA per competitor (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nBase estimatedNewKeywords and keyword intent analysis on this real organic keyword data.`;
+          source = "live";
+        }
+      } catch {
+        // fall through to simulation
+      }
+    }
+  }
+  // --- End live API ---
+
   const systemPrompt = [
     "You are a competitive intelligence analyst for SEO and content strategy.",
     "Focus on actionable findings — what should the client DO differently based on competitor moves?",
@@ -53,6 +110,7 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
     `Produce a competitive intelligence report for these domains: ${domains.join(", ")}`,
     `Tracking scope: ${trackingScope}`,
     `Report format: ${responseFormat}`,
+    liveDataSection,
     "",
     "For each competitor, analyse:",
     trackNewPages
@@ -141,6 +199,10 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
+  output.source = source;
+  if (source === "live") {
+    delete output.simulationNote;
+  }
 
   // Haiku 4.5 pricing: $0.80/M input, $4/M output
   const inputTokens = message.usage.input_tokens;

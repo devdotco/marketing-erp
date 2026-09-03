@@ -1,8 +1,30 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+// Encode RFC 2822 email string as base64url for Gmail API
+function toBase64Url(str: string): string {
+  return Buffer.from(str)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+// Build a minimal RFC 2822 email string
+function buildRfc2822(to: string, subject: string, body: string): string {
+  return [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: text/plain; charset=UTF-8`,
+    "",
+    body,
+  ].join("\r\n");
+}
 
 export const outreachHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -30,6 +52,79 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
       ].filter(Boolean).join("\n")
     : "";
 
+  // --- Live email integration: fetch sent-email context for personalization ---
+  let emailContextSummary = "";
+  let liveProvider: string | null = null;
+  let accessToken: string | null = null;
+  let emailSource = "simulation";
+
+  const gmailIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "GMAIL" } },
+  });
+  const m365Integration = !gmailIntegration
+    ? await prisma.integration.findUnique({
+        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "MICROSOFT_365" } },
+      })
+    : null;
+
+  if (gmailIntegration) {
+    try {
+      const creds = await decryptCredentials<{ access_token: string }>(gmailIntegration.encryptedCredentials);
+      accessToken = creds.access_token;
+      liveProvider = "GMAIL";
+
+      // Fetch recent sent emails for bounce/reply pattern context
+      const sentRes = await fetch(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=in:sent&maxResults=20",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (sentRes.ok) {
+        const sentData = (await sentRes.json()) as { messages?: { id: string }[] };
+        const snippets: string[] = [];
+        for (const msg of (sentData.messages ?? []).slice(0, 5)) {
+          const detailRes = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          if (detailRes.ok) {
+            const detail = (await detailRes.json()) as {
+              snippet?: string;
+              payload?: { headers?: { name: string; value: string }[] };
+            };
+            const subject = detail.payload?.headers?.find((h) => h.name === "Subject")?.value ?? "(no subject)";
+            snippets.push(`Subject: "${subject}" — ${(detail.snippet ?? "").slice(0, 80)}`);
+          }
+        }
+        emailContextSummary = `Recent sent emails (${sentData.messages?.length ?? 0} total):\n${snippets.join("\n")}`;
+        emailSource = "live";
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  } else if (m365Integration) {
+    try {
+      const creds = await decryptCredentials<{ access_token: string }>(m365Integration.encryptedCredentials);
+      accessToken = creds.access_token;
+      liveProvider = "MICROSOFT_365";
+
+      const sentRes = await fetch(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=20&$select=subject,bodyPreview",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (sentRes.ok) {
+        const sentData = (await sentRes.json()) as { value?: { subject: string; bodyPreview: string }[] };
+        const snippets = (sentData.value ?? []).slice(0, 5).map(
+          (m) => `Subject: "${m.subject}" — ${(m.bodyPreview ?? "").slice(0, 80)}`
+        );
+        emailContextSummary = `Recent sent emails (${sentData.value?.length ?? 0} fetched):\n${snippets.join("\n")}`;
+        emailSource = "live";
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  }
+
+  // --- Claude: generate outreach sequences ---
   const systemPrompt = [
     "You are a link building outreach specialist who writes cold emails that actually get replies.",
     "Emails must be short (under 100 words for the initial pitch), specific (reference something real about the prospect), and genuine (no fake compliments).",
@@ -56,24 +151,27 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
     `Personalisation level: ${personalisation}`,
     `Sending account: ${emailAccount}`,
     pitchAngle ? `Pitch angle / value offer: ${pitchAngle}` : "",
+    emailContextSummary
+      ? `\nContext from live sent emails (calibrate tone; avoid patterns already used):\n${emailContextSummary}`
+      : "",
     "",
     "Generate sequences for at least 5 representative prospects across different site types (blog, resource page, news site, directory, niche community).",
     "Each email body must be plain text — no HTML, no excessive formatting. Initial emails must be under 100 words.",
     "Follow-up emails should acknowledge the previous email briefly and add a new angle or piece of value.",
+    "Include a prospectEmail field on each sequence (use a realistic address for the domain).",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
       sequences: [
         {
           prospectDomain: "example.com",
+          prospectEmail: "contact@example.com",
           prospectName: null,
           emails: exampleSequence,
           pitchAngle: "The specific angle used for this prospect",
         },
       ],
       dailyVolume: dailyLimit,
-      simulationNote:
-        "Connect Gmail or Microsoft 365 in Settings to send these sequences directly. All follow-ups pause automatically on reply.",
     }),
   ].filter(Boolean).join("\n");
 
@@ -86,15 +184,97 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
 
   const rawText = message.content[0].type === "text" ? message.content[0].text : "";
   const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
+  let claudeOutput: Record<string, unknown>;
   try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { rawText };
+    claudeOutput = jsonMatch ? JSON.parse(jsonMatch[0]) : { rawText };
   } catch {
-    output = { rawText };
+    claudeOutput = { rawText };
   }
 
-  output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
+  // --- Create drafts (step-1 only) in Gmail or M365 — never auto-send ---
+  interface DraftRecord {
+    to: string;
+    subject: string;
+    body: string;
+    provider: string;
+    draftId?: string;
+    sequenceStep: number;
+    prospectDomain: string;
+  }
+
+  const drafts: DraftRecord[] = [];
+
+  const sequences = (claudeOutput.sequences as Array<{
+    prospectDomain: string;
+    prospectEmail?: string;
+    emails: Array<{ subject: string; body: string; sequenceStep: number }>;
+  }>) ?? [];
+
+  if (liveProvider && accessToken && sequences.length > 0) {
+    for (const seq of sequences.slice(0, 3)) {
+      const firstEmail = seq.emails[0];
+      if (!firstEmail) continue;
+
+      const toAddress = seq.prospectEmail ?? `contact@${seq.prospectDomain}`;
+      let draftId: string | undefined;
+
+      if (liveProvider === "GMAIL") {
+        const raw = toBase64Url(buildRfc2822(toAddress, firstEmail.subject, firstEmail.body));
+        const draftRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message: { raw } }),
+        });
+        if (draftRes.ok) {
+          const draftData = (await draftRes.json()) as { id: string };
+          draftId = draftData.id;
+        }
+      } else if (liveProvider === "MICROSOFT_365") {
+        const draftRes = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            subject: firstEmail.subject,
+            body: { contentType: "Text", content: firstEmail.body },
+            toRecipients: [{ emailAddress: { address: toAddress } }],
+          }),
+        });
+        if (draftRes.ok) {
+          const draftData = (await draftRes.json()) as { id: string };
+          draftId = draftData.id;
+        }
+      }
+
+      drafts.push({
+        to: toAddress,
+        subject: firstEmail.subject,
+        body: firstEmail.body,
+        provider: liveProvider,
+        draftId,
+        sequenceStep: firstEmail.sequenceStep,
+        prospectDomain: seq.prospectDomain,
+      });
+    }
+  }
+
+  const output: Record<string, unknown> = {
+    ...claudeOutput,
+    drafts,
+    source: emailSource,
+    generatedAt: new Date().toISOString(),
+    workspaceId: run.agentConfig.workspaceId,
+  };
+
+  if (emailSource === "simulation") {
+    output.simulationNote =
+      "Connect Gmail or Microsoft 365 in Settings to send these sequences directly. All follow-ups pause automatically on reply.";
+  }
 
   // Sonnet 5 pricing: $3/M input, $15/M output
   const inputTokens = message.usage.input_tokens;

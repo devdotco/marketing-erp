@@ -1,8 +1,99 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+// --- Mailchimp helpers ---
+function mailchimpAuthHeader(apiKey: string): string {
+  return "Basic " + Buffer.from(`anystring:${apiKey}`).toString("base64");
+}
+
+async function fetchMailchimpCampaigns(apiKey: string, server: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://${server}.api.mailchimp.com/3.0/campaigns?count=10&status=sent`,
+    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
+  );
+  if (!res.ok) throw new Error(`Mailchimp campaigns error: ${res.status}`);
+  const data = (await res.json()) as { campaigns?: unknown[] };
+  return data.campaigns ?? [];
+}
+
+async function fetchMailchimpAudiences(apiKey: string, server: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://${server}.api.mailchimp.com/3.0/lists`,
+    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
+  );
+  if (!res.ok) throw new Error(`Mailchimp lists error: ${res.status}`);
+  const data = (await res.json()) as { lists?: unknown[] };
+  return data.lists ?? [];
+}
+
+async function createMailchimpDraft(
+  apiKey: string,
+  server: string,
+  listId: string,
+  subjectLine: string,
+  title: string,
+  fromName: string,
+  replyTo: string
+): Promise<string> {
+  const res = await fetch(`https://${server}.api.mailchimp.com/3.0/campaigns`, {
+    method: "POST",
+    headers: {
+      Authorization: mailchimpAuthHeader(apiKey),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      type: "regular",
+      recipients: { list_id: listId },
+      settings: { subject_line: subjectLine, title, from_name: fromName, reply_to: replyTo },
+    }),
+  });
+  if (!res.ok) throw new Error(`Mailchimp create draft error: ${res.status}`);
+  const data = (await res.json()) as { id?: string };
+  return data.id ?? "";
+}
+
+// --- Klaviyo helpers ---
+function klaviyoHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Klaviyo-API-Key ${apiKey}`,
+    revision: "2024-10-15",
+    "Content-Type": "application/json",
+  };
+}
+
+async function fetchKlaviyoCampaigns(apiKey: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://a.klaviyo.com/api/campaigns/?filter=equals(messages.channel,'email')`,
+    { headers: klaviyoHeaders(apiKey) }
+  );
+  if (!res.ok) throw new Error(`Klaviyo campaigns error: ${res.status}`);
+  const data = (await res.json()) as { data?: unknown[] };
+  return data.data ?? [];
+}
+
+async function createKlaviyoDraft(apiKey: string, name: string): Promise<string> {
+  const res = await fetch(`https://a.klaviyo.com/api/campaigns/`, {
+    method: "POST",
+    headers: klaviyoHeaders(apiKey),
+    body: JSON.stringify({
+      data: {
+        type: "campaign",
+        attributes: {
+          name,
+          audiences: { included: [] },
+          send_strategy: { method: "static" },
+        },
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`Klaviyo create draft error: ${res.status}`);
+  const data = (await res.json()) as { data?: { id?: string } };
+  return data.data?.id ?? "";
+}
 
 export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -18,6 +109,75 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
+
+  // --- Live ESP data ---
+  let liveContext = "";
+  let source = "simulation";
+  let espProvider: "MAILCHIMP" | "KLAVIYO" | null = null;
+  let mailchimpCreds: { apiKey: string; server: string } | null = null;
+  let klaviyoCreds: { apiKey: string } | null = null;
+  let mailchimpAudienceId = "";
+
+  try {
+    const mailchimpIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "MAILCHIMP",
+        },
+      },
+    });
+
+    if (mailchimpIntegration?.encryptedCredentials) {
+      mailchimpCreds = await decryptCredentials<{ apiKey: string; server: string }>(
+        mailchimpIntegration.encryptedCredentials
+      );
+      const [campaigns, audiences] = await Promise.all([
+        fetchMailchimpCampaigns(mailchimpCreds.apiKey, mailchimpCreds.server),
+        fetchMailchimpAudiences(mailchimpCreds.apiKey, mailchimpCreds.server),
+      ]);
+      if (audiences.length > 0) {
+        mailchimpAudienceId = ((audiences[0] as Record<string, unknown>).id as string) ?? "";
+      }
+      liveContext = `\nMailchimp Account Data:\nAudience lists: ${JSON.stringify(
+        audiences.slice(0, 5),
+        null,
+        2
+      )}\nRecent sent campaigns (with performance stats): ${JSON.stringify(
+        campaigns.slice(0, 5),
+        null,
+        2
+      )}`;
+      source = "live";
+      espProvider = "MAILCHIMP";
+    } else {
+      const klaviyoIntegration = await prisma.integration.findUnique({
+        where: {
+          workspaceId_provider: {
+            workspaceId: run.agentConfig.workspaceId,
+            provider: "KLAVIYO",
+          },
+        },
+      });
+
+      if (klaviyoIntegration?.encryptedCredentials) {
+        klaviyoCreds = await decryptCredentials<{ apiKey: string }>(
+          klaviyoIntegration.encryptedCredentials
+        );
+        const campaigns = await fetchKlaviyoCampaigns(klaviyoCreds.apiKey);
+        liveContext = `\nKlaviyo Account Data:\nRecent email campaigns: ${JSON.stringify(
+          campaigns.slice(0, 5),
+          null,
+          2
+        )}`;
+        source = "live";
+        espProvider = "KLAVIYO";
+      }
+    }
+  } catch {
+    liveContext = "";
+    source = "simulation";
+  }
 
   const systemPrompt = `You are an expert email marketing strategist specialising in behavioural segmentation, ESP automation, and revenue-driven copy. You craft multi-email sequences for B2B SaaS companies that balance personalisation with deliverability. You produce detailed, production-ready campaign blueprints. Always respond with valid JSON only — no markdown fences, no commentary outside the JSON object.`;
 
@@ -51,6 +211,7 @@ Campaign Configuration:
 - ESP Target: ${espTarget}
 - Primary CTA URL: ${ctaUrl || "https://example.com/get-started"}
 - Rewrite Underperformers: ${rewriteUnderperformers}
+${liveContext ? `\nReal ESP Account Data (use this to inform targeting recommendations and benchmark performance against existing campaigns):\n${liveContext}` : ""}
 
 Produce a comprehensive campaign blueprint. Each email must have complete, copy-ready body text (minimum 150 words of HTML body). Return JSON matching this exact shape:
 
@@ -127,6 +288,56 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
     output = { result: rawText };
   }
 
+  // --- Create draft in ESP ---
+  if (espProvider === "MAILCHIMP" && mailchimpCreds && mailchimpAudienceId) {
+    try {
+      const campaignName =
+        typeof output.campaignName === "string" ? output.campaignName : "AI Campaign";
+      const firstEmail =
+        Array.isArray(output.emailSequence) && output.emailSequence.length > 0
+          ? (output.emailSequence[0] as Record<string, unknown>)
+          : null;
+      const subjectLine =
+        typeof firstEmail?.subjectLine === "string" ? firstEmail.subjectLine : campaignName;
+      const fromName = businessProfile?.businessName ?? "Marketing";
+      const hostname = businessProfile?.websiteUrl
+        ? (() => {
+            try {
+              return new URL(businessProfile.websiteUrl).hostname;
+            } catch {
+              return "example.com";
+            }
+          })()
+        : "example.com";
+      const replyTo = `hello@${hostname}`;
+
+      const draftId = await createMailchimpDraft(
+        mailchimpCreds.apiKey,
+        mailchimpCreds.server,
+        mailchimpAudienceId,
+        subjectLine,
+        campaignName,
+        fromName,
+        replyTo
+      );
+      output.espDraftId = draftId;
+      output.espDraftProvider = "MAILCHIMP";
+    } catch {
+      // Non-fatal — keep generated content
+    }
+  } else if (espProvider === "KLAVIYO" && klaviyoCreds) {
+    try {
+      const campaignName =
+        typeof output.campaignName === "string" ? output.campaignName : "AI Campaign";
+      const draftId = await createKlaviyoDraft(klaviyoCreds.apiKey, campaignName);
+      output.espDraftId = draftId;
+      output.espDraftProvider = "KLAVIYO";
+    } catch {
+      // Non-fatal — keep generated content
+    }
+  }
+
+  output.source = source;
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
 

@@ -1,8 +1,13 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+function formatDate(d: Date): string {
+  return d.toISOString().split("T")[0];
+}
 
 export const rankTrackerHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -17,7 +22,119 @@ export const rankTrackerHandler: AgentHandler = async (run, updateStatus) => {
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
-  const systemPrompt = `You are an SEO rank tracking analyst. Your job is to simulate daily position tracking data, identify meaningful trend breaks, and flag changes that exceed normal movement bands.
+  // --- Live GSC data fetch ---
+  let gscDataContext = "";
+  let isLive = false;
+
+  const integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+      },
+    },
+  });
+
+  if (integration) {
+    try {
+      const creds = await decryptCredentials<{
+        access_token: string;
+        property_url: string;
+      }>(integration.encryptedCredentials);
+
+      const propertyUrl = creds.property_url || gscProperty;
+      const encodedUrl = encodeURIComponent(propertyUrl);
+      const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${creds.access_token}`,
+        "Content-Type": "application/json",
+      };
+
+      const today = new Date();
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const ninetyDaysAgo = new Date(yesterday);
+      ninetyDaysAgo.setDate(yesterday.getDate() - 89);
+
+      type GscRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
+      type GscResponse = { rows?: GscRow[] };
+
+      // Fetch last 90 days of data by query
+      const res = await fetch(apiBase, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          startDate: formatDate(ninetyDaysAgo),
+          endDate: formatDate(yesterday),
+          dimensions: ["query", "page"],
+          rowLimit: 25000,
+        }),
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as GscResponse;
+        const rows = data.rows ?? [];
+
+        // Parse tracked keywords into a normalized set for filtering
+        const trackedSet = new Set(
+          trackingKeywords
+            .split(/[\n,]+/)
+            .map((k) => k.trim().toLowerCase())
+            .filter(Boolean)
+        );
+
+        // Filter to tracked keywords if configured, otherwise take top 500 by clicks
+        const filteredRows =
+          trackedSet.size > 0
+            ? rows.filter((r) => trackedSet.has(r.keys[0].toLowerCase()))
+            : rows.sort((a, b) => b.clicks - a.clicks).slice(0, 500);
+
+        // Aggregate by query (sum across pages)
+        const queryMap = new Map<
+          string,
+          { page: string; clicks: number; impressions: number; ctr: number; position: number }
+        >();
+        for (const row of filteredRows) {
+          const query = row.keys[0];
+          const existing = queryMap.get(query);
+          if (!existing || row.clicks > existing.clicks) {
+            queryMap.set(query, {
+              page: row.keys[1],
+              clicks: row.clicks,
+              impressions: row.impressions,
+              ctr: row.ctr,
+              position: row.position,
+            });
+          }
+        }
+
+        const queryList = Array.from(queryMap.entries())
+          .sort(([, a], [, b]) => a.position - b.position)
+          .map(([query, d]) => ({
+            query,
+            position: d.position,
+            page: d.page,
+            clicks90d: d.clicks,
+            impressions90d: d.impressions,
+            ctr90d: d.ctr,
+          }));
+
+        gscDataContext = `REAL GSC DATA — Last 90 days (${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)})
+Property: ${propertyUrl}
+Total queries with data: ${rows.length}
+${trackedSet.size > 0 ? `Tracked keywords matched: ${queryList.length} of ${trackedSet.size} configured` : `Top ${queryList.length} queries by clicks shown`}
+
+Query position data (sorted by position, ascending):
+${JSON.stringify(queryList, null, 2)}`;
+
+        isLive = true;
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  }
+
+  const systemPrompt = `You are an SEO rank tracking analyst. Your job is to ${isLive ? "analyze real GSC position data" : "simulate daily position tracking data"}, identify meaningful trend breaks, and flag changes that exceed normal movement bands.
 
 Business context:
 - Business: ${businessProfile?.businessName ?? "Unknown"}
@@ -88,7 +205,29 @@ Return ONLY valid JSON with no markdown fencing or explanation. Follow this exac
   }
 }`;
 
-  const userPrompt = `Simulate daily rank tracking for this keyword set for a ${businessProfile?.businessName ?? "business"} website.
+  const userPrompt = isLive
+    ? `Analyze the following REAL Google Search Console rank data for ${businessProfile?.businessName ?? "this business"}.
+
+Keywords configured to track:
+${trackingKeywords || "All tracked queries"}
+
+Competitors:
+${competitorDomains || "None specified"}
+
+GSC Property: ${gscProperty || integration ? "Connected" : "Not connected"}
+Alert threshold: ${alertThreshold} positions
+
+${gscDataContext}
+
+Using the real position data above:
+1. Map each tracked keyword to its current position from the GSC data
+2. Estimate previousPosition by adding realistic ±1-5 position variance (90-day aggregate doesn't include daily history — note this)
+3. Flag any keyword at position > ${alertThreshold} from an assumed prior good position
+4. Identify keywords in top 3, top 10 based on actual position data
+5. Generate competitor snapshot based on position gaps (actual competitor data is simulated — note this)
+6. Set inAlertZone: true for any keyword where position > ${alertThreshold + 10} (indicating potential alert)
+Note: previousPosition and change values are estimated since 90-day aggregates don't contain day-over-day history.`
+    : `Simulate daily rank tracking for this keyword set for a ${businessProfile?.businessName ?? "business"} website.
 
 Keywords to track:
 ${trackingKeywords}
@@ -124,8 +263,12 @@ Generate realistic rank tracking data that shows:
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect Google Search Console in Settings to enable live daily rank tracking. Real integration also pulls Ahrefs/Semrush rank data for cross-validation and competitor domain tracking.";
+  output.source = isLive ? "live" : "simulation";
+
+  if (!isLive) {
+    output.simulationNote =
+      "Connect Google Search Console in Settings to enable live daily rank tracking. Real integration also pulls Ahrefs/Semrush rank data for cross-validation and competitor domain tracking.";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

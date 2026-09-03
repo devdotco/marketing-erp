@@ -1,8 +1,27 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+interface GbpReview {
+  reviewId: string;
+  comment?: string;
+  starRating: string;
+  createTime: string;
+  reviewer: { displayName: string };
+  reviewReply?: unknown;
+}
+
+// Maps GBP's string star ratings to numeric values for display
+const starRatingMap: Record<string, number> = {
+  ONE: 1,
+  TWO: 2,
+  THREE: 3,
+  FOUR: 4,
+  FIVE: 5,
+};
 
 export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -17,12 +36,80 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
+  // --- Live GBP integration ---
+  const integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_BUSINESS_PROFILE",
+      },
+    },
+  });
+
+  let unansweredReviews: GbpReview[] = [];
+  let isLive = false;
+
+  if (integration) {
+    try {
+      const gbpCreds = await decryptCredentials<{
+        access_token: string;
+        account_id: string;
+        location_id: string;
+      }>(integration.encryptedCredentials);
+
+      const url = `https://mybusiness.googleapis.com/v4/accounts/${gbpCreds.account_id}/locations/${gbpCreds.location_id}/reviews`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${gbpCreds.access_token}` },
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as { reviews?: GbpReview[] };
+        unansweredReviews = (data.reviews ?? []).filter((r) => !r.reviewReply);
+        isLive = true;
+      }
+    } catch {
+      // decryption or network error — fall back to simulation
+      unansweredReviews = [];
+      isLive = false;
+    }
+  }
+  // --- end live GBP setup ---
+
   const systemPrompt = `You are a reputation management specialist who helps businesses build social proof through ethical review generation and thoughtful public responses. You craft review request sequences that trigger at peak satisfaction moments, and draft authentic, on-brand responses to every review — positive, neutral, and negative. Negative responses always de-escalate without being defensive. Always respond with valid JSON only — no markdown fences, no text outside the JSON object.`;
 
   const platformList =
     reviewPlatforms === "All"
       ? ["Google Business Profile", "Trustpilot", "G2"]
       : [reviewPlatforms];
+
+  // Build live reviews context for the prompt
+  const liveReviewsSection =
+    isLive && unansweredReviews.length > 0
+      ? [
+          "",
+          `LIVE DATA — ${unansweredReviews.length} unanswered review(s) fetched from Google Business Profile:`,
+          ...unansweredReviews.map((r, i) => {
+            const stars = starRatingMap[r.starRating] ?? "?";
+            return `Review ${i + 1}: ${stars}/5 stars — by ${r.reviewer.displayName} on ${r.createTime}\n"${r.comment ?? "(no comment)"}"`;
+          }),
+          "",
+          `For each of the ${unansweredReviews.length} live review(s) above, generate a personalised reply in the liveReviewDrafts array below.`,
+        ].join("\n")
+      : "";
+
+  const liveReviewDraftsShape =
+    isLive && unansweredReviews.length > 0
+      ? `,
+  "liveReviewDrafts": [
+    {
+      "reviewId": "<GBP reviewId>",
+      "reviewerName": "<reviewer display name>",
+      "rating": 0,
+      "originalComment": "<original review text>",
+      "suggestedReply": "<personalised reply that acknowledges the specific feedback — not a template>"
+    }
+  ]`
+      : "";
 
   const userPrompt = `Generate a complete Review Engine playbook for the following business.
 
@@ -38,14 +125,14 @@ Review Engine Configuration:
 - Request Trigger: ${requestTrigger}
 - Response Style: ${responseStyle}
 - Negative Review Escalation: ${negativeEscalation}
-
+${liveReviewsSection}
 Produce:
 1. Review request messages for each platform (email + optional SMS) triggered at ${requestTrigger}
 2. Response templates for positive reviews (4-5 stars)
 3. Response templates for neutral reviews (3 stars)
 4. Response templates for negative reviews (1-2 stars) with de-escalation
 5. ${negativeEscalation ? "An escalation playbook for severe negative reviews" : "Standard handling only"}
-6. Simulated current review snapshot per platform
+6. Simulated current review snapshot per platform${isLive ? " (mark as simulated since live snapshot is provided separately)" : ""}
 
 Return JSON matching this exact shape:
 
@@ -145,8 +232,12 @@ Return JSON matching this exact shape:
     "targetMonthlyNewReviews": 0,
     "responseTimeTarget": "<e.g. within 24 hours>",
     "currentResponseRate": "<pct>"
-  },
-  "simulationNote": "Connect Google Business Profile, Trustpilot, and G2 APIs in Settings to enable live review ingestion, automatic response posting, and real-time alerts."
+  }${
+    isLive
+      ? liveReviewDraftsShape
+      : `,
+  "simulationNote": "Connect Google Business Profile, Trustpilot, and G2 APIs in Settings to enable live review ingestion, automatic response posting, and real-time alerts."`
+  }
 }`;
 
   const message = await client.messages.create({
@@ -165,10 +256,20 @@ Return JSON matching this exact shape:
     output = { result: rawText };
   }
 
+  // Mark source and clean up simulationNote when live
+  if (isLive) {
+    output.source = "live";
+    output.unansweredReviewCount = unansweredReviews.length;
+    delete output.simulationNote;
+  } else {
+    output.source = "simulation";
+  }
+
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
 
-  const requireApproval = config.requireApproval !== false;
+  // Reviews always require approval — never auto-submit replies
+  const requireApproval = true;
   if (requireApproval) {
     await updateStatus("AWAITING_APPROVAL", output);
   }

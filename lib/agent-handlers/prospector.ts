@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -30,6 +31,67 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
       ].filter(Boolean).join("\n")
     : "";
 
+  // --- Live API: Ahrefs → Semrush ---
+  // Use competitor domains from business profile as backlink targets to surface real prospects
+  let liveDataSection = "";
+  let source: "live" | "simulation" = "simulation";
+
+  const competitorTargets = businessProfile?.competitors ?? [];
+
+  const ahrefsIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
+  });
+
+  if (ahrefsIntegration?.encryptedCredentials && competitorTargets.length > 0) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
+      const results: Record<string, unknown>[] = [];
+      for (const competitor of competitorTargets.slice(0, 2)) {
+        const domain = competitor.replace(/^https?:\/\//, "").replace(/\/$/, "");
+        const url = `https://apiv2.ahrefs.com/v3/site-explorer/backlinks?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
+        const res = await fetch(url, { headers: { "Accept": "application/json" } });
+        if (res.ok) {
+          const data = await res.json() as unknown;
+          results.push({ competitor: domain, backlinks: data });
+        }
+      }
+      if (results.length > 0) {
+        liveDataSection = `\n\nLIVE AHREFS BACKLINK DATA for competitor domains:\n${JSON.stringify(results, null, 2)}\n\nThe domains linking to our competitors are prime link prospects. Include the highest-DR, most topically relevant referring domains from this data as your top prospects. Use the real DR values and domains from this data wherever possible.`;
+        source = "live";
+      }
+    } catch {
+      // fall through to Semrush
+    }
+  }
+
+  if (source === "simulation") {
+    const semrushIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
+    });
+    if (semrushIntegration?.encryptedCredentials && competitorTargets.length > 0) {
+      try {
+        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
+        const results: { domain: string; data: string }[] = [];
+        for (const competitor of competitorTargets.slice(0, 2)) {
+          const domain = competitor.replace(/^https?:\/\//, "").replace(/\/$/, "");
+          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const text = await res.text();
+            results.push({ domain, data: text });
+          }
+        }
+        if (results.length > 0) {
+          liveDataSection = `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nUse this data to identify topically relevant domains and realistic traffic/DR estimates for link prospects in this niche.`;
+          source = "live";
+        }
+      } catch {
+        // fall through to simulation
+      }
+    }
+  }
+  // --- End live API ---
+
   const systemPrompt = [
     "You are a link building prospector specialising in finding high-quality, topically relevant link opportunities.",
     "Quality over quantity. A domain with DR 40 and 5k monthly traffic in the exact niche beats a DR 70 site with 200k traffic in an unrelated niche.",
@@ -40,6 +102,7 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
 
   const userPrompt = [
     `Generate ${prospectCount} link building prospects for the following criteria.`,
+    liveDataSection,
     targetTopics ? `Target topics / niche: ${targetTopics}` : "",
     `Minimum estimated Domain Rating: ${domainRatingMin}`,
     `Minimum estimated monthly traffic: ${trafficMin}`,
@@ -93,6 +156,10 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
+  output.source = source;
+  if (source === "live") {
+    delete output.simulationNote;
+  }
 
   // Haiku 4.5 pricing: $0.80/M input, $4/M output
   const inputTokens = message.usage.input_tokens;

@@ -1,8 +1,100 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+// --- Mailchimp helpers ---
+function mailchimpAuthHeader(apiKey: string): string {
+  return "Basic " + Buffer.from(`anystring:${apiKey}`).toString("base64");
+}
+
+async function fetchMailchimpSentCampaigns(apiKey: string, server: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://${server}.api.mailchimp.com/3.0/campaigns?count=5&status=sent`,
+    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
+  );
+  if (!res.ok) throw new Error(`Mailchimp campaigns error: ${res.status}`);
+  const data = (await res.json()) as { campaigns?: unknown[] };
+  return data.campaigns ?? [];
+}
+
+async function fetchMailchimpAudiences(apiKey: string, server: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://${server}.api.mailchimp.com/3.0/lists`,
+    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
+  );
+  if (!res.ok) throw new Error(`Mailchimp lists error: ${res.status}`);
+  const data = (await res.json()) as { lists?: unknown[] };
+  return data.lists ?? [];
+}
+
+async function createMailchimpDraft(
+  apiKey: string,
+  server: string,
+  listId: string,
+  subjectLine: string,
+  title: string,
+  fromName: string,
+  replyTo: string
+): Promise<string> {
+  const res = await fetch(`https://${server}.api.mailchimp.com/3.0/campaigns`, {
+    method: "POST",
+    headers: {
+      Authorization: mailchimpAuthHeader(apiKey),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      type: "regular",
+      recipients: { list_id: listId },
+      settings: { subject_line: subjectLine, title, from_name: fromName, reply_to: replyTo },
+    }),
+  });
+  if (!res.ok) throw new Error(`Mailchimp create draft error: ${res.status}`);
+  const data = (await res.json()) as { id?: string };
+  return data.id ?? "";
+}
+
+// --- Klaviyo helpers ---
+function klaviyoHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Klaviyo-API-Key ${apiKey}`,
+    revision: "2024-10-15",
+    "Content-Type": "application/json",
+  };
+}
+
+async function fetchKlaviyoSentCampaigns(apiKey: string): Promise<unknown[]> {
+  const res = await fetch(
+    `https://a.klaviyo.com/api/campaigns/?filter=equals(messages.channel,'email')`,
+    { headers: klaviyoHeaders(apiKey) }
+  );
+  if (!res.ok) throw new Error(`Klaviyo campaigns error: ${res.status}`);
+  const data = (await res.json()) as { data?: unknown[] };
+  // Return first 5
+  return (data.data ?? []).slice(0, 5);
+}
+
+async function createKlaviyoDraft(apiKey: string, name: string): Promise<string> {
+  const res = await fetch(`https://a.klaviyo.com/api/campaigns/`, {
+    method: "POST",
+    headers: klaviyoHeaders(apiKey),
+    body: JSON.stringify({
+      data: {
+        type: "campaign",
+        attributes: {
+          name,
+          audiences: { included: [] },
+          send_strategy: { method: "static" },
+        },
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`Klaviyo create draft error: ${res.status}`);
+  const data = (await res.json()) as { data?: { id?: string } };
+  return data.data?.id ?? "";
+}
 
 export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -48,6 +140,71 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
         .join("\n")
     : "";
 
+  // --- Live ESP data ---
+  let liveContext = "";
+  let source = "simulation";
+  let espProvider: "MAILCHIMP" | "KLAVIYO" | null = null;
+  let mailchimpCreds: { apiKey: string; server: string } | null = null;
+  let klaviyoCreds: { apiKey: string } | null = null;
+  let mailchimpAudienceId = "";
+
+  try {
+    const mailchimpIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "MAILCHIMP",
+        },
+      },
+    });
+
+    if (mailchimpIntegration?.encryptedCredentials) {
+      mailchimpCreds = await decryptCredentials<{ apiKey: string; server: string }>(
+        mailchimpIntegration.encryptedCredentials
+      );
+      const [campaigns, audiences] = await Promise.all([
+        fetchMailchimpSentCampaigns(mailchimpCreds.apiKey, mailchimpCreds.server),
+        fetchMailchimpAudiences(mailchimpCreds.apiKey, mailchimpCreds.server),
+      ]);
+      if (audiences.length > 0) {
+        mailchimpAudienceId = ((audiences[0] as Record<string, unknown>).id as string) ?? "";
+      }
+      liveContext = `\nMailchimp — last 5 sent campaigns (use open/click rates to understand what subject lines and content styles perform well for this audience):\n${JSON.stringify(
+        campaigns,
+        null,
+        2
+      )}`;
+      source = "live";
+      espProvider = "MAILCHIMP";
+    } else {
+      const klaviyoIntegration = await prisma.integration.findUnique({
+        where: {
+          workspaceId_provider: {
+            workspaceId: run.agentConfig.workspaceId,
+            provider: "KLAVIYO",
+          },
+        },
+      });
+
+      if (klaviyoIntegration?.encryptedCredentials) {
+        klaviyoCreds = await decryptCredentials<{ apiKey: string }>(
+          klaviyoIntegration.encryptedCredentials
+        );
+        const campaigns = await fetchKlaviyoSentCampaigns(klaviyoCreds.apiKey);
+        liveContext = `\nKlaviyo — last 5 email campaigns (use performance data to understand what resonates with this audience):\n${JSON.stringify(
+          campaigns,
+          null,
+          2
+        )}`;
+        source = "live";
+        espProvider = "KLAVIYO";
+      }
+    }
+  } catch {
+    liveContext = "";
+    source = "simulation";
+  }
+
   const systemPrompt = [
     "You are a senior newsletter editor who writes with a strong editorial voice and through-line.",
     "Each issue has a unifying theme that ties all stories together — rather than being a disconnected list of links.",
@@ -75,6 +232,9 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
     `Include exactly ${numberOfStories} stories, each connected by the editorial through-line of the issue theme.`,
     ctaText ? `Primary CTA for this issue: ${ctaText}` : "",
     espNote,
+    liveContext
+      ? `\nReal ESP performance data — use these past campaign results to inform your subject line style, story angles, and content tone:\n${liveContext}`
+      : "",
     "",
     "Requirements:",
     "- The editorial note should reference the theme personally and set up why it matters right now.",
@@ -134,6 +294,55 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
     output = { result: rawText };
   }
 
+  // --- Create draft in ESP ---
+  if (espProvider === "MAILCHIMP" && mailchimpCreds && mailchimpAudienceId) {
+    try {
+      const issueTitle =
+        typeof output.subjectLine === "string"
+          ? output.subjectLine
+          : `${newsletterName} — New Issue`;
+      const fromName =
+        typeof output.fromName === "string" ? output.fromName : newsletterName;
+      const hostname = businessProfile?.websiteUrl
+        ? (() => {
+            try {
+              return new URL(businessProfile.websiteUrl).hostname;
+            } catch {
+              return "example.com";
+            }
+          })()
+        : "example.com";
+      const replyTo = `hello@${hostname}`;
+
+      const draftId = await createMailchimpDraft(
+        mailchimpCreds.apiKey,
+        mailchimpCreds.server,
+        mailchimpAudienceId,
+        issueTitle,
+        issueTitle,
+        fromName,
+        replyTo
+      );
+      output.espDraftId = draftId;
+      output.espDraftProvider = "MAILCHIMP";
+    } catch {
+      // Non-fatal — keep generated content
+    }
+  } else if (espProvider === "KLAVIYO" && klaviyoCreds) {
+    try {
+      const issueTitle =
+        typeof output.subjectLine === "string"
+          ? output.subjectLine
+          : `${newsletterName} — New Issue`;
+      const draftId = await createKlaviyoDraft(klaviyoCreds.apiKey, issueTitle);
+      output.espDraftId = draftId;
+      output.espDraftProvider = "KLAVIYO";
+    } catch {
+      // Non-fatal — keep generated content
+    }
+  }
+
+  output.source = source;
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
 

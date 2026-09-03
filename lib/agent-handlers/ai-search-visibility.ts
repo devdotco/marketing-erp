@@ -1,8 +1,13 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+function formatDate(d: Date): string {
+  return d.toISOString().split("T")[0];
+}
 
 export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -35,6 +40,127 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
 
   const resolvedSiteUrl = siteUrl || businessProfile?.websiteUrl || "";
 
+  // --- Live GSC branded query fetch ---
+  let gscBrandedContext = "";
+  let isLive = false;
+
+  const integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+      },
+    },
+  });
+
+  if (integration) {
+    try {
+      const creds = await decryptCredentials<{
+        access_token: string;
+        property_url: string;
+      }>(integration.encryptedCredentials);
+
+      const propertyUrl = creds.property_url || resolvedSiteUrl;
+      const encodedUrl = encodeURIComponent(propertyUrl);
+      const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${creds.access_token}`,
+        "Content-Type": "application/json",
+      };
+
+      const today = new Date();
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const ninetyDaysAgo = new Date(yesterday);
+      ninetyDaysAgo.setDate(yesterday.getDate() - 89);
+
+      type GscRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
+      type GscResponse = { rows?: GscRow[] };
+
+      const res = await fetch(apiBase, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          startDate: formatDate(ninetyDaysAgo),
+          endDate: formatDate(yesterday),
+          dimensions: ["query"],
+          rowLimit: 25000,
+        }),
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as GscResponse;
+        const rows = data.rows ?? [];
+
+        // Build brand name tokens for matching (business name + domain parts)
+        const brandTokens: string[] = [];
+        if (businessProfile?.businessName) {
+          // Break the name into words, filter short words
+          brandTokens.push(
+            ...businessProfile.businessName
+              .toLowerCase()
+              .split(/\s+/)
+              .filter((w) => w.length > 3)
+          );
+        }
+        if (resolvedSiteUrl) {
+          // Extract domain without TLD
+          const domainMatch = resolvedSiteUrl.match(/(?:https?:\/\/)?(?:www\.)?([^./]+)/);
+          if (domainMatch?.[1]) brandTokens.push(domainMatch[1].toLowerCase());
+        }
+
+        // Separate branded vs non-branded queries
+        const isBranded = (query: string): boolean => {
+          if (brandTokens.length === 0) return false;
+          const q = query.toLowerCase();
+          return brandTokens.some((t) => q.includes(t));
+        };
+
+        const brandedRows = rows
+          .filter((r) => isBranded(r.keys[0]))
+          .sort((a, b) => b.impressions - a.impressions)
+          .slice(0, 200);
+
+        const nonBrandedHighImpression = rows
+          .filter((r) => !isBranded(r.keys[0]))
+          .sort((a, b) => b.impressions - a.impressions)
+          .slice(0, 100);
+
+        const totalBrandedImpressions = brandedRows.reduce((s, r) => s + r.impressions, 0);
+        const totalBrandedClicks = brandedRows.reduce((s, r) => s + r.clicks, 0);
+        const avgBrandedPosition =
+          brandedRows.length > 0
+            ? brandedRows.reduce((s, r) => s + r.position, 0) / brandedRows.length
+            : 0;
+
+        const totalNonBrandedImpressions = nonBrandedHighImpression.reduce((s, r) => s + r.impressions, 0);
+        const totalNonBrandedClicks = nonBrandedHighImpression.reduce((s, r) => s + r.clicks, 0);
+
+        gscBrandedContext = `REAL GSC BRANDED + QUERY DATA (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
+Property: ${propertyUrl}
+Total queries with data: ${rows.length}
+Brand tokens used for matching: ${brandTokens.join(", ") || "none (no business name configured)"}
+
+BRANDED QUERIES (${brandedRows.length} matched):
+- Total branded impressions: ${totalBrandedImpressions}
+- Total branded clicks: ${totalBrandedClicks}
+- Avg branded position: ${avgBrandedPosition.toFixed(2)}
+Top branded queries:
+${JSON.stringify(brandedRows.map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, ctr: r.ctr, position: r.position })), null, 2)}
+
+TOP NON-BRANDED HIGH-IMPRESSION QUERIES (relevant for AI citation gap analysis):
+- Total impressions: ${totalNonBrandedImpressions}
+- Total clicks: ${totalNonBrandedClicks}
+Top queries:
+${JSON.stringify(nonBrandedHighImpression.map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, ctr: r.ctr, position: r.position })), null, 2)}`;
+
+        isLive = true;
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  }
+
   const systemPrompt = [
     "You are an AI search visibility specialist.",
     "Citation in LLM responses depends on: topical authority, schema markup, brand mention frequency, and content that directly answers user questions.",
@@ -64,7 +190,17 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
       ? `Competing domains to track in AI citations: ${competitorList.join(", ")}`
       : "",
     "",
-    "For each query, simulate how each major AI engine would likely respond:",
+    isLive
+      ? `REAL GSC DATA to inform your analysis:
+${gscBrandedContext}
+
+Use this real data to:
+- Assess brand authority strength from actual branded query volume and position
+- Identify topical gaps where non-branded high-impression queries have poor CTR (position > 10) — these are areas where AI engines likely cite competitors instead
+- Reference actual query volumes when explaining citation probability
+`
+      : "",
+    "For each test query, simulate how each major AI engine would likely respond:",
     "- Would the client's site be cited?",
     "- If yes, at what position?",
     "- Which competitors would more likely be cited, and why?",
@@ -83,6 +219,12 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
     JSON.stringify({
       siteUrl: resolvedSiteUrl,
       testDate: new Date().toISOString().split("T")[0],
+      source: isLive ? "live" : "simulation",
+      gscSummary: isLive
+        ? {
+            note: "Populated from real GSC data — see gscBrandedData field",
+          }
+        : null,
       queryResults: [
         {
           query: "example test query",
@@ -133,8 +275,9 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
           expectedImpact: "Expected improvement in citation probability...",
         },
       ],
-      simulationNote:
-        "These are AI-simulated citation predictions. Real citation testing requires querying each AI engine directly.",
+      simulationNote: isLive
+        ? null
+        : "These are AI-simulated citation predictions. Real citation testing requires querying each AI engine directly.",
     }),
   ].filter(Boolean).join("\n");
 
@@ -156,6 +299,7 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
+  output.source = isLive ? "live" : "simulation";
 
   // Haiku 4.5 pricing: $0.80/M input, $4/M output
   const inputTokens = message.usage.input_tokens;

@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -18,6 +19,60 @@ export const keywordResearchHandler: AgentHandler = async (run, updateStatus) =>
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
+
+  // --- Live API: Ahrefs → Semrush ---
+  let liveDataSection = "";
+  let source: "live" | "simulation" = "simulation";
+
+  const ahrefsIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
+  });
+
+  if (ahrefsIntegration?.encryptedCredentials) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
+      const domain =
+        businessProfile?.websiteUrl?.replace(/^https?:\/\//, "").replace(/\/$/, "") ??
+        seedKeywords.split(/[\s,]+/)[0] ??
+        "";
+      if (domain) {
+        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
+        const res = await fetch(url, { headers: { "Accept": "application/json" } });
+        if (res.ok) {
+          const data = await res.json() as unknown;
+          liveDataSection = `\n\nLIVE AHREFS DATA for "${domain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real keyword data (volume, difficulty, CPC) where available. Supplement with your own expertise for keywords not yet covered.`;
+          source = "live";
+        }
+      }
+    } catch {
+      // fall through to Semrush
+    }
+  }
+
+  if (source === "simulation") {
+    const semrushIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
+    });
+    if (semrushIntegration?.encryptedCredentials) {
+      try {
+        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
+        const firstKeyword = seedKeywords.split(/[\n,]+/)[0]?.trim() ?? "";
+        if (firstKeyword) {
+          const database = targetCountry.toLowerCase() === "us" ? "us" : targetCountry.toLowerCase();
+          const url = `https://api.semrush.com/?type=phrase_this&phrase=${encodeURIComponent(firstKeyword)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp,Co&database=${database}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const text = await res.text();
+            liveDataSection = `\n\nLIVE SEMRUSH DATA for "${firstKeyword}" (columns: Ph=keyword phrase, Po=position, Nq=monthly searches, Cp=CPC, Co=competition):\n${text}\n\nUse this real data to anchor keyword metrics (volume, CPC, competition). Extend from these seeds to build the full cluster set.`;
+            source = "live";
+          }
+        }
+      } catch {
+        // fall through to simulation
+      }
+    }
+  }
+  // --- End live API ---
 
   const systemPrompt = `You are an expert SEO strategist and keyword researcher with 15+ years of experience. Your task is to expand seed keywords into comprehensive keyword clusters with article briefs.
 
@@ -76,7 +131,7 @@ Return ONLY valid JSON with no markdown fencing or explanation. The JSON must fo
   const userPrompt = `Expand these seed keywords for a ${industry} business targeting ${targetCountry}:
 
 Seeds: ${seedKeywords}
-
+${liveDataSection}
 Generate up to ${maxKeywords} keywords total, grouped into clusters using the ${clusterMethod} clustering method.
 ${briefDepth === "Full" ? "Provide full article briefs with detailed outlines (5+ H2s with sub-H3s) for each cluster." : "Provide basic briefs with title, target keyword, and top 3 sections only."}
 Focus on realistic keyword metrics for the ${targetCountry} market.
@@ -101,8 +156,13 @@ Aim for at least 4 distinct clusters covering different buyer journey stages.`;
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect Ahrefs, Semrush, or Google Keyword Planner in Settings to enable live search volume, keyword difficulty, and CPC data";
+  output.source = source;
+  if (source === "live") {
+    delete output.simulationNote;
+  } else {
+    output.simulationNote =
+      "Connect Ahrefs, Semrush, or Google Keyword Planner in Settings to enable live search volume, keyword difficulty, and CPC data";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

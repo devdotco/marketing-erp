@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -96,6 +97,135 @@ export const blogWriterHandler: AgentHandler = async (run, updateStatus) => {
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {
     await updateStatus("AWAITING_APPROVAL", output);
+  }
+
+  // Auto-publish to CMS when approval is not required and an integration is configured
+  if (!requireApproval) {
+    const [wpIntegration, storyblokIntegration, webflowIntegration] = await Promise.all([
+      prisma.integration.findUnique({
+        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "WORDPRESS" } },
+      }),
+      prisma.integration.findUnique({
+        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "STORYBLOK" } },
+      }),
+      prisma.integration.findUnique({
+        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "WEBFLOW" } },
+      }),
+    ]);
+
+    const postTitle = String(output.title ?? "Untitled Post");
+    const postSlug = String(
+      output.slug ??
+      postTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+    );
+    const postContent = String(output.content ?? "");
+    const postMetaDesc = String(output.metaDescription ?? "");
+
+    // WordPress live publish
+    if (wpIntegration && postContent) {
+      try {
+        const creds = await decryptCredentials<{ siteUrl: string; username: string; applicationPassword: string }>(
+          wpIntegration.encryptedCredentials
+        );
+        const resp = await fetch(`${creds.siteUrl}/wp-json/wp/v2/posts`, {
+          method: "POST",
+          headers: {
+            Authorization: "Basic " + btoa(`${creds.username}:${creds.applicationPassword}`),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: postTitle,
+            content: postContent,
+            status: "draft",
+            categories: [],
+            tags: [],
+            meta: { _yoast_wpseo_title: postTitle, _yoast_wpseo_metadesc: postMetaDesc },
+          }),
+        });
+        if (!resp.ok) throw new Error(`WordPress API ${resp.status}: ${await resp.text()}`);
+        const result = await resp.json() as { id: number; link: string; status: string };
+        output.cmsPublish = {
+          source: "live",
+          cmsTarget: "WordPress",
+          publishStatus: result.status,
+          postId: String(result.id),
+          liveUrl: result.link,
+          publishedAt: new Date().toISOString(),
+        };
+      } catch {
+        // Non-fatal: content is still returned even if CMS publish fails
+      }
+    } else if (storyblokIntegration && postContent) {
+      // Storyblok live publish
+      try {
+        const creds = await decryptCredentials<{ spaceId: string; managementToken: string }>(
+          storyblokIntegration.encryptedCredentials
+        );
+        const resp = await fetch(`https://mapi.storyblok.com/v1/spaces/${creds.spaceId}/stories/`, {
+          method: "POST",
+          headers: {
+            Authorization: creds.managementToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            story: {
+              name: postTitle,
+              slug: postSlug,
+              content: {
+                component: "blog_post",
+                title: postTitle,
+                body: postContent,
+                meta_title: postTitle,
+                meta_description: postMetaDesc,
+              },
+            },
+          }),
+        });
+        if (!resp.ok) throw new Error(`Storyblok API ${resp.status}: ${await resp.text()}`);
+        const result = await resp.json() as { story: { id: number; full_slug: string } };
+        output.cmsPublish = {
+          source: "live",
+          cmsTarget: "Storyblok",
+          publishStatus: "draft",
+          postId: String(result.story.id),
+          liveUrl: `https://app.storyblok.com/#!/me/spaces/${creds.spaceId}/stories/0/0/${result.story.id}`,
+          publishedAt: new Date().toISOString(),
+        };
+      } catch {
+        // Non-fatal: content is still returned even if CMS publish fails
+      }
+    } else if (webflowIntegration && postContent) {
+      // Webflow live publish
+      try {
+        const creds = await decryptCredentials<{ siteId: string; collectionId: string; apiToken: string }>(
+          webflowIntegration.encryptedCredentials
+        );
+        const resp = await fetch(`https://api.webflow.com/v2/collections/${creds.collectionId}/items`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${creds.apiToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            isArchived: false,
+            isDraft: true,
+            fieldData: { name: postTitle, slug: postSlug, "post-body": postContent },
+          }),
+        });
+        if (!resp.ok) throw new Error(`Webflow API ${resp.status}: ${await resp.text()}`);
+        const result = await resp.json() as { id: string };
+        output.cmsPublish = {
+          source: "live",
+          cmsTarget: "Webflow",
+          publishStatus: "draft",
+          postId: result.id,
+          liveUrl: `https://webflow.com/design/${creds.siteId}`,
+          publishedAt: new Date().toISOString(),
+        };
+      } catch {
+        // Non-fatal: content is still returned even if CMS publish fails
+      }
+    }
   }
 
   return { output, costUsd };

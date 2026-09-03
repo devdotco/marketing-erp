@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -15,6 +16,68 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
   const calendarPeriod = typeof config.calendarPeriod === "string" ? config.calendarPeriod : "4 weeks";
 
   const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId: run.agentConfig.workspaceId } });
+
+  // --- Live API: Ahrefs → Semrush ---
+  // Pull keyword data for competitor URLs to ground content gap analysis in real data
+  let liveDataSection = "";
+  let source: "live" | "simulation" = "simulation";
+
+  const competitorDomains = competitorUrls
+    .split(/[\n,]+/)
+    .map((u) => u.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+    .filter(Boolean);
+
+  const ahrefsIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
+  });
+
+  if (ahrefsIntegration?.encryptedCredentials && competitorDomains.length > 0) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
+      const results: Record<string, unknown>[] = [];
+      for (const domain of competitorDomains.slice(0, 3)) {
+        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
+        const res = await fetch(url, { headers: { "Accept": "application/json" } });
+        if (res.ok) {
+          const data = await res.json() as unknown;
+          results.push({ domain, keywords: data });
+        }
+      }
+      if (results.length > 0) {
+        liveDataSection = `\n\nLIVE AHREFS COMPETITOR KEYWORD DATA:\n${JSON.stringify(results, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Ahrefs metrics`;
+        source = "live";
+      }
+    } catch {
+      // fall through to Semrush
+    }
+  }
+
+  if (source === "simulation") {
+    const semrushIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
+    });
+    if (semrushIntegration?.encryptedCredentials && competitorDomains.length > 0) {
+      try {
+        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
+        const results: { domain: string; data: string }[] = [];
+        for (const domain of competitorDomains.slice(0, 3)) {
+          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const text = await res.text();
+            results.push({ domain, data: text });
+          }
+        }
+        if (results.length > 0) {
+          liveDataSection = `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Semrush metrics`;
+          source = "live";
+        }
+      } catch {
+        // fall through to simulation
+      }
+    }
+  }
+  // --- End live API ---
 
   const systemPrompt = `You are a senior content strategist and SEO specialist who builds data-driven content calendars. You analyze competitor content gaps, near-ranking keyword opportunities, and audience search intent to surface the highest-impact topics. You score every topic by "winnability" — a composite of estimated search volume, keyword difficulty, business relevance, topical authority, and time-to-rank estimate. You think in clusters, not individual posts. Always return valid, minified JSON with no markdown fences.`;
 
@@ -33,7 +96,7 @@ ${focusKeywords || "Infer best keywords from business context and industry"}
 
 Competitor URLs to analyze for content gaps:
 ${competitorUrls || "Infer typical competitors from the industry"}
-
+${liveDataSection}
 Calendar period: ${calendarPeriod}
 
 Instructions:
@@ -133,8 +196,13 @@ Return this exact JSON structure (no markdown, no code fences):
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect Google Search Console in Settings to pull real near-ranking queries, impressions, and CTR data. Connect Ahrefs or Semrush to get live keyword difficulty and volume instead of estimates.";
+  output.source = source;
+  if (source === "live") {
+    delete output.simulationNote;
+  } else {
+    output.simulationNote =
+      "Connect Google Search Console in Settings to pull real near-ranking queries, impressions, and CTR data. Connect Ahrefs or Semrush to get live keyword difficulty and volume instead of estimates.";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

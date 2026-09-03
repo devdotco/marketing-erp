@@ -11,6 +11,31 @@ const AIMFOX_CAMPAIGN_MAP: Record<string, string> = {
   "DEV-03": "DEV-03-LI-V1",
 };
 
+async function callAimfoxMcp(
+  accessToken: string,
+  tool: string,
+  params: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  // Aimfox uses MCP over HTTP (https://mcp.aimfox.com) — no traditional REST API
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } = await import(
+    "@modelcontextprotocol/sdk/client/streamableHttp.js"
+  );
+
+  const mcpClient = new Client({ name: "marketing-erp", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL("https://mcp.aimfox.com"), {
+    requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+
+  await mcpClient.connect(transport);
+  try {
+    const result = await mcpClient.callTool({ name: tool, arguments: params });
+    return (result as { content?: unknown; result?: unknown }) as Record<string, unknown>;
+  } finally {
+    await mcpClient.close();
+  }
+}
+
 export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
   const config = (run.agentConfig.config ?? {}) as Record<string, unknown>;
@@ -19,8 +44,7 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
   const prospectId = (input.prospectId ?? config.prospectId) as string | undefined;
 
   if (!prospectId) {
-    const output = { error: "No prospectId in run.input.prospectId" };
-    return { output, costUsd: 0 };
+    return { output: { error: "No prospectId in run.input.prospectId" }, costUsd: 0 };
   }
 
   const prospect = await prisma.outboundProspect.findUnique({
@@ -29,27 +53,23 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
   });
 
   if (!prospect) {
-    const output = { error: `Prospect ${prospectId} not found` };
-    return { output, costUsd: 0 };
+    return { output: { error: `Prospect ${prospectId} not found` }, costUsd: 0 };
   }
 
   if (prospect.channel !== "EMAIL_AND_LINKEDIN") {
-    const output = {
-      skipped: true,
-      reason: `Prospect channel is ${prospect.channel} — LinkedIn reserved for score 80+ (EMAIL_AND_LINKEDIN)`,
-      prospectId,
-      score: prospect.score,
+    return {
+      output: {
+        skipped: true,
+        reason: `Channel is ${prospect.channel} — LinkedIn reserved for 80+ score prospects`,
+        prospectId,
+        score: prospect.score,
+      },
+      costUsd: 0,
     };
-    return { output, costUsd: 0 };
   }
 
   if (!prospect.linkedInUrl) {
-    const output = {
-      skipped: true,
-      reason: "No LinkedIn URL on prospect record",
-      prospectId,
-    };
-    return { output, costUsd: 0 };
+    return { output: { skipped: true, reason: "No LinkedIn URL on prospect record", prospectId }, costUsd: 0 };
   }
 
   const aimfoxIntegration = await prisma.integration.findUnique({
@@ -63,11 +83,11 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
 
 Rules:
 - Connection note: max 300 characters. Reference something observable about them. No pitch. No "I'd love to" language.
-- Message 1 (sent after connection is accepted, 2 days later): max 500 characters. Reference the signal. Start a conversation — don't pitch. End with a genuine question.
-- Never mention "outsourcing", "offshore", or "staffing". Frame as capacity and partnership.
+- Message 1 (sent after connection accepted, 2 days later): max 500 characters. Reference the signal. Start a conversation. End with a genuine question.
+- Never say "outsourcing", "offshore", or "staffing". Frame as capacity and partnership.
 - Sound like a peer, not a vendor.
 
-Always respond with valid JSON only — no markdown, no commentary.`;
+Always respond with valid JSON only.`;
 
   const userPrompt = `Write the Aimfox LinkedIn sequence messages for this prospect.
 
@@ -77,26 +97,22 @@ Prospect:
 - Company: ${prospect.company}
 - LinkedIn: ${prospect.linkedInUrl}
 
-Intelligence Object:
+Intelligence:
 - Primary signal: ${(intel.primarySignal as string) ?? "Not available"}
 - Pain hypothesis: ${(intel.painHypothesis as string) ?? "Not available"}
 - Messaging angle: ${(intel.messagingAngle as string) ?? "Not available"}
 - Avoid: ${(intel.avoid as string) ?? "Nothing specific"}
 - Context: ${(intel.companyContext as string) ?? "Not available"}
 
-ICP Play: ${prospect.play.slug} — ${prospect.play.name}
+Play: ${prospect.play.slug} — ${prospect.play.name}
 
-Return exactly this JSON structure:
+Return exactly:
 {
   "connectionNote": "string (≤300 chars, no pitch, references something real)",
-  "message1": "string (≤500 chars, sent 2 days after connection, opens conversation)",
-  "message2": "string (≤500 chars, sent 5 days after message1 if no reply — qualifying question only)",
-  "characterCounts": {
-    "connectionNote": 0,
-    "message1": 0,
-    "message2": 0
-  },
-  "toneNotes": "string (brief note on tone choices made)"
+  "message1": "string (≤500 chars, opens conversation after connection)",
+  "message2": "string (≤500 chars, qualifying question if no reply after 5 days)",
+  "characterCounts": { "connectionNote": 0, "message1": 0, "message2": 0 },
+  "toneNotes": "string"
 }`;
 
   const message = await client.messages.create({
@@ -116,7 +132,7 @@ Return exactly this JSON structure:
   }
 
   const campaignId = AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-LI-V1";
-
+  let aimfoxLeadId: string;
   const output: Record<string, unknown> = {
     prospectId,
     firstName: prospect.firstName,
@@ -132,53 +148,34 @@ Return exactly this JSON structure:
     workspaceId: run.agentConfig.workspaceId,
   };
 
-  let aimfoxLeadId: string;
-
   if (aimfoxIntegration) {
     try {
-      const creds = await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials);
-      const apiKey = creds.apiKey;
-
-      const response = await fetch(`https://api.aimfox.io/v1/campaigns/${campaignId}/leads`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          linkedin_url: prospect.linkedInUrl,
+      const creds = await decryptCredentials<{ accessToken: string }>(
+        aimfoxIntegration.encryptedCredentials
+      );
+      // Aimfox exposes LinkedIn automation via MCP — no REST API
+      const result = await callAimfoxMcp(creds.accessToken, "add_profile_to_campaign", {
+        campaign_id: campaignId,
+        profile_url: prospect.linkedInUrl,
+        custom_variables: {
           connection_note: msgOutput.connectionNote,
-          first_name: prospect.firstName,
-          last_name: prospect.lastName ?? "",
-          company: prospect.company,
-          custom_messages: {
-            message_1: msgOutput.message1,
-            message_2: msgOutput.message2,
-          },
-        }),
+          message_1: msgOutput.message1,
+          message_2: msgOutput.message2,
+        },
       });
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => `HTTP ${response.status}`);
-        throw new Error(`Aimfox API returned ${response.status}: ${errorText}`);
-      }
-
-      const data = (await response.json()) as { id: string; status: string };
-      aimfoxLeadId = data.id;
+      aimfoxLeadId = (result as { id?: string }).id ?? `aimfox_mcp_${prospect.id.slice(-8)}`;
       output.source = "aimfox_live";
-      output.aimfoxStatus = data.status;
+      output.mcpResult = result;
     } catch (err) {
-      // API call failed — fall back to simulation
       aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
       output.source = "simulation";
       output.aimfoxError = err instanceof Error ? err.message : String(err);
-      output.simulationNote = "Aimfox API call failed — see aimfoxError for details";
+      output.simulationNote = "Aimfox MCP call failed — see aimfoxError. Reconnect via Settings → Integrations → Aimfox.";
     }
   } else {
-    // No integration configured — simulate
     aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
     output.source = "simulation";
-    output.simulationNote = "Connect Aimfox integration in Settings to submit leads to live LinkedIn campaigns";
+    output.simulationNote = "Connect Aimfox via Settings → Integrations → Aimfox (uses MCP OAuth, not a REST API key)";
   }
 
   output.aimfoxLeadId = aimfoxLeadId;

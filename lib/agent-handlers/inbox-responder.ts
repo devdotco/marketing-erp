@@ -1,8 +1,38 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+// Encode RFC 2822 email string as base64url for Gmail API
+function toBase64Url(str: string): string {
+  return Buffer.from(str)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+// Build a minimal RFC 2822 email string
+function buildRfc2822(to: string, subject: string, body: string): string {
+  return [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: text/plain; charset=UTF-8`,
+    "",
+    body,
+  ].join("\r\n");
+}
+
+// Extract bare email address from "Name <email@domain>" or plain address
+function extractEmailAddress(from: string): string {
+  const angleMatch = from.match(/<([^>]+)>/);
+  if (angleMatch) return angleMatch[1];
+  const plainMatch = from.match(/\S+@\S+/);
+  return plainMatch ? plainMatch[0] : from;
+}
 
 export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -18,11 +48,159 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
+  // --- Live email integration: fetch unread inbox messages ---
+  interface InboxMessage {
+    id: string;
+    subject: string;
+    from: string;
+  }
+
+  let liveMessages: InboxMessage[] = [];
+  let liveProvider: string | null = null;
+  let accessToken: string | null = null;
+  let emailSource = "simulation";
+
+  const gmailIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "GMAIL" } },
+  });
+  const m365Integration = !gmailIntegration
+    ? await prisma.integration.findUnique({
+        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "MICROSOFT_365" } },
+      })
+    : null;
+
+  if (gmailIntegration) {
+    try {
+      const creds = await decryptCredentials<{ access_token: string }>(gmailIntegration.encryptedCredentials);
+      accessToken = creds.access_token;
+      liveProvider = "GMAIL";
+
+      const listRes = await fetch(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread&maxResults=20",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (listRes.ok) {
+        const listData = (await listRes.json()) as { messages?: { id: string }[] };
+        // Fetch metadata only (subject + from header) — full body never fetched for privacy
+        for (const msg of (listData.messages ?? []).slice(0, 20)) {
+          const detailRes = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          if (detailRes.ok) {
+            const detail = (await detailRes.json()) as {
+              payload?: { headers?: { name: string; value: string }[] };
+            };
+            const headers = detail.payload?.headers ?? [];
+            const subject = headers.find((h) => h.name === "Subject")?.value ?? "(no subject)";
+            const from = headers.find((h) => h.name === "From")?.value ?? "(unknown sender)";
+            liveMessages.push({ id: msg.id, subject, from });
+          }
+        }
+        emailSource = "live";
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  } else if (m365Integration) {
+    try {
+      const creds = await decryptCredentials<{ access_token: string }>(m365Integration.encryptedCredentials);
+      accessToken = creds.access_token;
+      liveProvider = "MICROSOFT_365";
+
+      const listRes = await fetch(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$filter=isRead eq false&$select=id,subject,from",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (listRes.ok) {
+        const listData = (await listRes.json()) as {
+          value?: {
+            id: string;
+            subject: string;
+            from: { emailAddress: { name: string; address: string } };
+          }[];
+        };
+        liveMessages = (listData.value ?? []).map((m) => ({
+          id: m.id,
+          subject: m.subject,
+          from: `${m.from.emailAddress.name} <${m.from.emailAddress.address}>`,
+        }));
+        emailSource = "live";
+      }
+    } catch {
+      // Fall through to simulation
+    }
+  }
+
+  // --- Claude: triage or simulate ---
   const systemPrompt = `You are an executive email assistant. Distinguish genuine business inquiries from mass outreach. Never draft a reply to an obvious pitch. Flag emails that might be time-sensitive even if they seem routine (finance, legal, from existing clients). All drafted replies stay as drafts — never send autonomously.
 
 Respond ONLY with a valid JSON object. No markdown, no explanations outside the JSON.`;
 
-  const userPrompt = `Simulate processing an inbox batch for:
+  let userPrompt: string;
+
+  if (emailSource === "live" && liveMessages.length > 0) {
+    const messageList = liveMessages
+      .map((m, i) => `${i + 1}. id:${m.id} | From: ${m.from} | Subject: ${m.subject}`)
+      .join("\n");
+
+    userPrompt = `Triage this real inbox batch for:
+
+Business: ${businessProfile?.businessName ?? "The client"}
+Industry: ${businessProfile?.industry ?? "General"}
+Website: ${businessProfile?.websiteUrl ?? "Not specified"}
+Draft Reply Style: ${draftReplyStyle}
+Flag Keywords: ${flagKeywords}
+
+Unread messages (subject + sender only — full message body is not available; do not infer content beyond what is shown):
+${messageList}
+
+Categorize each message as genuine_inquiry, pitch, newsletter, or spam.
+Draft replies ONLY for genuine_inquiry items. All replies are drafts — never instruct sending.
+Include the message id field on each entry so replies can be threaded.
+
+Return a JSON object with this exact structure:
+{
+  "processed": number,
+  "categories": {
+    "genuineInquiries": [
+      {
+        "messageId": string,
+        "subject": string,
+        "from": string,
+        "summary": string,
+        "urgency": "high" | "medium" | "low",
+        "category": string,
+        "draftReply": string,
+        "requiresHumanReview": boolean,
+        "suggestedAction": string
+      }
+    ],
+    "pitches": [
+      {
+        "messageId": string,
+        "subject": string,
+        "from": string,
+        "summary": string,
+        "recommendation": "ignore" | "decline" | "consider"
+      }
+    ],
+    "flagged": [
+      {
+        "messageId": string,
+        "subject": string,
+        "from": string,
+        "reason": string,
+        "suggestedAction": string
+      }
+    ],
+    "newsletters": number,
+    "automated": number
+  },
+  "draftsCreated": number
+}`;
+  } else {
+    userPrompt = `Simulate processing an inbox batch for:
 
 Business: ${businessProfile?.businessName ?? "The client"}
 Industry: ${businessProfile?.industry ?? "General"}
@@ -75,9 +253,9 @@ Return a JSON object with this exact structure:
     "newsletters": number,
     "automated": number
   },
-  "draftsCreated": number,
-  "simulationNote": "Connect Gmail or Microsoft 365 in Settings to process real inbox messages. All drafts require your review before sending."
+  "draftsCreated": number
 }`;
+  }
 
   const message = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
@@ -95,10 +273,65 @@ Return a JSON object with this exact structure:
     output = { result: rawText };
   }
 
+  // --- Create reply drafts in Gmail or M365 for genuine_inquiry items — never auto-send ---
+  if (emailSource === "live" && liveProvider && accessToken) {
+    const categories = (output.categories as Record<string, unknown>) ?? {};
+    const genuineInquiries = (categories.genuineInquiries as Array<{
+      messageId?: string;
+      from: string;
+      subject: string;
+      draftReply?: string;
+      requiresHumanReview?: boolean;
+    }>) ?? [];
+
+    let draftsCreated = 0;
+    for (const inquiry of genuineInquiries) {
+      if (!inquiry.draftReply) continue;
+
+      const replyToAddress = extractEmailAddress(inquiry.from);
+      const replySubject = inquiry.subject.startsWith("Re:") ? inquiry.subject : `Re: ${inquiry.subject}`;
+
+      if (liveProvider === "GMAIL") {
+        const raw = toBase64Url(buildRfc2822(replyToAddress, replySubject, inquiry.draftReply));
+        const draftRes = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message: { raw } }),
+        });
+        if (draftRes.ok) draftsCreated++;
+      } else if (liveProvider === "MICROSOFT_365") {
+        const draftRes = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            subject: replySubject,
+            body: { contentType: "Text", content: inquiry.draftReply },
+            toRecipients: [{ emailAddress: { address: replyToAddress } }],
+          }),
+        });
+        if (draftRes.ok) draftsCreated++;
+      }
+    }
+
+    if (draftsCreated > 0) {
+      output.draftsCreated = draftsCreated;
+    }
+  }
+
+  output.source = emailSource;
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect Gmail or Microsoft 365 in Settings to process real inbox messages. All drafts require your review before sending.";
+
+  if (emailSource === "simulation") {
+    output.simulationNote =
+      "Connect Gmail or Microsoft 365 in Settings to process real inbox messages. All drafts require your review before sending.";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

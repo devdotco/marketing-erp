@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -54,9 +55,54 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
   const reportDate = new Date().toISOString().split("T")[0];
   const effectiveDomain = monitoredDomain || businessProfile?.websiteUrl?.replace(/^https?:\/\//, "").replace(/\/$/, "") || "yourdomain.com";
 
+  // --- Live API: Ahrefs → Semrush ---
+  let liveDataSection = "";
+  let source: "live" | "simulation" = "simulation";
+
+  const ahrefsIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
+  });
+
+  if (ahrefsIntegration?.encryptedCredentials) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
+      const url = `https://apiv2.ahrefs.com/v3/site-explorer/backlinks?target=${encodeURIComponent(effectiveDomain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
+      const res = await fetch(url, { headers: { "Accept": "application/json" } });
+      if (res.ok) {
+        const data = await res.json() as unknown;
+        liveDataSection = `\n\nLIVE AHREFS BACKLINK DATA for "${effectiveDomain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real backlink data to populate newLinks, lostLinks, and toxicLinks. Base totalBacklinks, DR trend, and other summary metrics on this actual data rather than simulating them.`;
+        source = "live";
+      }
+    } catch {
+      // fall through to Semrush
+    }
+  }
+
+  if (source === "simulation") {
+    const semrushIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
+    });
+    if (semrushIntegration?.encryptedCredentials) {
+      try {
+        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
+        const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(effectiveDomain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const text = await res.text();
+          liveDataSection = `\n\nLIVE SEMRUSH DOMAIN DATA for "${effectiveDomain}" (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${text}\n\nUse this organic performance data to add context to the backlink report (traffic impact of links, anchor text relevance to ranking keywords).`;
+          source = "live";
+        }
+      } catch {
+        // fall through to simulation
+      }
+    }
+  }
+  // --- End live API ---
+
   const userPrompt = [
     `Generate a backlink monitoring report for: ${effectiveDomain}`,
     `Report date: ${reportDate}`,
+    liveDataSection,
     `Alert on lost links: ${alertOnLost}`,
     `Toxic link threshold: ${toxicThreshold}`,
     `Auto-update disavow file: ${disavowAutoUpdate}`,
@@ -145,6 +191,10 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
+  output.source = source;
+  if (source === "live") {
+    delete output.simulationNote;
+  }
 
   // Haiku 4.5 pricing: $0.80/M input, $4/M output
   const inputTokens = message.usage.input_tokens;

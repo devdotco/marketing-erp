@@ -1,8 +1,21 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
+
+interface AdsStreamChunk {
+  results?: Array<{
+    campaign: { name: string };
+    metrics: {
+      costMicros: string;
+      clicks: string;
+      impressions: string;
+      conversions: number;
+    };
+  }>;
+}
 
 export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -18,9 +31,82 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
+  // --- Live Google Ads Data ---
+  let liveAdsData: string | null = null;
+  let source = "simulation";
+
+  try {
+    const adsIntegration = await prisma.integration.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId: run.agentConfig.workspaceId,
+          provider: "GOOGLE_ADS",
+        },
+      },
+    });
+
+    if (adsIntegration?.encryptedCredentials) {
+      const creds = await decryptCredentials<{
+        access_token: string;
+        customer_id: string;
+      }>(adsIntegration.encryptedCredentials);
+
+      const customerId = creds.customer_id.replace(/-/g, "");
+      const adsRes = await fetch(
+        `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${creds.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query:
+              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
+          }),
+        }
+      );
+
+      if (!adsRes.ok) {
+        throw new Error(`Google Ads API error: ${adsRes.status}`);
+      }
+
+      const chunks = (await adsRes.json()) as AdsStreamChunk[];
+
+      const campaigns: Array<{
+        name: string;
+        costUsd: number;
+        clicks: number;
+        impressions: number;
+        conversions: number;
+      }> = [];
+
+      for (const chunk of chunks) {
+        for (const row of chunk.results ?? []) {
+          campaigns.push({
+            name: row.campaign.name,
+            costUsd: Number(row.metrics.costMicros) / 1_000_000,
+            clicks: Number(row.metrics.clicks),
+            impressions: Number(row.metrics.impressions),
+            conversions: Number(row.metrics.conversions),
+          });
+        }
+      }
+
+      liveAdsData = JSON.stringify(campaigns, null, 2);
+      source = "live";
+    }
+  } catch {
+    // fall through to simulation
+  }
+
   const systemPrompt = `You are an expert Google Ads copywriter and search marketing strategist. You write RSA (Responsive Search Ad) headlines and descriptions that maximize Quality Score and CTR. You analyze search terms to identify high-value keywords and irrelevant negatives. You understand match types, intent signals, conversion-focused messaging, and spend anomaly detection.
 
 Respond ONLY with a valid JSON object. No markdown, no explanations outside the JSON.`;
+
+  const liveDataBlock = liveAdsData
+    ? `\n\nLive Google Ads Campaign Performance (Last 30 Days):\n${liveAdsData}\n\nUse the above real campaign data to ground your RSA recommendations, keyword priorities, and bid strategy rationale. Reference actual campaign names and performance figures in your analysis.`
+    : "";
 
   const userPrompt = `Generate a comprehensive Google Ads RSA, keyword strategy, and search term analysis for:
 
@@ -36,6 +122,7 @@ Campaign Configuration:
 - Headlines Needed: ${numHeadlines} (max 30 chars each)
 - Descriptions Needed: ${numDescriptions} (max 90 chars each)
 - Negative Keywords Review: ${negativesReview}
+${liveDataBlock}
 
 Return a JSON object with this exact structure:
 {
@@ -100,8 +187,12 @@ Return a JSON object with this exact structure:
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect Google Ads API in Settings to enable live search term data, real Quality Scores, spend anomaly monitoring, and automated negative keyword management";
+  output.source = source;
+
+  if (source === "simulation") {
+    output.simulationNote =
+      "Connect Google Ads API in Settings to enable live search term data, real Quality Scores, spend anomaly monitoring, and automated negative keyword management";
+  }
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {
