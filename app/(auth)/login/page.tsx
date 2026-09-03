@@ -87,7 +87,7 @@ export default async function LoginPage({
 
         <p style={{ fontSize: 11, color: "var(--text-dim)" }}>
           Part of the{" "}
-          <a href={process.env.NEXT_PUBLIC_DASHBOARD_URL || "https://dashboard.erp.io"} style={{ color: "var(--text-muted)" }}>
+          <a href={process.env.NEXT_PUBLIC_DASHBOARD_URL || "https://app.erp.io"} style={{ color: "var(--text-muted)" }}>
             erp.io
           </a>{" "}
           suite

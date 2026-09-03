@@ -319,7 +319,7 @@ export function Sidebar({ workspaces, activeWorkspaceId, user, enabledCounts }: 
                     New workspace
                   </Link>
                   <a
-                    href={process.env.NEXT_PUBLIC_DASHBOARD_URL || "https://dashboard.erp.io"}
+                    href={process.env.NEXT_PUBLIC_DASHBOARD_URL || "https://app.erp.io"}
                     target="_blank"
                     rel="noreferrer"
                     style={{
