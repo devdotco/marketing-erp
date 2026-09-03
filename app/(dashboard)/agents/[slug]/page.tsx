@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
-import { getAgent } from "@/lib/agents";
+import { getAgent, AGENTS } from "@/lib/agents";
 import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
