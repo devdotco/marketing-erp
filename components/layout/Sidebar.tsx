@@ -7,7 +7,7 @@ import { useState, useEffect } from "react";
 import {
   LayoutDashboard, FileText, Mic, Share2, Search, Link2,
   BarChart2, Mail, TrendingUp, Bot, Plug, Settings,
-  ChevronDown, LogOut, Plus, ExternalLink, Menu, X,
+  ChevronDown, LogOut, Plus, ExternalLink, Menu, X, Activity,
 } from "lucide-react";
 
 interface WorkspaceSummary {
@@ -40,9 +40,8 @@ const NAV_GROUPS = [
   {
     label: "Content",
     items: [
-      { href: "/agents/suite/content",     icon: FileText,    label: "Writing",     suite: "content" },
-      { href: "/agents/suite/audio-video", icon: Mic,         label: "Podcasting",  suite: "audio-video" },
-      { href: "/agents/suite/content",     icon: FileText,    label: "Publishing",  suite: "content" },
+      { href: "/agents/suite/content",     icon: FileText,    label: "Content",     suite: "content" },
+      { href: "/agents/suite/audio-video", icon: Mic,         label: "Audio & Video", suite: "audio-video" },
       { href: "/agents/suite/social",      icon: Share2,      label: "Social",      suite: "social" },
     ],
   },
@@ -75,6 +74,7 @@ const NAV_GROUPS = [
   {
     label: null,
     items: [
+      { href: "/runs",         icon: Activity, label: "Runs" },
       { href: "/integrations", icon: Plug,     label: "Integrations" },
       { href: "/settings",     icon: Settings, label: "Settings" },
     ],
