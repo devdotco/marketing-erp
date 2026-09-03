@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { encryptCredentials } from "@/lib/crypto";
+import { IntegrationProvider } from "@prisma/client";
 import { cookies } from "next/headers";
 
 export const dynamic = "force-dynamic";
@@ -106,5 +108,70 @@ export async function GET(req: NextRequest) {
     workspaceId,
     agentsEnabled: agentsToEnable,
     message: "Admin workspace ready. Visit /agents to proceed.",
+  });
+}
+
+// POST /api/admin/seed
+// Body: { secret, provider, credentials }
+// Saves an Integration for the admin workspace. No session required.
+export async function POST(req: NextRequest) {
+  let body: { secret?: string; provider?: string; credentials?: Record<string, unknown> };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const expected = process.env.SEED_SECRET || process.env.NEXTAUTH_SECRET;
+  if (!expected || body.secret !== expected) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const { provider, credentials } = body;
+  if (!provider || !credentials) {
+    return NextResponse.json({ error: "provider and credentials are required" }, { status: 400 });
+  }
+
+  if (!Object.values(IntegrationProvider).includes(provider as IntegrationProvider)) {
+    return NextResponse.json({ error: `Unsupported provider: ${provider}` }, { status: 400 });
+  }
+
+  const adminEmail = process.env.ADMIN_EMAIL || "nate@dev.co";
+  const user = await prisma.user.findUnique({ where: { email: adminEmail } });
+  if (!user) {
+    return NextResponse.json({ error: `User ${adminEmail} not found` }, { status: 404 });
+  }
+
+  const membership = await prisma.workspaceMember.findFirst({
+    where: { userId: user.id },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!membership) {
+    return NextResponse.json({ error: "No workspace found — call GET first to seed workspace" }, { status: 404 });
+  }
+
+  const typedProvider = provider as IntegrationProvider;
+  const encrypted = await encryptCredentials(credentials);
+
+  await prisma.integration.upsert({
+    where: { workspaceId_provider: { workspaceId: membership.workspaceId, provider: typedProvider } },
+    create: {
+      workspaceId: membership.workspaceId,
+      provider: typedProvider,
+      encryptedCredentials: encrypted,
+      scopes: [],
+      label: provider,
+    },
+    update: {
+      encryptedCredentials: encrypted,
+      updatedAt: new Date(),
+    },
+  });
+
+  return NextResponse.json({
+    ok: true,
+    provider: typedProvider,
+    workspaceId: membership.workspaceId,
+    message: `${provider} integration saved.`,
   });
 }
