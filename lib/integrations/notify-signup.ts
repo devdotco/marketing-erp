@@ -1,6 +1,6 @@
 import sgMail from "@sendgrid/mail";
 
-const ALERT_RECIPIENTS = ["info@seo.co", "eric@dev.co"];
+const ALERT_RECIPIENTS = ["nate@dev.co", "info@seo.co", "eric@dev.co"];
 
 interface SignupData {
   name: string;
@@ -10,10 +10,15 @@ interface SignupData {
 }
 
 export async function notifyNewSignup(data: SignupData): Promise<void> {
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     pushToCrm(data),
     sendAlertEmail(data),
   ]);
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(`[notify-signup] task ${i} failed:`, r.reason);
+    }
+  });
 }
 
 async function pushToCrm(data: SignupData): Promise<void> {
@@ -51,7 +56,11 @@ async function pushToCrm(data: SignupData): Promise<void> {
 async function sendAlertEmail(data: SignupData): Promise<void> {
   const apiKey = process.env.SENDGRID_API_KEY;
   const from = process.env.EMAIL_FROM ?? "noreply@erp.io";
-  if (!apiKey) return;
+  if (!apiKey) {
+    console.warn("[notify-signup] SENDGRID_API_KEY not set — skipping alert email");
+    return;
+  }
+  console.log(`[notify-signup] sending alert email to ${ALERT_RECIPIENTS.join(", ")} from ${from}`);
 
   sgMail.setApiKey(apiKey);
 
@@ -77,6 +86,7 @@ async function sendAlertEmail(data: SignupData): Promise<void> {
     html,
     text: `New erp.io signup\n\nName: ${data.name}\nEmail: ${data.email}\nWorkspace: ${data.workspaceName}${data.referralSource ? `\nReferral: ${data.referralSource}` : ""}\n`,
   });
+  console.log("[notify-signup] alert email sent ok");
 }
 
 function esc(s: string) {
