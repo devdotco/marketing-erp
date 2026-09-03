@@ -13,6 +13,8 @@ export default auth((req: NextRequest & { auth: { user?: { id: string; isSuperAd
     pathname.startsWith("/start") ||
     pathname.startsWith("/invite/") ||
     pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/admin") ||
+    pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon") ||
     pathname === "/";
