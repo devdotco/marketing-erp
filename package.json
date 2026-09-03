@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build && npm run build:worker",
-    "build:worker": "esbuild workers/agent-worker.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --external:@prisma/client --external:@anthropic-ai/sdk --tsconfig=tsconfig.json",
+    "build:worker": "esbuild workers/agent-worker.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --external:@prisma/client --external:*.node --tsconfig=tsconfig.json",
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma skills sync || exit 0"
