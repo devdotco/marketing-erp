@@ -4,23 +4,16 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 const STEPS = [
-  { id: 1, label: "Your business",   hint: "Help agents understand what you do" },
-  { id: 2, label: "Your goals",      hint: "What marketing outcomes matter most" },
-  { id: 3, label: "Your audience",   hint: "Who you're trying to reach" },
-  { id: 4, label: "First agent",     hint: "Enable one agent to get started" },
-  { id: 5, label: "Connect a tool",  hint: "Optional — skip and add later" },
+  { id: 1, label: "Your business", hint: "Help agents understand what you do" },
+  { id: 2, label: "Your goals",    hint: "What marketing outcomes matter most" },
+  { id: 3, label: "Your audience", hint: "Who you're trying to reach" },
+  { id: 4, label: "First agent",   hint: "Enable one agent to get started" },
 ];
 
 const FIRST_AGENTS = [
-  { slug: "blog-writer",    name: "Blog Writer",     description: "Draft cited articles in your brand voice.", status: "ACTIVE" as const },
-  { slug: "technical-audit", name: "Technical Audit", description: "Find every SEO issue on your site.", status: "ACTIVE" as const },
-  { slug: "podcast",        name: "Podcast",          description: "Topic to voiced audio to Transistor.", status: "ACTIVE" as const },
-];
-
-const FIRST_INTEGRATIONS = [
-  { provider: "GOOGLE_SEARCH_CONSOLE", name: "Google Search Console", description: "Unlocks Topic Planner, GSC Analyst, and Content Refresh.", icon: "🔍" },
-  { provider: "WORDPRESS",             name: "WordPress",             description: "Publish approved articles directly to your site.", icon: "📝" },
-  { provider: "CARTESIA",              name: "Cartesia TTS",          description: "High-quality AI voice for the Podcast agent.", icon: "🎙️" },
+  { slug: "blog-writer",     name: "Blog Writer",     description: "Draft cited articles in your brand voice.", status: "ACTIVE" as const },
+  { slug: "technical-audit", name: "Technical Audit", description: "Find every SEO issue on your site.",        status: "ACTIVE" as const },
+  { slug: "podcast",         name: "Podcast",          description: "Topic to voiced audio to Transistor.",     status: "ACTIVE" as const },
 ];
 
 export default function OnboardingPage() {
@@ -35,7 +28,6 @@ export default function OnboardingPage() {
     primaryGoal: "",
     targetAudience: "",
     selectedAgent: "",
-    skippedIntegration: false,
   });
 
   function updateForm(key: keyof typeof form, value: string | boolean) {
@@ -151,7 +143,7 @@ export default function OnboardingPage() {
         {/* Step 1 — Business */}
         {step === 1 && (
           <>
-            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 1 of 5</p>
+            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 1 of 4</p>
             <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Tell us about your business</h2>
             <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 28 }}>
               Agents use this to match your brand voice and target the right audience.
@@ -198,7 +190,7 @@ export default function OnboardingPage() {
         {/* Step 2 — Goals */}
         {step === 2 && (
           <>
-            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 2 of 5</p>
+            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 2 of 4</p>
             <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>What's your primary marketing goal?</h2>
             <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 28 }}>
               The Operator agent uses this to propose your weekly plan.
@@ -235,7 +227,7 @@ export default function OnboardingPage() {
         {/* Step 3 — Audience */}
         {step === 3 && (
           <>
-            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 3 of 5</p>
+            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 3 of 4</p>
             <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Who are you trying to reach?</h2>
             <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 28 }}>
               Agents use this to write in the voice your audience expects.
@@ -259,7 +251,7 @@ export default function OnboardingPage() {
         {/* Step 4 — First agent */}
         {step === 4 && (
           <>
-            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 4 of 5</p>
+            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 4 of 4</p>
             <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Enable your first agent</h2>
             <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 28 }}>
               These are live now. Pick one to activate — you can enable more on the Agents page.
@@ -310,61 +302,6 @@ export default function OnboardingPage() {
                 </button>
               ))}
             </div>
-          </>
-        )}
-
-        {/* Step 5 — Integration */}
-        {step === 5 && (
-          <>
-            <p style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--success)", marginBottom: 12 }}>Step 5 of 5</p>
-            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Connect your first tool</h2>
-            <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 28 }}>
-              Optional — you can always connect integrations later from the Integrations page.
-            </p>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-              {FIRST_INTEGRATIONS.map((int) => (
-                <div
-                  key={int.provider}
-                  style={{
-                    padding: "14px 16px",
-                    border: "1px solid var(--border)",
-                    borderRadius: "var(--radius)",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                  }}
-                >
-                  <span style={{ fontSize: 20 }}>{int.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{int.name}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{int.description}</div>
-                  </div>
-                  <a
-                    href={`/api/integrations/${int.provider.toLowerCase().replace(/_/g, "-")}/connect`}
-                    className="btn btn-secondary btn-sm"
-                    style={{ flexShrink: 0 }}
-                  >
-                    Connect
-                  </a>
-                </div>
-              ))}
-            </div>
-
-            <button
-              onClick={() => updateForm("skippedIntegration", true)}
-              style={{
-                background: "none",
-                border: "none",
-                color: "var(--text-dim)",
-                fontSize: 12,
-                cursor: "pointer",
-                padding: 0,
-                textDecoration: "underline",
-              }}
-            >
-              Skip for now — I'll connect later
-            </button>
           </>
         )}
 
