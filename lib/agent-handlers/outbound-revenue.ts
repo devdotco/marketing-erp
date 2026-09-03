@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -36,6 +37,10 @@ export const outboundRevenueHandler: AgentHandler = async (run, updateStatus) =>
     const output = { error: `Prospect ${prospectId} not found` };
     return { output, costUsd: 0 };
   }
+
+  const ghlIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "GO_HIGH_LEVEL" } },
+  });
 
   const intelligence = (prospect.intelligence ?? {}) as Record<string, unknown>;
   const intel = (intelligence.intelligence ?? {}) as Record<string, unknown>;
@@ -116,12 +121,89 @@ Return exactly this JSON structure:
     ghlData = {};
   }
 
-  // Simulate GHL API calls
-  const simulatedContactId = prospect.ghlContactId ?? `ghl_contact_${prospect.id.slice(-8)}`;
-  const simulatedOpportunityId =
-    event === "interested" || event === "meeting_booked"
-      ? `ghl_opp_${prospect.id.slice(-8)}_${Date.now()}`
-      : prospect.ghlOpportunityId ?? null;
+  // Attempt real GHL API calls when integration is configured, otherwise simulate
+  let finalContactId: string;
+  let finalOpportunityId: string | null = null;
+  let ghlError: string | undefined;
+  let outputSource: "ghl_live" | "simulation";
+
+  const contact = ghlData.contact as Record<string, unknown> | undefined;
+  const opportunity = ghlData.opportunity as Record<string, unknown> | undefined;
+  const wantsOpportunity = event === "interested" || event === "meeting_booked";
+
+  if (ghlIntegration) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(ghlIntegration.encryptedCredentials);
+      const authHeaders = {
+        Authorization: `Bearer ${creds.apiKey}`,
+        "Content-Type": "application/json",
+      };
+
+      // Create contact
+      const contactBody = {
+        firstName: contact?.firstName,
+        lastName: contact?.lastName,
+        email: contact?.email,
+        companyName: contact?.companyName,
+        website: (contact?.website as string | null | undefined) ?? undefined,
+        tags: contact?.tags,
+      };
+      const contactRes = await fetch("https://rest.gohighlevel.com/v1/contacts/", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify(contactBody),
+      });
+      if (!contactRes.ok) {
+        throw new Error(`GHL create contact failed: ${contactRes.status} ${contactRes.statusText}`);
+      }
+      const contactJson = (await contactRes.json()) as { contact: { id: string } };
+      finalContactId = contactJson.contact.id;
+
+      // Create opportunity for interested/meeting_booked events
+      if (wantsOpportunity) {
+        const oppBody = {
+          pipelineId: "outbound",
+          title: opportunity?.name,
+          status: "open",
+          stageId: event === "meeting_booked" ? "meeting-set" : "qualified-lead",
+          contactId: finalContactId,
+          monetaryValue: 0,
+          source: opportunity?.source,
+        };
+        const oppRes = await fetch("https://rest.gohighlevel.com/v1/pipelines/opportunities", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify(oppBody),
+        });
+        if (!oppRes.ok) {
+          throw new Error(`GHL create opportunity failed: ${oppRes.status} ${oppRes.statusText}`);
+        }
+        const oppJson = (await oppRes.json()) as { opportunity: { id: string } };
+        finalOpportunityId = oppJson.opportunity.id;
+      }
+
+      outputSource = "ghl_live";
+    } catch (err) {
+      ghlError = err instanceof Error ? err.message : String(err);
+      // Fall back to simulation IDs on error
+      finalContactId = prospect.ghlContactId ?? `ghl_contact_${prospect.id.slice(-8)}`;
+      if (wantsOpportunity) {
+        finalOpportunityId = `ghl_opp_${prospect.id.slice(-8)}_${Date.now()}`;
+      } else {
+        finalOpportunityId = prospect.ghlOpportunityId ?? null;
+      }
+      outputSource = "simulation";
+    }
+  } else {
+    // Simulation
+    finalContactId = prospect.ghlContactId ?? `ghl_contact_${prospect.id.slice(-8)}`;
+    if (wantsOpportunity) {
+      finalOpportunityId = `ghl_opp_${prospect.id.slice(-8)}_${Date.now()}`;
+    } else {
+      finalOpportunityId = prospect.ghlOpportunityId ?? null;
+    }
+    outputSource = "simulation";
+  }
 
   // Update prospect record
   const updateData: {
@@ -132,9 +214,9 @@ Return exactly this JSON structure:
     interestedAt?: Date;
     meetingBookedAt?: Date;
     status?: "REPLIED" | "INTERESTED" | "MEETING_BOOKED";
-  } = { ghlContactId: simulatedContactId };
+  } = { ghlContactId: finalContactId };
 
-  if (simulatedOpportunityId) updateData.ghlOpportunityId = simulatedOpportunityId;
+  if (finalOpportunityId) updateData.ghlOpportunityId = finalOpportunityId;
   if (event === "email_reply") updateData.emailRepliedAt = new Date();
   if (event === "linkedin_reply") updateData.linkedInRepliedAt = new Date();
   if (event === "interested") {
@@ -152,17 +234,24 @@ Return exactly this JSON structure:
   const output: Record<string, unknown> = {
     prospectId,
     event,
-    ghlContactId: simulatedContactId,
-    ghlOpportunityId: simulatedOpportunityId,
+    ghlContactId: finalContactId,
+    ghlOpportunityId: finalOpportunityId,
     stage: GHL_STAGE_MAP[event],
     contact: ghlData.contact,
     opportunity: ghlData.opportunity,
     timelineNote: ghlData.timeline_note,
     action: ghlData.action,
-    simulationNote: "Connect GoHighLevel integration in Settings to create real CRM records via GHL API",
+    source: outputSource,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
   };
+
+  if (outputSource === "simulation") {
+    output.simulationNote = "Connect GoHighLevel integration in Settings to create real CRM records via GHL API";
+  }
+  if (ghlError) {
+    output.ghlError = ghlError;
+  }
 
   const inputTokens = message.usage.input_tokens;
   const outputTokens = message.usage.output_tokens;

@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -50,6 +51,10 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
     };
     return { output, costUsd: 0 };
   }
+
+  const aimfoxIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AIMFOX" } },
+  });
 
   const intelligence = (prospect.intelligence ?? {}) as Record<string, unknown>;
   const intel = (intelligence.intelligence ?? {}) as Record<string, unknown>;
@@ -110,30 +115,78 @@ Return exactly this JSON structure:
     msgOutput = {};
   }
 
-  // Simulate Aimfox API add_lead call
-  const simulatedAimfoxId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
-
-  await prisma.outboundProspect.update({
-    where: { id: prospectId },
-    data: { aimfoxLeadId: simulatedAimfoxId },
-  });
+  const campaignId = AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-LI-V1";
 
   const output: Record<string, unknown> = {
     prospectId,
     firstName: prospect.firstName,
     company: prospect.company,
     linkedInUrl: prospect.linkedInUrl,
-    campaignId: AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-LI-V1",
-    aimfoxLeadId: simulatedAimfoxId,
+    campaignId,
     connectionNote: msgOutput.connectionNote,
     message1: msgOutput.message1,
     message2: msgOutput.message2,
     characterCounts: msgOutput.characterCounts,
     toneNotes: msgOutput.toneNotes,
-    simulationNote: "Connect Aimfox integration in Settings to submit leads to live LinkedIn campaigns",
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
   };
+
+  let aimfoxLeadId: string;
+
+  if (aimfoxIntegration) {
+    try {
+      const creds = await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials);
+      const apiKey = creds.apiKey;
+
+      const response = await fetch(`https://api.aimfox.io/v1/campaigns/${campaignId}/leads`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          linkedin_url: prospect.linkedInUrl,
+          connection_note: msgOutput.connectionNote,
+          first_name: prospect.firstName,
+          last_name: prospect.lastName ?? "",
+          company: prospect.company,
+          custom_messages: {
+            message_1: msgOutput.message1,
+            message_2: msgOutput.message2,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => `HTTP ${response.status}`);
+        throw new Error(`Aimfox API returned ${response.status}: ${errorText}`);
+      }
+
+      const data = (await response.json()) as { id: string; status: string };
+      aimfoxLeadId = data.id;
+      output.source = "aimfox_live";
+      output.aimfoxStatus = data.status;
+    } catch (err) {
+      // API call failed — fall back to simulation
+      aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
+      output.source = "simulation";
+      output.aimfoxError = err instanceof Error ? err.message : String(err);
+      output.simulationNote = "Aimfox API call failed — see aimfoxError for details";
+    }
+  } else {
+    // No integration configured — simulate
+    aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
+    output.source = "simulation";
+    output.simulationNote = "Connect Aimfox integration in Settings to submit leads to live LinkedIn campaigns";
+  }
+
+  output.aimfoxLeadId = aimfoxLeadId;
+
+  await prisma.outboundProspect.update({
+    where: { id: prospectId },
+    data: { aimfoxLeadId },
+  });
 
   const inputTokens = message.usage.input_tokens;
   const outputTokens = message.usage.output_tokens;

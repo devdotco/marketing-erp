@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -31,6 +32,10 @@ export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
     const output = { error: `Prospect ${prospectId} not found` };
     return { output, costUsd: 0 };
   }
+
+  const instantlyIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
+  });
 
   if (prospect.channel === "WATCHLIST" || prospect.channel === "DISCARDED") {
     const output = {
@@ -100,13 +105,60 @@ Return exactly this JSON structure:
     variableOutput = {};
   }
 
-  // Simulate Instantly API add_lead call
-  const simulatedLeadId = `instantly_${prospect.id.slice(-8)}_${Date.now()}`;
+  const variables = (variableOutput.variables ?? {}) as Record<string, string>;
+  const campaignId = (variableOutput.campaignId ?? CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-SAAS-V1") as string;
+
+  let instantlyLeadId: string;
+  let source: string;
+  let simulationNote: string | undefined;
+
+  if (instantlyIntegration) {
+    const credentials = await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials);
+
+    const body = {
+      campaign_id: campaignId,
+      email: prospect.email,
+      first_name: prospect.firstName,
+      last_name: prospect.lastName ?? "",
+      company_name: prospect.company,
+      personalization: variables.pain_signal ?? "",
+      custom_variables: {
+        pain_signal: variables.pain_signal ?? "",
+        trigger: variables.trigger ?? "",
+        offer_angle: variables.offer_angle ?? "",
+        company_context: variables.company_context ?? "",
+        proof_point: variables.proof_point ?? "",
+      },
+    };
+
+    const response = await fetch("https://api.instantly.ai/api/v1/lead/add", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${credentials.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Instantly API error ${response.status}: ${errorText}`);
+    }
+
+    const data = (await response.json()) as { status: string; data: { id: string } };
+    instantlyLeadId = data.data.id;
+    source = "instantly_live";
+  } else {
+    // Simulation mode — no Instantly integration configured
+    instantlyLeadId = `instantly_${prospect.id.slice(-8)}_${Date.now()}`;
+    source = "simulation";
+    simulationNote = "Connect Instantly integration in Settings to submit leads to live campaigns via the Instantly REST API";
+  }
 
   await prisma.outboundProspect.update({
     where: { id: prospectId },
     data: {
-      instantlyLeadId: simulatedLeadId,
+      instantlyLeadId,
       status: "IN_SEQUENCE",
     },
   });
@@ -116,14 +168,18 @@ Return exactly this JSON structure:
     firstName: prospect.firstName,
     company: prospect.company,
     email: prospect.email,
-    campaignId: variableOutput.campaignId ?? CAMPAIGN_MAP[prospect.play.slug],
-    instantlyLeadId: simulatedLeadId,
+    campaignId,
+    instantlyLeadId,
     variables: variableOutput.variables,
     qualityNotes: variableOutput.qualityNotes,
-    simulationNote: "Connect Instantly integration in Settings to submit leads to live campaigns via the Instantly REST API",
+    source,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
   };
+
+  if (simulationNote !== undefined) {
+    output.simulationNote = simulationNote;
+  }
 
   const inputTokens = message.usage.input_tokens;
   const outputTokens = message.usage.output_tokens;

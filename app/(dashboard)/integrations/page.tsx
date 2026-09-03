@@ -58,6 +58,38 @@ const INTEGRATIONS = [
     docsUrl: "#",
     comingSoon: true,
   },
+  {
+    provider: "APOLLO",
+    name: "Apollo.io",
+    description: "Prospect sourcing for outbound plays — DEV-01, DEV-02, DEV-03",
+    agents: ["Outbound Scout"],
+    color: "#3B82F6",
+    docsUrl: "#",
+  },
+  {
+    provider: "INSTANTLY",
+    name: "Instantly",
+    description: "Email campaign management and reply handling",
+    agents: ["Outbound Email"],
+    color: "#F59E0B",
+    docsUrl: "#",
+  },
+  {
+    provider: "AIMFOX",
+    name: "Aimfox",
+    description: "LinkedIn outreach sequences and reply handling",
+    agents: ["Outbound LinkedIn"],
+    color: "#8B5CF6",
+    docsUrl: "#",
+  },
+  {
+    provider: "GO_HIGH_LEVEL",
+    name: "GoHighLevel",
+    description: "CRM contacts and opportunity pipeline management",
+    agents: ["Outbound Revenue"],
+    color: "#16A34A",
+    docsUrl: "#",
+  },
 ] as const;
 
 export default async function IntegrationsPage() {

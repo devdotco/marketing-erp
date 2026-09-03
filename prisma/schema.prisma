@@ -198,6 +198,7 @@ enum IntegrationProvider {
   INSTANTLY
   AIMFOX
   ZOOMINFO
+  APOLLO
   GO_HIGH_LEVEL
 }
 
