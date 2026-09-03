@@ -29,6 +29,12 @@ import { newsletterHandler } from "./newsletter";
 import { onSitePublisherHandler } from "./on-site-publisher";
 import { onboarderHandler } from "./onboarder";
 import { operatorHandler } from "./operator";
+import { outboundCroHandler } from "./outbound-cro";
+import { outboundEmailHandler } from "./outbound-email";
+import { outboundLinkedinHandler } from "./outbound-linkedin";
+import { outboundRevenueHandler } from "./outbound-revenue";
+import { outboundScoutHandler } from "./outbound-scout";
+import { outboundStrategistHandler } from "./outbound-strategist";
 import { outreachHandler } from "./outreach";
 import { placementHandler } from "./placement";
 import { podcastHandler } from "./podcast";
@@ -85,6 +91,12 @@ const HANDLERS: Record<string, AgentHandler> = {
   "on-site-publisher": onSitePublisherHandler,
   "onboarder": onboarderHandler,
   "operator": operatorHandler,
+  "outbound-cro": outboundCroHandler,
+  "outbound-email": outboundEmailHandler,
+  "outbound-linkedin": outboundLinkedinHandler,
+  "outbound-revenue": outboundRevenueHandler,
+  "outbound-scout": outboundScoutHandler,
+  "outbound-strategist": outboundStrategistHandler,
   "outreach": outreachHandler,
   "placement": placementHandler,
   "podcast": podcastHandler,

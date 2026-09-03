@@ -76,9 +76,11 @@ model Workspace {
   invitations     Invitation[]
   businessProfile BusinessProfile?
   notifications   Notification[]
-  oauthStates     OAuthState[]
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  oauthStates       OAuthState[]
+  outboundPlays     OutboundPlay[]
+  outboundProspects OutboundProspect[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 }
 
 enum WorkspacePlan {
@@ -193,6 +195,10 @@ enum IntegrationProvider {
   TRANSISTOR
   GMAIL
   MICROSOFT_365
+  INSTANTLY
+  AIMFOX
+  ZOOMINFO
+  GO_HIGH_LEVEL
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────
@@ -259,4 +265,73 @@ model OAuthState {
   codeVerifier  String?
   expiresAt     DateTime
   createdAt     DateTime  @default(now())
+}
+
+// ─── Outbound Engine ─────────────────────────────────────────────────────────
+
+enum OutboundChannel {
+  EMAIL_AND_LINKEDIN
+  EMAIL_ONLY
+  WATCHLIST
+  DISCARDED
+}
+
+enum OutboundStatus {
+  PENDING
+  IN_SEQUENCE
+  REPLIED
+  INTERESTED
+  NOT_INTERESTED
+  MEETING_BOOKED
+  CONVERTED
+  SUPPRESSED
+}
+
+model OutboundPlay {
+  id          String             @id @default(cuid())
+  workspaceId String
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  slug        String
+  name        String
+  enabled     Boolean            @default(true)
+  config      Json               @default("{}")
+  prospects   OutboundProspect[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@unique([workspaceId, slug])
+}
+
+model OutboundProspect {
+  id                String          @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  playId            String
+  play              OutboundPlay    @relation(fields: [playId], references: [id])
+  firstName         String
+  lastName          String?
+  email             String
+  linkedInUrl       String?
+  title             String?
+  company           String
+  companyDomain     String?
+  score             Int             @default(0)
+  channel           OutboundChannel @default(EMAIL_ONLY)
+  status            OutboundStatus  @default(PENDING)
+  intelligence      Json?
+  instantlyLeadId   String?
+  aimfoxLeadId      String?
+  ghlContactId      String?
+  ghlOpportunityId  String?
+  emailRepliedAt    DateTime?
+  linkedInRepliedAt DateTime?
+  interestedAt      DateTime?
+  meetingBookedAt   DateTime?
+  excludedAt        DateTime?
+  excludeUntil      DateTime?
+  exclusionReason   String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([workspaceId, email])
 }
