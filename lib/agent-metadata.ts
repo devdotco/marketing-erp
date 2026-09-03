@@ -1036,4 +1036,99 @@ export const AGENT_META: Record<string, AgentMeta> = {
     outputs: ["Marketing strategy proposal (HTML)", "Marketing strategy proposal (PDF)", "Executive summary (plain text, for copy-paste into decks)", "Channel roadmap table (CSV)", "Projected KPI targets by channel and quarter (JSON)"],
     requirements: ["Business Brief published via the Onboarder agent", "At least one analytics integration connected for live metric population (optional but strongly recommended for the situational analysis section)"],
   },
+
+  "outbound-scout": {
+    overview: "The Outbound Scout sources fresh, ICP-matched prospects for a specific Dev.co outbound play — DEV-01 (SaaS Engineering Capacity), DEV-02 (Agency White-Label), or DEV-03 (PE-Backed Modernization). When Apollo.io is connected it pulls live contact records matching the play's firmographic filters and deduplicates them against your existing pipeline. Without Apollo it falls back to Claude AI simulation so the downstream Strategist and Email agents can run without interruption.",
+    steps: [
+      { title: "Load ICP Filters", detail: "Reads the ICP definition for the selected play (titles, employee ranges, geography) and configures the Apollo.io search payload or Claude simulation parameters accordingly." },
+      { title: "Source Prospects via Apollo.io", detail: "Calls the Apollo People Search API with ICP filters, fetches up to the configured maximum, and maps each result to the standard prospect schema (name, email, LinkedIn URL, firmographics, signal)." },
+      { title: "Deduplicate Against Pipeline", detail: "Loads all existing prospect email addresses for this workspace and filters out any records already in the pipeline — ensuring the Scout never re-adds someone already being worked." },
+      { title: "Queue for Approval", detail: "If requireApproval is enabled, pauses and surfaces the sourced list for human review before the Strategist agent scores any records. Otherwise passes the full list straight through." },
+    ],
+    inputs: [
+      { key: "playSlug", label: "Outbound Play", type: "select", options: ["DEV-01", "DEV-02", "DEV-03"], defaultValue: "DEV-01", required: true, hint: "DEV-01: SaaS Engineering Capacity | DEV-02: Agency White-Label | DEV-03: PE-Backed Modernisation" },
+      { key: "maxProspects", label: "Max Prospects to Source", type: "number", defaultValue: "30", hint: "Maximum records to pull per run. Apollo free tier is rate-limited to 50/minute; recommended 20–50 per run." },
+      { key: "includeSignals", label: "Require Observable Buying Signal", type: "boolean", defaultValue: "true", hint: "When enabled, only prospects with at least one verifiable signal (job posting, funding, hiring spike) are included." },
+      { key: "requireApproval", label: "Require Approval Before Scoring", type: "boolean", defaultValue: "true", hint: "Pause after sourcing so you can review and cull the list before the Strategist agent scores each prospect." },
+    ],
+    outputs: ["Prospect list with firmographics and signals (JSON)", "Dedup summary: sourced vs. net-new (JSON)", "Source attribution: apollo_live or simulation"],
+    requirements: ["Apollo.io API key connected in Settings → Integrations (for live sourcing; simulation works without it)"],
+  },
+
+  "outbound-strategist": {
+    overview: "The Outbound Strategist scores each sourced prospect 0–100 across six dimensions — signal quality, service fit, firmographics, persona match, timing, and data quality — and generates a Prospect Intelligence Object with a pain hypothesis, messaging angle, and proof points. Prospects scoring 80+ are routed to both email and LinkedIn sequences; 65–79 to email only; 50–64 go to a watchlist; below 50 are discarded. Only Claude AI is required — no external integration needed.",
+    steps: [
+      { title: "Load Prospect and Play Context", detail: "Fetches the OutboundProspect record and the play's ICP definition to anchor scoring against the specific service offer and firmographic target." },
+      { title: "Score Across Six Dimensions", detail: "Evaluates signal quality (25pts), service fit (20pts), firmographics (25pts), persona match (15pts), timing (10pts), and data quality (5pts) to produce a 0–100 composite score." },
+      { title: "Generate Intelligence Object", detail: "Produces the Prospect Intelligence Object: painHypothesis, primarySignal, bestOffer, messagingAngle, avoid, proofPoints, and companyContext — used by every downstream agent." },
+      { title: "Route by Channel", detail: "Sets the prospect channel: EMAIL_AND_LINKEDIN (80+), EMAIL_ONLY (65–79), WATCHLIST (50–64), or DISCARDED (<50). Updates the OutboundProspect record in the database." },
+    ],
+    inputs: [
+      { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered automatically by the Outbound Scout — the Scout passes the prospect ID directly." },
+    ],
+    outputs: ["Updated OutboundProspect with score, channel, and intelligence JSON", "Prospect Intelligence Object: painHypothesis, messagingAngle, bestOffer, proofPoints", "Scoring breakdown by dimension (JSON)"],
+    requirements: ["Outbound Scout must run first to create OutboundProspect records"],
+  },
+
+  "outbound-email": {
+    overview: "The Outbound Email agent generates hyper-personalised Instantly campaign variables for each scored prospect — pain signal, trigger, offer angle, company context, and proof point — then adds the prospect to the correct Instantly email sequence for their play. Variables are derived from the Prospect Intelligence Object created by the Strategist, so every message references a real observable signal rather than a generic pitch.",
+    steps: [
+      { title: "Load Intelligence Object", detail: "Reads the prospect's scoring output and Intelligence Object from the OutboundProspect record — specifically painHypothesis, primarySignal, messagingAngle, bestOffer, and avoid." },
+      { title: "Generate Personalisation Variables", detail: "Uses Claude Haiku to produce six campaign variables in the exact character counts required by the Instantly template: pain_signal, trigger, offer_angle, company_context, and proof_point." },
+      { title: "Add Lead to Instantly Campaign", detail: "Calls the Instantly v1 Lead Add API to enrol the prospect in the correct campaign (DEV-01-SAAS-V1, DEV-02-AGENCY-V1, or DEV-03-PE-V1) with all personalisation variables injected." },
+      { title: "Update Pipeline Record", detail: "Sets prospect.instantlyLeadId and status = IN_SEQUENCE in the OutboundProspect record so the Revenue agent can correlate reply webhooks back to the right record." },
+    ],
+    inputs: [
+      { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered by the Strategist — it passes the prospect ID automatically." },
+    ],
+    outputs: ["Instantly campaign variables JSON (pain_signal, trigger, offer_angle, company_context, proof_point)", "Instantly lead ID", "Quality notes flagging any variables that required guessing"],
+    requirements: ["Instantly API key connected in Settings → Integrations", "Outbound Strategist must run first to generate the Intelligence Object"],
+  },
+
+  "outbound-linkedin": {
+    overview: "The Outbound LinkedIn agent writes the Aimfox connection note and two follow-up messages for each 80+ prospect, then adds them to the correct Aimfox campaign via the Aimfox MCP Server. Messages are written by Claude Haiku to sound like a peer outreach, not a vendor pitch — referencing the prospect's observable signal and never using outsourcing or staffing language.",
+    steps: [
+      { title: "Check Channel Eligibility", detail: "Verifies the prospect's channel is EMAIL_AND_LINKEDIN (score 80+). Prospects below 80 are skipped with a log entry — LinkedIn sequences are reserved for the highest-signal opportunities." },
+      { title: "Generate LinkedIn Messages", detail: "Uses Claude Haiku to write a connection note (≤300 chars), Message 1 (post-accept, ≤500 chars), and Message 2 (5-day follow-up, ≤500 chars) — all grounded in the prospect's Intelligence Object." },
+      { title: "Add Profile to Aimfox Campaign via MCP", detail: "Connects to the Aimfox MCP Server (mcp.aimfox.com) using the stored OAuth token and calls add_profile_to_campaign with the prospect's LinkedIn URL and all three messages as custom variables." },
+      { title: "Record Lead ID", detail: "Stores the Aimfox lead ID on the OutboundProspect record so the Aimfox reply webhook can route incoming replies back to the correct prospect." },
+    ],
+    inputs: [
+      { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered automatically — the Strategist passes the ID directly." },
+    ],
+    outputs: ["Aimfox lead ID", "LinkedIn message set: connectionNote, message1, message2 with character counts", "Tone quality notes from Claude"],
+    requirements: ["Aimfox OAuth token connected in Settings → Integrations (uses MCP, not a REST API key)", "Prospect must have a LinkedIn URL and channel = EMAIL_AND_LINKEDIN"],
+  },
+
+  "outbound-revenue": {
+    overview: "The Outbound Revenue agent fires when a prospect replies to an email or LinkedIn message. It classifies the event (reply, interested, meeting booked), creates or updates a GoHighLevel contact and opportunity record, and updates the pipeline status in the database. This agent is triggered automatically by Instantly and Aimfox webhooks — not manually.",
+    steps: [
+      { title: "Receive Engagement Event", detail: "Reads the event type (email_reply, linkedin_reply, interested, meeting_booked) and the prospect ID from the incoming webhook payload or run input." },
+      { title: "Generate CRM Record Data", detail: "Uses Claude Haiku to produce the GHL contact and opportunity field values — company name, tags, ICP score, pain hypothesis, pipeline stage — based on the Intelligence Object and event type." },
+      { title: "Create GHL Contact and Opportunity", detail: "Calls the GoHighLevel REST API to create the contact record and, for interested/meeting_booked events, an opportunity in the Outbound pipeline at the correct stage." },
+      { title: "Update Pipeline Status", detail: "Sets the OutboundProspect status (REPLIED, INTERESTED, MEETING_BOOKED) and the relevant timestamp (emailRepliedAt, interestedAt, meetingBookedAt) in the database." },
+    ],
+    inputs: [
+      { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Populated automatically by Instantly and Aimfox webhooks — no manual entry needed in normal operation." },
+      { key: "event", label: "Event Type", type: "select", options: ["email_reply", "linkedin_reply", "interested", "meeting_booked"], defaultValue: "email_reply", hint: "For manual testing. In production this is set by the Instantly or Aimfox webhook." },
+      { key: "replyText", label: "Reply Text (optional)", type: "textarea", placeholder: "The prospect's reply message for context...", hint: "Paste the prospect's reply to help Claude generate a more contextual CRM note." },
+    ],
+    outputs: ["GHL contact ID", "GHL opportunity ID (for interested/meeting_booked events)", "Pipeline stage set in GHL", "Updated OutboundProspect status and timestamp"],
+    requirements: ["GoHighLevel API key connected in Settings → Integrations", "Outbound Email or LinkedIn agent must have run first"],
+  },
+
+  "outbound-cro": {
+    overview: "The Outbound CRO agent runs every Friday to analyse the week's outbound performance across all plays. It reviews prospect counts by status, open-to-reply rates, reply-to-meeting conversion, winning signals, and play-level ROI, then produces actionable recommendations for next week's allocation. It uses Claude Sonnet 5 for deeper analysis than the operational agents.",
+    steps: [
+      { title: "Pull Week's Pipeline Data", detail: "Queries OutboundProspect records created or updated in the last 7 days, grouped by play and status, to build the raw performance dataset for the week." },
+      { title: "Analyse by Play and Channel", detail: "Calculates sourced-to-scored rate, email open-to-reply rate, LinkedIn acceptance rate, reply-to-meeting conversion, and estimated pipeline value per play." },
+      { title: "Identify Winning Signals", detail: "Identifies the top 3 buying signals that correlated with the highest reply and meeting rates this week — used to tune the Scout's sourcing criteria for next week." },
+      { title: "Generate Recommendations", detail: "Produces the executive summary, play-level allocation recommendation for next week, A/B test suggestions for message variants, and a list of prospects to prioritise for personal follow-up." },
+    ],
+    inputs: [
+      { key: "lookbackDays", label: "Lookback Window (days)", type: "number", defaultValue: "7", hint: "Number of days to analyse. Default is 7 (weekly review); increase to 30 for monthly strategic review." },
+    ],
+    outputs: ["Weekly outbound performance summary", "Play-level analysis with conversion rates", "Winning signals and their correlation scores", "Next-week allocation recommendation", "A/B test suggestions for message variants", "Executive summary (copy-paste for leadership)"],
+    requirements: ["At least one completed outbound cycle (Scout → Strategist → Email → Revenue) must exist in the database"],
+  },
 };

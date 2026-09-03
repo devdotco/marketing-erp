@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
-import { RunButton } from "@/components/ui/RunButton";
+import { RunModal } from "@/components/ui/RunModal";
 
 export const dynamic = "force-dynamic";
 
@@ -91,7 +91,14 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
               agentConfigId={agentConfig?.id}
             />
             {isEnabled && (
-              <RunButton workspaceId={workspaceId} agentSlug={slug} agentConfigId={agentConfig?.id} />
+              <RunModal
+                workspaceId={workspaceId}
+                agentSlug={slug}
+                agentName={agent.name}
+                agentConfigId={agentConfig?.id}
+                inputs={meta?.inputs ?? []}
+                savedConfig={(agentConfig?.config ?? {}) as Record<string, unknown>}
+              />
             )}
           </div>
         )}

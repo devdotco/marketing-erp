@@ -8,6 +8,7 @@ import {
   LayoutDashboard, FileText, Mic, Share2, Search, Link2,
   BarChart2, Mail, TrendingUp, Bot, Plug, Settings,
   ChevronDown, LogOut, Plus, ExternalLink, Menu, X, Activity,
+  Crosshair, Target,
 } from "lucide-react";
 
 interface WorkspaceSummary {
@@ -69,6 +70,13 @@ const NAV_GROUPS = [
     label: "Operator",
     items: [
       { href: "/agents/suite/operator", icon: Bot, label: "Operator", suite: "operator" },
+    ],
+  },
+  {
+    label: "Outbound",
+    items: [
+      { href: "/outbound",              icon: Crosshair, label: "Pipeline", suite: "outbound" },
+      { href: "/agents/suite/outbound", icon: Target,    label: "Agents",   suite: "outbound" },
     ],
   },
   {

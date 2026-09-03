@@ -11,7 +11,12 @@ export async function POST(req: NextRequest) {
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json();
-  const { workspaceId: bodyWsId, agentSlug } = body as { workspaceId?: string; agentSlug: string };
+  const { workspaceId: bodyWsId, agentSlug, agentConfigId: _agentConfigId, input } = body as {
+    workspaceId?: string;
+    agentSlug: string;
+    agentConfigId?: string;
+    input?: Record<string, unknown>;
+  };
 
   const workspaceId = bodyWsId ?? await getActiveWorkspaceId();
   if (!workspaceId) return NextResponse.json({ error: "No workspace" }, { status: 400 });
@@ -37,7 +42,7 @@ export async function POST(req: NextRequest) {
     data: {
       workspaceId,
       agentConfigId: agentConfig.id,
-
+      input: (input ?? {}) as object,
       status: "PENDING",
       triggeredBy: session.user.id!,
     },
