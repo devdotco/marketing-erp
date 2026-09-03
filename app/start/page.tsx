@@ -123,10 +123,10 @@ export default async function StartPage() {
           {/* Agent suite preview */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 40 }}>
             {[
-              { label: "Content & Publishing", count: 8, live: 2 },
-              { label: "SEO", count: 8, live: 1 },
-              { label: "Social", count: 9, live: 0 },
-              { label: "Paid Media + Analytics", count: 8, live: 0 },
+              { label: "Content & Publishing", count: 8, live: 8 },
+              { label: "SEO", count: 8, live: 5 },
+              { label: "Social", count: 9, live: 8 },
+              { label: "Paid Media + Analytics", count: 8, live: 8 },
             ].map((suite) => (
               <div
                 key={suite.label}
