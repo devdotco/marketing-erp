@@ -6,6 +6,7 @@ import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { notifyNewSignup } from "@/lib/integrations/notify-signup";
+import { cookies } from "next/headers";
 
 const SignUpSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -104,13 +105,18 @@ export async function signUp(formData: FormData) {
     redirect: false,
   });
 
-  // Redirect based on referral — marketing wedge goes straight to onboarding
-  const destination =
-    referralSource === "digitalmarketers.ai"
-      ? `/onboarding?workspace=${workspace.id}`
-      : `/onboarding?workspace=${workspace.id}`;
+  // Set active workspace cookie so onboarding completion can find it
+  const jar = await cookies();
+  jar.set("active_workspace_id", workspace.id, {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    domain: process.env.NODE_ENV === "production" ? ".erp.io" : undefined,
+    maxAge: 60 * 60 * 24 * 30,
+  });
 
-  redirect(destination);
+  redirect(`/onboarding`);
 }
 
 export async function loginWithCredentials(formData: FormData) {
