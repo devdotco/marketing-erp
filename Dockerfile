@@ -41,14 +41,14 @@ COPY start.sh ./start.sh
 
 # BullMQ and ioredis are worker-only; esbuild bundles the worker with
 # --external:bullmq --external:ioredis so the runner needs them at runtime.
-COPY --from=builder /app/node_modules/bullmq ./node_modules/bullmq
-COPY --from=builder /app/node_modules/ioredis ./node_modules/ioredis
-COPY --from=builder /app/node_modules/@ioredis ./node_modules/@ioredis
-COPY --from=builder /app/node_modules/cluster-key-slot ./node_modules/cluster-key-slot
-COPY --from=builder /app/node_modules/redis-errors ./node_modules/redis-errors
-COPY --from=builder /app/node_modules/standard-as-callback ./node_modules/standard-as-callback
-COPY --from=builder /app/node_modules/denque ./node_modules/denque
-COPY --from=builder /app/node_modules/tslib ./node_modules/tslib
+# Install them in a temp dir and merge into node_modules so all transitive
+# deps are included without copying them one by one.
+RUN mkdir -p /tmp/wdeps && \
+    echo '{"name":"wdeps","version":"1.0.0","dependencies":{"bullmq":"^6.3.4","ioredis":"^6.0.0"}}' \
+      > /tmp/wdeps/package.json && \
+    npm install --prefix /tmp/wdeps --ignore-scripts --no-audit --no-fund && \
+    cp -rn /tmp/wdeps/node_modules/. /app/node_modules/ && \
+    rm -rf /tmp/wdeps
 
 RUN chmod +x start.sh
 RUN chown -R nextjs:nodejs /app
