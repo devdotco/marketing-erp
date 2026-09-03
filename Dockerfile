@@ -39,16 +39,6 @@ COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 COPY --from=builder /app/dist/worker.js ./worker.js
 COPY start.sh ./start.sh
 
-# BullMQ and ioredis are worker-only; esbuild bundles the worker with
-# --external:bullmq --external:ioredis so the runner needs them at runtime.
-# Install them in a temp dir and merge into node_modules so all transitive
-# deps are included without copying them one by one.
-RUN mkdir -p /tmp/wdeps && \
-    echo '{"name":"wdeps","version":"1.0.0","dependencies":{"bullmq":"^6.3.4","ioredis":"^6.0.0"}}' \
-      > /tmp/wdeps/package.json && \
-    npm install --prefix /tmp/wdeps --ignore-scripts --no-audit --no-fund && \
-    cp -rn /tmp/wdeps/node_modules/. /app/node_modules/ && \
-    rm -rf /tmp/wdeps
 
 RUN chmod +x start.sh
 RUN chown -R nextjs:nodejs /app
