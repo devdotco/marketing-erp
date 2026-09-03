@@ -48,6 +48,7 @@ COPY --from=builder /app/node_modules/cluster-key-slot ./node_modules/cluster-ke
 COPY --from=builder /app/node_modules/redis-errors ./node_modules/redis-errors
 COPY --from=builder /app/node_modules/standard-as-callback ./node_modules/standard-as-callback
 COPY --from=builder /app/node_modules/denque ./node_modules/denque
+COPY --from=builder /app/node_modules/tslib ./node_modules/tslib
 
 RUN chmod +x start.sh
 RUN chown -R nextjs:nodejs /app
