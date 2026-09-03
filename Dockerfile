@@ -39,6 +39,18 @@ COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 COPY --from=builder /app/dist/worker.js ./worker.js
 COPY start.sh ./start.sh
 
+# BullMQ and its dependencies aren't included in Next.js standalone output
+# because they're only used in the worker (not imported by any Next.js page).
+# We copy them explicitly so `node worker.js` can resolve them.
+COPY --from=builder /app/node_modules/bullmq ./node_modules/bullmq
+COPY --from=builder /app/node_modules/ioredis ./node_modules/ioredis
+COPY --from=builder /app/node_modules/@ioredis ./node_modules/@ioredis
+COPY --from=builder /app/node_modules/cluster-key-slot ./node_modules/cluster-key-slot
+COPY --from=builder /app/node_modules/redis-errors ./node_modules/redis-errors
+COPY --from=builder /app/node_modules/redis-parser ./node_modules/redis-parser
+COPY --from=builder /app/node_modules/standard-as-callback ./node_modules/standard-as-callback
+COPY --from=builder /app/node_modules/denque ./node_modules/denque
+
 RUN chmod +x start.sh
 RUN chown -R nextjs:nodejs /app
 
