@@ -3,7 +3,7 @@
 /* ─── Design tokens ─────────────────────────────────────────────────────── */
 :root {
   /* Light mode (default) */
-  --bg: #FAFAFA;
+  --bg: #FFFFFF;
   --surface: #FFFFFF;
   --surface-2: #F2F3F7;
   --surface-3: #E8EAEF;
@@ -61,7 +61,7 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #FAFAFA;
+  --bg: #FFFFFF;
   --surface: #FFFFFF;
   --surface-2: #F2F3F7;
   --surface-3: #E8EAEF;
