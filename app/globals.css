@@ -600,3 +600,74 @@ code, pre, .mono {
   .fade-in { animation: fadeIn 0.2s ease; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 }
+
+/* ─── Suite rail + theme toggle ──────────────────────────────────────────── */
+/* The rail keeps its own dark ground in both themes: it is chrome shared with
+   every other module, and it reads as one continuous strip across the suite
+   rather than part of whichever app you happen to be in. */
+.app-rail {
+  width: 44px;
+  flex-shrink: 0;
+  background: #13141e;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0;
+  gap: 4px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.app-rail-logo {
+  width: 34px; height: 34px; border-radius: 8px;
+  background: #2563EB; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 800; font-style: italic;
+  letter-spacing: -0.02em; text-decoration: none; flex-shrink: 0;
+}
+
+.app-rail-divider {
+  width: 20px; height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 8px 0 4px;
+  flex-shrink: 0;
+}
+
+.app-rail-icon {
+  width: 34px; height: 34px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255, 255, 255, 0.5);
+  text-decoration: none; flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.app-rail-icon:hover { background: rgba(255, 255, 255, 0.1); color: rgba(255, 255, 255, 0.85); }
+.app-rail-icon-active { background: #2563EB; color: #fff; }
+.app-rail-icon:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+
+.theme-toggle {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 40;
+  width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.theme-toggle:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+/* main-content is the positioning context for the toggle. */
+.main-content { position: relative; }
+
+@media (max-width: 768px) {
+  /* The mobile topbar already owns the top-left; the rail would eat a third of
+     a phone screen, and the sidebar's own menu covers navigation there. */
+  .app-rail { display: none; }
+  .theme-toggle { top: 11px; right: 12px; }
+}

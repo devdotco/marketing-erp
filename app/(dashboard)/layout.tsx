@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, getUserWorkspaces, setActiveWorkspace } from "@/lib/actions/workspace";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { AppSwitcher } from "@/components/layout/AppSwitcher";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
 
@@ -72,6 +74,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
   return (
     <div className="page-shell">
       {activeWorkspaceId && <WorkspaceCookieSync workspaceId={activeWorkspaceId} />}
+      <AppSwitcher />
       <Sidebar
         workspaces={workspacesForSidebar}
         activeWorkspaceId={activeWorkspaceId}
@@ -79,6 +82,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         enabledCounts={enabledCounts}
       />
       <div className="main-content">
+        <ThemeToggle />
         {children}
       </div>
     </div>

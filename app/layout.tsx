@@ -14,6 +14,21 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/*
+          Stamp the theme before first paint.
+          The tokens answer to `prefers-color-scheme`, so without this a person
+          on a dark desktop gets a dark app they never chose. Light is the
+          product default; only an explicit stored choice changes it. Inline and
+          blocking on purpose — deferring it means a visible flash of the wrong
+          theme on every navigation.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('erp-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}})();`,
+          }}
+        />
+      </head>
       <body>
         <SessionProvider>
           {children}
