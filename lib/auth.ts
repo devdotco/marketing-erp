@@ -5,6 +5,8 @@ import GoogleProvider from "next-auth/providers/google";
 import SendGridProvider from "next-auth/providers/sendgrid";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { verifyShellToken } from "@/lib/shell-token";
+import { provisionFromShell } from "@/lib/shell-provision";
 import { $Enums } from "@prisma/client";
 type MemberRole = $Enums.MemberRole;
 
@@ -69,6 +71,39 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           return { id: user.id, email: user.email, name: user.name, image: user.image };
         } catch (err) {
           console.error("[auth] authorize error:", err);
+          return null;
+        }
+      },
+    }),
+
+    /**
+     * Arriving from app.erp.io.
+     *
+     * A provider rather than a bespoke route because NextAuth owns session
+     * creation here: minting a session cookie by hand beside it is how two
+     * notions of "signed in" start to disagree. The token is the credential —
+     * short-lived, single-audience, signed by the shell — and it is verified
+     * before anything is written.
+     *
+     * Local password and Google sign-in keep working alongside this. Somebody
+     * who already has an account here is matched on their email rather than
+     * given a second one.
+     */
+    CredentialsProvider({
+      id: "shell",
+      name: "erp.io",
+      credentials: { token: { label: "Shell token", type: "text" } },
+      async authorize(credentials) {
+        const token = credentials?.token;
+        if (typeof token !== "string" || !token) return null;
+        try {
+          const claims = await verifyShellToken(token);
+          const user = await provisionFromShell(claims);
+          return { id: user.id, email: user.email, name: user.name, image: user.image };
+        } catch (err) {
+          // Never surfaced to the browser: the reason a signature failed is a
+          // signature oracle. Logged so a real misconfiguration is findable.
+          console.error("[auth] shell hand-off rejected:", (err as Error).message);
           return null;
         }
       },

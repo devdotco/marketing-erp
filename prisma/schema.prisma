@@ -68,6 +68,10 @@ model Workspace {
   id              String            @id @default(cuid())
   name            String
   slug            String            @unique
+  /// The app.erp.io organisation this workspace mirrors. Null for workspaces
+  /// created here before the shell hand-off existed, and for any created by
+  /// local sign-up — they are not wrong, they simply have no counterpart.
+  shellOrgId      String?           @unique
   plan            WorkspacePlan     @default(FREE)
   members         WorkspaceMember[]
   agentConfigs    AgentConfig[]
