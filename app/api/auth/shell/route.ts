@@ -6,7 +6,7 @@ import { appUrl, withBase } from "@/lib/base-path";
  * Where the shell hands off.
  *
  *   app.erp.io/api/shell/auth/module-token?aud=marketing&next=/
- *     → marketing.erp.io/api/auth/shell?token=…&next=/
+ *     → app.erp.io/marketing/api/auth/shell?token=…&next=/
  *
  * Deliberately NOT under `/api/auth/callback`. That path belongs to NextAuth,
  * which routes it by provider — a bare `/api/auth/callback?token=…` is not a

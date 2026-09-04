@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     // - generates a token in the correct format
     // - stores it in VerificationToken table
     // - calls our sendVerificationRequest (which sends via SendGrid)
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://marketing.erp.io";
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.erp.io/marketing";
     await signIn("sendgrid", {
       email: normalized,
       redirectTo: appUrl,

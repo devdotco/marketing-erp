@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { signIn } from "@/lib/auth";
+import { withBase } from "@/lib/base-path";
 
 export const metadata = { title: "Create account — marketing.erp.io" };
 
@@ -27,7 +28,7 @@ export default async function SignupPage() {
         <form
           action={async () => {
             "use server";
-            await signIn("google", { redirectTo: "/onboarding" });
+            await signIn("google", { redirectTo: withBase("/onboarding") });
           }}
         >
           <button type="submit" className="btn btn-secondary" style={{ width: "100%", marginBottom: 16 }}>

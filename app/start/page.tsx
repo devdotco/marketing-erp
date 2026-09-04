@@ -9,6 +9,7 @@ import Link from "next/link";
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { AGENTS } from "@/lib/agents";
+import { withBase } from "@/lib/base-path";
 
 export const metadata = { title: "Start free — marketing.erp.io" };
 
@@ -190,7 +191,7 @@ export default async function StartPage() {
           <form
             action={async () => {
               "use server";
-              await signIn("google", { redirectTo: "/onboarding" });
+              await signIn("google", { redirectTo: withBase("/onboarding") });
             }}
           >
             <button

@@ -4,6 +4,7 @@ import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { MagicLinkForm } from "./MagicLinkForm";
+import { ensureBase } from "@/lib/base-path";
 
 export const metadata = { title: "Sign in — marketing.erp.io" };
 
@@ -152,7 +153,7 @@ export default async function LoginPage({
           <form
             action={async () => {
               "use server";
-              await signIn("google", { redirectTo: params.callbackUrl || "/" });
+              await signIn("google", { redirectTo: ensureBase(params.callbackUrl || "/") });
             }}
           >
             <button

@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     template: "%s — marketing.erp.io",
   },
   description: "48 AI marketing agents. One operator. You.",
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "https://marketing.erp.io"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "https://app.erp.io/marketing"),
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

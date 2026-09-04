@@ -31,6 +31,19 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(withBase(path), init);
 }
 
+/**
+ * A path with the mount on it, exactly once.
+ *
+ * For values that arrive from somewhere else — a `callbackUrl` off a query
+ * string, a form field — where it is genuinely unknown whether the mount is
+ * already attached. `withBase` would double it; this will not.
+ */
+export function ensureBase(path: string): string {
+  if (!path.startsWith("/")) return withBase(path);
+  if (path === BASE_PATH || path.startsWith(`${BASE_PATH}/`)) return path;
+  return withBase(path);
+}
+
 /** The app's own absolute origin-plus-mount, for links that leave the browser. */
 export function appUrl(path = "/"): string {
   const base = (process.env.NEXT_PUBLIC_APP_URL ?? "https://app.erp.io/marketing").replace(/\/$/, "");

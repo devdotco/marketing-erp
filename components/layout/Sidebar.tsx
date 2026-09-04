@@ -10,6 +10,7 @@ import {
   ChevronDown, LogOut, Plus, ExternalLink, Menu, X, Activity,
   Crosshair, Target, PenSquare, CalendarClock, UserCheck,
 } from "lucide-react";
+import { withBase } from "@/lib/base-path";
 
 interface WorkspaceSummary {
   id: string;
@@ -417,7 +418,7 @@ export function Sidebar({ workspaces, activeWorkspaceId, user, enabledCounts }: 
             </div>
             <span className="user-name">{user.name ?? user.email}</span>
             <button
-              onClick={() => signOut({ callbackUrl: "/login" })}
+              onClick={() => signOut({ callbackUrl: withBase("/login") })}
               style={{ background: "none", border: "none", cursor: "pointer", padding: 4, borderRadius: 4, color: "var(--text-dim)" }}
               title="Sign out"
             >

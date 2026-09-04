@@ -7,6 +7,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { notifyNewSignup } from "@/lib/integrations/notify-signup";
 import { cookies } from "next/headers";
+import { ensureBase } from "@/lib/base-path";
 
 const SignUpSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -125,7 +126,7 @@ export async function loginWithCredentials(formData: FormData) {
   const callbackUrl = (formData.get("callbackUrl") as string) || "/";
 
   try {
-    await signIn("credentials", { email, password, redirectTo: callbackUrl });
+    await signIn("credentials", { email, password, redirectTo: ensureBase(callbackUrl) });
   } catch (err) {
     // NextAuth v5 throws a NEXT_REDIRECT on success — must re-throw it
     if ((err as { digest?: string })?.digest?.startsWith("NEXT_REDIRECT")) throw err;
