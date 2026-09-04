@@ -17,6 +17,23 @@ export async function GET(req: NextRequest) {
 
   const adminEmail = process.env.ADMIN_EMAIL || "nate@dev.co";
 
+  // ?action=list → return all integrations + social accounts for the admin workspace
+  if (req.nextUrl.searchParams.get("action") === "list") {
+    const user = await prisma.user.findUnique({ where: { email: adminEmail } });
+    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+    const membership = await prisma.workspaceMember.findFirst({ where: { userId: user.id }, orderBy: { createdAt: "asc" } });
+    if (!membership) return NextResponse.json({ error: "No workspace" }, { status: 404 });
+    const integrations = await prisma.integration.findMany({
+      where: { workspaceId: membership.workspaceId },
+      select: { provider: true, label: true, expiresAt: true, scopes: true, createdAt: true },
+    });
+    const socialAccounts = await prisma.socialAccount.findMany({
+      where: { workspaceId: membership.workspaceId },
+      select: { platform: true, accountType: true, displayName: true, username: true, expiresAt: true, scopes: true },
+    });
+    return NextResponse.json({ workspaceId: membership.workspaceId, integrations, socialAccounts });
+  }
+
   // Find or create the admin user
   let user = await prisma.user.findUnique({ where: { email: adminEmail } });
   if (!user) {
