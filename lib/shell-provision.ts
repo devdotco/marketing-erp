@@ -59,15 +59,27 @@ export async function provisionFromShell(claims: ShellClaims) {
 /**
  * The shell's role, narrowed to this app's.
  *
- * Anything unrecognised becomes the least it could mean. A new role name added
- * in the shell must not arrive here as more access than it was given.
+ * The shell normalises onto the same four-tier ladder this app uses, so most of
+ * this is an identity mapping. The exception is the top of it, and it is the
+ * important line here:
+ *
+ * **SUPER_ADMIN is never granted from a hand-off.** In the shell that means
+ * "administrator of their own organisation" — which every new sign-up is, by
+ * construction. In THIS app `isSuperAdmin` is a platform-operator flag: any
+ * SUPER_ADMIN membership anywhere unlocks /superadmin and every workspace in
+ * it. Passing the claim through would make each new customer an operator of the
+ * whole product, so the top of the shell's ladder lands as WORKSPACE_ADMIN,
+ * which is what "admin of their own workspace" actually means here.
+ *
+ * Anything unrecognised becomes the least it could mean: a role added to the
+ * shell later must not arrive as more access than it was given.
  */
 function roleFor(role: string | null): MemberRole {
   switch ((role ?? "").toUpperCase()) {
-    case "PLATFORM_ADMIN":
-    case "ENTITY_ADMIN":
+    case "SUPER_ADMIN":
+    case "WORKSPACE_ADMIN":
       return "WORKSPACE_ADMIN" as MemberRole;
-    case "TEAM_MEMBER":
+    case "OPERATOR":
       return "OPERATOR" as MemberRole;
     default:
       return "VIEWER" as MemberRole;
