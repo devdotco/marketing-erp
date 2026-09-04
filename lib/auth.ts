@@ -24,6 +24,11 @@ declare module "next-auth" {
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
+  // The app is mounted at /marketing, and NextAuth builds its own callback URLs
+  // from this rather than from Next's basePath. Left at the default it would
+  // send providers to app.erp.io/api/auth/callback/… — the SHELL's origin, which
+  // has no such route.
+  basePath: "/marketing/api/auth",
   // Required when running behind Cloudflare / Traefik — without this NextAuth v5
   // throws UntrustedHost on every session check
   trustHost: true,

@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { saveAgentConfig } from "@/lib/actions/agents";
 import type { AgentInput } from "@/lib/agent-metadata";
+import Link from "next/link";
 
 interface ConfigureFormProps {
   workspaceId: string;
@@ -165,7 +166,7 @@ export function ConfigureForm({
         >
           <strong style={{ fontSize: 12, color: "var(--text)" }}>Required integrations:</strong>{" "}
           {integrations.join(", ")}.{" "}
-          <a href="/integrations" style={{ color: "var(--success)" }}>Manage →</a>
+          <Link href="/integrations" style={{ color: "var(--success)" }}>Manage →</Link>
         </div>
       )}
 
@@ -181,7 +182,7 @@ export function ConfigureForm({
         >
           {pending ? "Saving…" : "Save configuration"}
         </button>
-        <a href={`/agents/${agentSlug}`} className="btn btn-ghost">Cancel</a>
+        <Link href={`/agents/${agentSlug}`} className="btn btn-ghost">Cancel</Link>
       </div>
     </form>
   );

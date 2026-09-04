@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { apiFetch } from "@/lib/base-path";
 
 interface Props {
   workspaceId: string;
@@ -26,7 +27,7 @@ export function WorkspaceSettingsForm({ workspaceId, currentName, currentSlug, c
     e.preventDefault();
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/settings/workspace", {
+      const res = await apiFetch("/api/settings/workspace", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, name, businessName: bName, websiteUrl: url, industry: ind }),

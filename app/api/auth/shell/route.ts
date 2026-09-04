@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { signIn } from "@/lib/auth";
+import { appUrl } from "@/lib/base-path";
 
 /**
  * Where the shell hands off.
@@ -52,7 +53,9 @@ function isRedirect(err: unknown): boolean {
  * signature failed is information an attacker is asking for.
  */
 function fail(reason: string): NextResponse {
-  const url = new URL("/login", process.env.NEXTAUTH_URL ?? "https://marketing.erp.io");
+  // `appUrl` carries the mount. NEXTAUTH_URL alone would drop it and send the
+  // person to the shell's /login, which is a different application.
+  const url = new URL(appUrl("/login"));
   url.searchParams.set("error", "ShellHandoff");
   url.searchParams.set("detail", reason);
   return NextResponse.redirect(url);

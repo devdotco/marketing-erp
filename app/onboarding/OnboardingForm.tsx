@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/base-path";
 
 const STEPS = [
   { id: 1, label: "Your business", hint: "Help agents understand what you do" },
@@ -37,7 +38,7 @@ export default function OnboardingPage() {
   async function handleComplete() {
     startTransition(async () => {
       // Submit to server action — save BusinessProfile + enable first agent
-      const res = await fetch("/api/onboarding/complete", {
+      const res = await apiFetch("/api/onboarding/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),

@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/base-path";
 
 interface RunButtonProps {
   workspaceId: string;
@@ -18,7 +19,7 @@ export function RunButton({ workspaceId, agentSlug, agentConfigId }: RunButtonPr
     setError(null);
     startTransition(async () => {
       try {
-        const res = await fetch("/api/runs", {
+        const res = await apiFetch("/api/runs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId, agentSlug, agentConfigId }),

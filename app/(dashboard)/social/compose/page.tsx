@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { apiFetch } from "@/lib/base-path";
 
 interface SocialAccount {
   id: string;
@@ -33,7 +34,7 @@ export default function SocialComposePage() {
   useEffect(() => {
     async function fetchAccounts() {
       try {
-        const res = await fetch("/api/social/accounts");
+        const res = await apiFetch("/api/social/accounts");
         if (res.ok) {
           const data: SocialAccount[] = await res.json();
           setAccounts(data);
@@ -73,7 +74,7 @@ export default function SocialComposePage() {
           body.scheduledAt = new Date(scheduledAt).toISOString();
         }
 
-        const res = await fetch("/api/social/posts", {
+        const res = await apiFetch("/api/social/posts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),

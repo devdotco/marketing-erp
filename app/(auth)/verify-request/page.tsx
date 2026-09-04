@@ -1,3 +1,4 @@
+import Link from "next/link";
 export default function VerifyRequestPage() {
   return (
     <div style={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", padding: "40px 24px" }}>
@@ -9,7 +10,7 @@ export default function VerifyRequestPage() {
         </p>
         <p style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 24 }}>
           Didn&apos;t get it? Check spam, or{" "}
-          <a href="/login" style={{ color: "var(--text-muted)", textDecoration: "underline" }}>try again</a>.
+          <Link href="/login" style={{ color: "var(--text-muted)", textDecoration: "underline" }}>try again</Link>.
         </p>
       </div>
     </div>

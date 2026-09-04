@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/base-path";
 
 export function RunActions({ runId }: { runId: string }) {
   const [rejectReason, setRejectReason] = useState("");
@@ -13,7 +14,7 @@ export function RunActions({ runId }: { runId: string }) {
   function handleApprove() {
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/runs/${runId}/approve`, { method: "POST" });
+      const res = await apiFetch(`/api/runs/${runId}/approve`, { method: "POST" });
       if (!res.ok) {
         const d = await res.json();
         setError(d.error ?? "Failed to approve");
@@ -26,7 +27,7 @@ export function RunActions({ runId }: { runId: string }) {
   function handleReject() {
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/runs/${runId}/reject`, {
+      const res = await apiFetch(`/api/runs/${runId}/reject`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: rejectReason }),

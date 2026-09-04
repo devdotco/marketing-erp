@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
+import { apiFetch } from "@/lib/base-path";
 
 const PROVIDER_MAP: Record<string, { name: string; enumValue: string }> = {
   apollo: { name: "Apollo.io", enumValue: "APOLLO" },
@@ -48,7 +49,7 @@ export default function ConnectProviderPage() {
     setErrorMsg("");
 
     try {
-      const res = await fetch("/api/integrations/connect", {
+      const res = await apiFetch("/api/integrations/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: providerInfo.enumValue, apiKey: apiKey.trim() }),

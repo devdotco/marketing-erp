@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { apiFetch } from "@/lib/base-path";
 
 export function InviteForm({ workspaceId }: { workspaceId: string }) {
   const [email, setEmail] = useState("");
@@ -13,7 +14,7 @@ export function InviteForm({ workspaceId }: { workspaceId: string }) {
     e.preventDefault();
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/invitations", {
+      const res = await apiFetch("/api/invitations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, email, role }),

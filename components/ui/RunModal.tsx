@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentInput } from "@/lib/agent-metadata";
+import { apiFetch } from "@/lib/base-path";
 
 interface RunModalProps {
   workspaceId: string;
@@ -95,7 +96,7 @@ export function RunModal({
     setError(null);
     startTransition(async () => {
       try {
-        const res = await fetch("/api/runs", {
+        const res = await apiFetch("/api/runs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId, agentSlug, agentConfigId, input }),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { apiFetch } from "@/lib/base-path";
 
 export function MagicLinkForm() {
   const [email, setEmail] = useState("");
@@ -10,7 +11,7 @@ export function MagicLinkForm() {
     e.preventDefault();
     setState("loading");
 
-    const res = await fetch("/api/auth/magic-link", {
+    const res = await apiFetch("/api/auth/magic-link", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
