@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { signIn } from "@/lib/auth";
-import { appUrl } from "@/lib/base-path";
+import { appUrl, withBase } from "@/lib/base-path";
 
 /**
  * Where the shell hands off.
@@ -23,8 +23,10 @@ export async function GET(req: NextRequest) {
   if (!token) return fail("missing token");
 
   try {
-    // Throws a redirect on success, which is what we want to escape into.
-    await signIn("shell", { token, redirectTo: next });
+    // `withBase`, because Auth.js resolves redirectTo against the site ORIGIN.
+    // A bare "/" is app.erp.io/, which is the shell — so a successful hand-off
+    // signed the person in and then dropped them in a different application.
+    await signIn("shell", { token, redirectTo: withBase(next) });
     return fail("sign in did not complete");
   } catch (err) {
     // NextAuth signals its redirect by throwing; anything with a digest is that
