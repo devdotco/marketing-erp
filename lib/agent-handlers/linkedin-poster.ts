@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 
 const client = new Anthropic();
 
@@ -18,9 +19,18 @@ export const linkedinPosterHandler: AgentHandler = async (run, updateStatus) => 
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
+  const linkedinIntegration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "LINKEDIN",
+      },
+    },
+  });
+
   const resolvedTone =
     toneOverride === "Use Brand default"
-      ? ((businessProfile as any)?.brandVoice ?? "Professional")
+      ? (businessProfile?.brandVoice ?? "Professional")
       : toneOverride;
 
   const horizonLabel =
@@ -31,13 +41,13 @@ export const linkedinPosterHandler: AgentHandler = async (run, updateStatus) => 
       : "4 weeks";
 
   const systemPrompt = `You are an expert LinkedIn content strategist specialising in ${
-    (businessProfile as any)?.industry ?? "business"
+    businessProfile?.industry ?? "business"
   }.
 Your task is to create a batch of high-performing LinkedIn posts for ${
     accountType === "Company Page" ? "a company LinkedIn page" : "a personal LinkedIn profile"
   }.
 Tone/voice: ${resolvedTone}
-Company: ${(businessProfile as any)?.companyName ?? "the business"}
+Company: ${businessProfile?.businessName ?? "the business"}
 Always respond with ONLY a valid JSON object — no markdown fences, no extra prose.`;
 
   const userPrompt = `Create ${batchSize} LinkedIn posts to distribute over ${horizonLabel}.
@@ -46,11 +56,11 @@ Content pillars to draw from:
 ${contentPillars || "Thought Leadership, Industry Trends, Company Culture, Product Value, Client Success Stories"}
 
 Business context:
-- Company: ${(businessProfile as any)?.companyName ?? "Our Business"}
-- Industry: ${(businessProfile as any)?.industry ?? "Business Services"}
-- Target audience: ${(businessProfile as any)?.targetAudience ?? "Business professionals and decision-makers"}
-- Key value proposition: ${(businessProfile as any)?.valueProposition ?? "Delivering exceptional results for clients"}
-- Website: ${(businessProfile as any)?.website ?? "https://example.com"}
+- Company: ${businessProfile?.businessName ?? "Our Business"}
+- Industry: ${businessProfile?.industry ?? "Business Services"}
+- Target audience: ${businessProfile?.targetAudience ?? "Business professionals and decision-makers"}
+- Key value proposition: ${businessProfile?.uniqueValueProp ?? "Delivering exceptional results for clients"}
+- Website: ${businessProfile?.websiteUrl ?? "https://example.com"}
 
 Return exactly this JSON shape (no other keys at root level):
 {
@@ -100,12 +110,82 @@ Return exactly this JSON shape (no other keys at root level):
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect LinkedIn in Settings to enable live scheduling, reach analytics, and auto-publish";
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {
     await updateStatus("AWAITING_APPROVAL", output);
+  }
+
+  // ── Auto-publish first post when approval not required ───────────────────
+  if (!requireApproval && linkedinIntegration) {
+    try {
+      const creds = await decryptCredentials<{
+        access_token: string;
+        person_id: string;
+        company_id?: string;
+      }>(linkedinIntegration.encryptedCredentials);
+
+      const posts = (output.posts as Array<Record<string, unknown>>) ?? [];
+      const firstPost = posts[0];
+
+      if (firstPost) {
+        const postText = [
+          String(firstPost.hook ?? ""),
+          String(firstPost.body ?? ""),
+          String(firstPost.cta ?? ""),
+          ((firstPost.hashtags as string[]) ?? []).join(" "),
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+          .slice(0, 3000);
+
+        const isCompanyPage = accountType === "Company Page" && creds.company_id;
+        const author = isCompanyPage
+          ? `urn:li:organization:${creds.company_id}`
+          : `urn:li:person:${creds.person_id}`;
+
+        const liRes = await fetch("https://api.linkedin.com/rest/posts", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${creds.access_token}`,
+            "LinkedIn-Version": "202410",
+            "X-Restli-Protocol-Version": "2.0.0",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            author,
+            commentary: postText,
+            visibility: "PUBLIC",
+            distribution: {
+              feedDistribution: "MAIN_FEED",
+              targetEntities: [],
+              thirdPartyDistributionChannels: [],
+            },
+            lifecycleState: "PUBLISHED",
+            isReshareDisabledByAuthor: false,
+          }),
+        });
+
+        if (liRes.ok || liRes.status === 201) {
+          const postId = liRes.headers.get("x-restli-id") ?? liRes.headers.get("x-linkedin-id");
+          posts[0] = { ...firstPost, published: true, linkedinPostId: postId, publishedAt: new Date().toISOString() };
+          output.posts = posts;
+          output.publishedCount = 1;
+          output.source = "live";
+        } else {
+          const errBody = await liRes.text().catch(() => "");
+          output.publishError = `LinkedIn API ${liRes.status}: ${errBody}`;
+          output.source = "draft";
+        }
+      }
+    } catch (err) {
+      output.publishError = err instanceof Error ? err.message : "LinkedIn publish failed";
+      output.source = "draft";
+    }
+  } else if (!linkedinIntegration) {
+    output.source = "draft";
+    output.simulationNote =
+      "Connect LinkedIn in Settings > Integrations to enable auto-publishing. Store credentials as { access_token, person_id } for personal profiles or add company_id for Company Pages.";
   }
 
   const inputTokens = message.usage.input_tokens;
