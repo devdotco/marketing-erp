@@ -14,6 +14,9 @@ export default auth((req: NextRequest & { auth: { user?: { id: string; isSuperAd
     pathname.startsWith("/invite/") ||
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/admin") ||
+    pathname.startsWith("/api/cron") ||
+    pathname.startsWith("/api/linkedin") ||
+    pathname.startsWith("/api/x") ||
     pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon") ||

@@ -79,6 +79,8 @@ model Workspace {
   oauthStates       OAuthState[]
   outboundPlays     OutboundPlay[]
   outboundProspects OutboundProspect[]
+  socialAccounts    SocialAccount[]
+  socialPosts       SocialPost[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 }
@@ -335,4 +337,66 @@ model OutboundProspect {
   updatedAt         DateTime        @updatedAt
 
   @@unique([workspaceId, email])
+}
+
+// ── Social Publishing ─────────────────────────────────────────────────────────
+
+enum SocialPlatform {
+  LINKEDIN
+  TWITTER_X
+}
+
+enum SocialAccountType {
+  PERSONAL
+  COMPANY
+}
+
+enum SocialPostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+model SocialAccount {
+  id                String            @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform          SocialPlatform
+  accountType       SocialAccountType @default(PERSONAL)
+  platformAccountId String
+  displayName       String
+  username          String?
+  headline          String?
+  avatarUrl         String?
+  platformEmail     String?
+  organizationUrn   String?
+  companyName       String?
+  accessToken       String
+  refreshToken      String?
+  expiresAt         DateTime
+  scopes            String?
+  posts             SocialPost[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([workspaceId, platform, platformAccountId])
+}
+
+model SocialPost {
+  id              String           @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  socialAccountId String
+  socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  content         String
+  mediaUrls       Json             @default("[]")
+  status          SocialPostStatus @default(DRAFT)
+  scheduledAt     DateTime?
+  publishedAt     DateTime?
+  platformPostId  String?
+  errorMessage    String?
+  aiGenerated     Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 }
