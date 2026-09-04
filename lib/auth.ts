@@ -151,9 +151,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
   },
 
+  // Mount-prefixed. NextAuth resolves these against the site ORIGIN, not
+  // against Next's basePath, so a bare "/login" sends people to app.erp.io/login
+  // — the shell's sign-in, a different application. Nothing warns about it: the
+  // redirect is well formed, it just arrives somewhere else.
   pages: {
-    signIn: "/login",
-    error: "/login",
-    verifyRequest: "/verify-request",
+    signIn: "/marketing/login",
+    error: "/marketing/login",
+    verifyRequest: "/marketing/verify-request",
   },
 });
