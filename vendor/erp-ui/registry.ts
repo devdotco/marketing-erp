@@ -41,7 +41,7 @@ export type ErpModule = {
 export const ERP_MODULES: readonly ErpModule[] = [
   { key: 'finance',   label: 'Accounting',    url: 'https://app.erp.io/accounting', live: true  },
   { key: 'crm',       label: 'CRM',           url: 'https://app.erp.io/crm',        live: true  },
-  { key: 'pm',        label: 'Projects',      url: 'https://pm.erp.io',             live: true  },
+  { key: 'pm',        label: 'Projects',      url: 'https://app.erp.io/pm',         live: true  },
   { key: 'marketing', label: 'Marketing',     url: 'https://app.erp.io/marketing',  live: true  },
   { key: 'sdr',       label: 'Phony',         url: 'https://phony.erp.io',          live: true  },
   { key: 'messaging', label: 'Chat',          url: 'https://chat.erp.io',           live: true  },
