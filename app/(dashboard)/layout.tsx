@@ -3,7 +3,8 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, getUserWorkspaces, setActiveWorkspace } from "@/lib/actions/workspace";
 import { Sidebar } from "@/components/layout/Sidebar";
-import { AppSwitcher } from "@/components/layout/AppSwitcher";
+import { MarketingRail } from "@/components/layout/Sidebar";
+import { AppShell } from "@erp-ui";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
@@ -72,19 +73,25 @@ export default async function DashboardLayout({ children }: { children: React.Re
   }));
 
   return (
-    <div className="page-shell">
+    <>
       {activeWorkspaceId && <WorkspaceCookieSync workspaceId={activeWorkspaceId} />}
-      <AppSwitcher />
-      <Sidebar
-        workspaces={workspacesForSidebar}
-        activeWorkspaceId={activeWorkspaceId}
-        user={userForSidebar}
-        enabledCounts={enabledCounts}
-      />
-      <div className="main-content">
-        <ThemeToggle />
-        {children}
-      </div>
-    </div>
+      <AppShell
+        moduleLabel="Marketing"
+        rail={<MarketingRail />}
+        sidebar={(
+          <Sidebar
+            workspaces={workspacesForSidebar}
+            activeWorkspaceId={activeWorkspaceId}
+            user={userForSidebar}
+            enabledCounts={enabledCounts}
+          />
+        )}
+      >
+        <div className="main-content">
+          <ThemeToggle />
+          {children}
+        </div>
+      </AppShell>
+    </>
   );
 }

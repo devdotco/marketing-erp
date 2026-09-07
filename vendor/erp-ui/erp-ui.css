@@ -1,0 +1,633 @@
+/* GENERATED — DO NOT EDIT.
+ * Synced from app-erp-io/packages/erp-ui by scripts/sync-erp-ui.mjs.
+ * Edit the source there and re-run the script; edits here are reverted and
+ * fail `sync-erp-ui.mjs --check`.
+ */
+/*
+ * erp.io suite chrome — the canonical sidebar.
+ *
+ * ONE stylesheet for the app rail and the module sidebar, shared by every
+ * application in the suite. Before this existed each module drew its own: three
+ * had no rail at all, the rails that existed hard-coded their own stale list of
+ * applications, and the sidebar was built four different ways (inline styles in
+ * accounting and sign, Tailwind in crm and chat, global classes in the shell, a
+ * `ds` kit in cfo). Moving between two modules changed the furniture.
+ *
+ * Everything here is driven by `--erp-*` custom properties, and that is the
+ * point rather than a style preference: white-label customers repaint their
+ * chrome by overriding four of them (see brand.ts). A hard-coded colour in this
+ * file is a colour their branding cannot reach.
+ *
+ * The `--erp-` prefix is deliberate. Modules already define `--sidebar` and
+ * `--accent` and they do NOT agree on what those mean — crm's `--accent` is
+ * `#1D2535`, a panel surface, while chat's is `#2f5cff`, a brand blue. Reusing
+ * those names would paint the rail with whatever each module happened to mean.
+ */
+
+:root {
+  /* ── Chrome surfaces ──────────────────────────────────────────────────────
+     Dark chrome, light content. This is what 8 of the 12 modules already did
+     and what the product looks like in every screenshot; the shell was the
+     outlier, defaulting to a light rail, so moving between /home and a module
+     flipped the furniture from light to dark mid-navigation. */
+  --erp-rail-bg:            #13141e;
+  --erp-rail-w:             56px;
+  --erp-sidebar-bg:         #1a1d27;
+  --erp-sidebar-w:          240px;
+
+  --erp-sidebar-text:       #c1c4cf;
+  --erp-sidebar-text-muted: #7f8291;
+  --erp-sidebar-strong:     #ffffff;
+
+  /* Translucent on purpose: these sit on whatever `--erp-sidebar-bg` a
+     white-label customer picks, so a literal hover colour would be wrong for
+     every palette but ours. */
+  --erp-sidebar-hover:      rgba(255, 255, 255, 0.07);
+  --erp-sidebar-border:     rgba(255, 255, 255, 0.08);
+  --erp-rail-border:        rgba(255, 255, 255, 0.06);
+  --erp-rail-idle:          rgba(255, 255, 255, 0.5);
+  --erp-rail-hover-text:    rgba(255, 255, 255, 0.85);
+
+  /* ── Brand ──────────────────────────────────────────────────────────────── */
+  --erp-accent:             #2f5cff;
+  --erp-accent-hover:       #2449d0;
+  --erp-accent-fg:          #ffffff;
+
+  /* ── Metrics ────────────────────────────────────────────────────────────── */
+  --erp-radius:             6px;
+  --erp-radius-tile:        8px;
+  --erp-row-h:              30px;
+  --erp-font:               13.5px;
+}
+
+/* ══ Frame ═══════════════════════════════════════════════════════════════════ */
+
+.erp-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* The desktop rail+sidebar pair.
+ *
+ * `display: contents` rather than a real box: the two must remain flex items of
+ * whatever frame they are in, because the shell keeps its own frame (it has a
+ * 48px top bar, so its content is `calc(100vh - 48px)` and cannot use
+ * `.erp-shell`). Wrapping them gives one thing to hide at the mobile
+ * breakpoint, in the shell and in a module alike, without either of them
+ * needing to be a direct child of a known parent. */
+.erp-chrome { display: contents; }
+
+.erp-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* ══ App rail — which application am I in ════════════════════════════════════ */
+
+.erp-rail {
+  width: var(--erp-rail-w);
+  min-width: var(--erp-rail-w);
+  flex-shrink: 0;
+  /* `align-self: stretch`, NOT `height: 100%`.
+   *
+   * A flex item only stretches to its container while its height is `auto`;
+   * setting an explicit height opts out. `height: 100%` then resolves against
+   * the container's height, and the shell's row is sized by `min-height: 100vh`
+   * on an ancestor rather than a definite height — so the percentage had
+   * nothing to resolve against and fell back to content height. The rail
+   * stopped under its last icon and the sidebar under "Sign out", leaving the
+   * page white below both. */
+  align-self: stretch;
+  min-height: 0;
+  background: var(--erp-rail-bg);
+  border-right: 1px solid var(--erp-rail-border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.erp-rail::-webkit-scrollbar { display: none; }
+
+.erp-rail-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--erp-radius-tile);
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+  font-weight: 800;
+  font-style: italic;
+  font-size: 13px;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  user-select: none;
+}
+
+.erp-rail-sep {
+  width: 20px;
+  height: 1px;
+  background: var(--erp-rail-border);
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+.erp-rail-spacer { flex: 1; min-height: 8px; }
+
+.erp-rail-btn {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--erp-radius-tile);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  color: var(--erp-rail-idle);
+  text-decoration: none;
+  transition: background 0.1s, color 0.1s;
+}
+.erp-rail-btn:hover {
+  background: var(--erp-sidebar-hover);
+  color: var(--erp-rail-hover-text);
+}
+.erp-rail-btn:focus-visible {
+  outline: 2px solid var(--erp-accent);
+  outline-offset: 2px;
+}
+.erp-rail-btn.is-active {
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+}
+
+/* Tooltip. The rail is icon-only, so the label has to be reachable somehow —
+   `title` alone is too slow to appear to help someone scanning for an app. */
+.erp-rail-tip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #0b0c13;
+  color: #fff;
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 60;
+}
+.erp-rail-btn:hover .erp-rail-tip,
+.erp-rail-btn:focus-visible .erp-rail-tip { opacity: 1; }
+
+.erp-rail-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  border: 2px solid var(--erp-rail-bg);
+  box-sizing: content-box;
+}
+
+/* ══ Module sidebar — where in this application am I ═════════════════════════ */
+
+.erp-sidebar {
+  width: var(--erp-sidebar-w);
+  min-width: var(--erp-sidebar-w);
+  flex-shrink: 0;
+  /* Stretch, not a percentage height — see the note on `.erp-rail`. */
+  align-self: stretch;
+  min-height: 0;
+  background: var(--erp-sidebar-bg);
+  border-right: 1px solid var(--erp-sidebar-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.erp-sidebar-head {
+  padding: 16px 14px 12px;
+  border-bottom: 1px solid var(--erp-sidebar-border);
+  flex-shrink: 0;
+}
+
+.erp-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+
+.erp-lockup-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--erp-radius-tile);
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Capped both ways: customer logos arrive at wildly different aspect ratios and
+   an uncapped one either disappears or pushes the module name off the row. */
+.erp-lockup-logo {
+  max-height: 32px;
+  max-width: 150px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.erp-lockup-text { display: flex; flex-direction: column; line-height: 1; min-width: 0; }
+
+.erp-lockup-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--erp-sidebar-text);
+  white-space: nowrap;
+}
+/* The module's own name is the accent-coloured half — "erp.io **Accounting**".
+   brightness() rather than a second token so a white-label accent stays legible
+   against a dark sidebar without asking the customer for two colours. */
+.erp-lockup-module { color: var(--erp-accent); filter: brightness(1.35); }
+
+.erp-lockup-sub {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--erp-sidebar-text-muted);
+  margin-top: 2px;
+}
+
+.erp-sidebar-org { margin-top: 12px; }
+
+/* The module's one create action — "New document", "New issue", "New board".
+ *
+ * Part of the shared sidebar rather than each module's own markup because
+ * every module that has one puts it in the same place, and four of them had
+ * built four differently-sized accent buttons to do it. Optional: a module
+ * with no single obvious create action simply passes nothing. */
+.erp-primary-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 10px 10px 0;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 7px;
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.erp-primary-action:hover { background: var(--erp-accent-hover); }
+.erp-primary-action:focus-visible { outline: 2px solid var(--erp-accent); outline-offset: 2px; }
+
+.erp-sidebar-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  scrollbar-width: thin;
+}
+
+.erp-nav-section-label {
+  margin: 0;
+  padding: 0 8px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--erp-sidebar-text-muted);
+}
+
+.erp-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.erp-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--erp-row-h);
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--erp-radius);
+  background: transparent;
+  color: var(--erp-sidebar-text);
+  font-family: inherit;
+  font-size: var(--erp-font);
+  font-weight: 400;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.erp-nav-row:hover { background: var(--erp-sidebar-hover); }
+.erp-nav-row:focus-visible { outline: 2px solid var(--erp-accent); outline-offset: -2px; }
+.erp-nav-row.is-active {
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  font-weight: 500;
+}
+/* A parent whose child is open: emphasised, but never painted as the
+   destination — it is not where you are. */
+.erp-nav-row.is-ancestor { color: var(--erp-sidebar-strong); font-weight: 560; }
+
+.erp-nav-icon { flex-shrink: 0; }
+
+.erp-nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.erp-nav-chev { flex-shrink: 0; transition: transform 0.15s; }
+.erp-nav-chev.is-open { transform: rotate(90deg); }
+
+.erp-nav-badge {
+  flex-shrink: 0;
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--erp-sidebar-hover);
+  color: var(--erp-sidebar-text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+.erp-nav-row.is-active .erp-nav-badge {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--erp-accent-fg);
+}
+
+.erp-nav-soon {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--erp-sidebar-text-muted);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.erp-nav-row.is-soon { opacity: 0.55; pointer-events: none; }
+
+.erp-nav-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+/* Children are indented to the parent's LABEL, not its icon, so the two levels
+   read as one list rather than two competing ones. */
+.erp-nav-children .erp-nav-row {
+  padding-left: 32px;
+  min-height: 27px;
+  font-size: 12.5px;
+}
+
+/* ══ Footer ══════════════════════════════════════════════════════════════════ */
+
+.erp-sidebar-foot {
+  border-top: 1px solid var(--erp-sidebar-border);
+  padding: 10px 8px 12px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.erp-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--erp-radius);
+  background: transparent;
+  color: var(--erp-sidebar-text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.erp-foot-row:hover { background: var(--erp-sidebar-hover); }
+.erp-foot-row:focus-visible { outline: 2px solid var(--erp-accent); outline-offset: -2px; }
+
+.erp-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--erp-radius);
+  margin-top: 4px;
+}
+
+.erp-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.erp-user-text { flex: 1; min-width: 0; }
+.erp-user-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--erp-sidebar-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.erp-user-email {
+  font-size: 10px;
+  color: var(--erp-sidebar-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ══ Org switcher ════════════════════════════════════════════════════════════ */
+
+.erp-org { position: relative; }
+
+.erp-org-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: var(--erp-radius);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--erp-sidebar-text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.erp-org-btn:hover { background: var(--erp-sidebar-hover); }
+.erp-org-btn:focus-visible { outline: 2px solid var(--erp-accent); outline-offset: -2px; }
+.erp-org-btn[disabled] { cursor: default; }
+.erp-org-btn[disabled]:hover { background: rgba(255, 255, 255, 0.03); }
+
+.erp-org-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.erp-org-icon { flex-shrink: 0; color: var(--erp-sidebar-text-muted); }
+
+/* The scope switcher sits under the org switcher and must read as a refinement
+   of it, not a peer: no border, tighter, slightly muted. */
+.erp-scope { margin-top: 4px; }
+.erp-scope-btn {
+  border-color: transparent;
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--erp-sidebar-text-muted);
+  padding-left: 8px;
+}
+.erp-scope-btn:hover { background: var(--erp-sidebar-hover); color: var(--erp-sidebar-text); }
+.erp-scope-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--erp-sidebar-text-muted);
+  margin-top: 1px;
+}
+
+.erp-org-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 70;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--erp-rail-bg);
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: var(--erp-radius);
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.erp-org-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--erp-sidebar-text);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.erp-org-item:hover { background: var(--erp-sidebar-hover); }
+.erp-org-item.is-active { color: var(--erp-accent); font-weight: 600; }
+
+/* ══ Mobile ══════════════════════════════════════════════════════════════════ */
+
+.erp-mobile-bar { display: none; }
+
+@media (max-width: 1023px) {
+  .erp-chrome { display: none; }
+
+  .erp-mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--erp-sidebar-border);
+    background: var(--erp-sidebar-bg);
+    flex-shrink: 0;
+  }
+
+  .erp-mobile-toggle {
+    background: none;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    color: var(--erp-sidebar-text);
+    display: flex;
+  }
+
+  .erp-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: stretch;
+  }
+  /* The drawer's copies are outside `.erp-chrome`, so the rule above never
+     touches them — which is why it hides the wrapper rather than the classes. */
+
+  .erp-drawer-scrim { flex: 1; background: rgba(0, 0, 0, 0.45); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .erp-rail-btn,
+  .erp-nav-row,
+  .erp-nav-chev,
+  .erp-rail-tip,
+  .erp-foot-row { transition: none; }
+}

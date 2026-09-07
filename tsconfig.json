@@ -19,7 +19,9 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@erp-ui": ["./vendor/erp-ui/index.ts"],
+      "@erp-ui/*": ["./vendor/erp-ui/*"]
     }
   },
   "include": [
