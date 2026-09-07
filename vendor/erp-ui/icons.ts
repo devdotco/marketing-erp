@@ -4,8 +4,8 @@
  * fail `sync-erp-ui.mjs --check`.
  */
 import {
-  MessageSquare, CheckSquare, Users, DollarSign, Handshake, Boxes, Radar,
-  FileSignature, TrendingUp, Megaphone, Share2, PenTool, CreditCard, Scale,
+  MessageSquare, CheckSquare, Users, DollarSign, Handshake, Boxes,
+  FileSignature, TrendingUp, Megaphone, Share2, PenTool, CreditCard, Scale, Phone,
   type LucideIcon,
 } from 'lucide-react'
 import type { ErpModuleKey } from './registry'
@@ -23,12 +23,19 @@ import type { ErpModuleKey } from './registry'
  * to pick its own: accounting drew CRM as a building, the shell drew it as a
  * handshake.
  */
+/**
+ * `sdr` is a PHONE, not a radar dish. The key is historical — the module was
+ * SDR prospecting and is now Phony, a voice agent — and the radar glyph went on
+ * being drawn long after the product stopped being about prospecting. It is
+ * unrecognisable as "the phone product" in a rail of twelve icons, which is
+ * exactly how it got reported as missing when it was there all along.
+ */
 export const ERP_MODULE_ICONS: Record<ErpModuleKey, LucideIcon> = {
   finance: DollarSign,
   crm: Handshake,
   pm: CheckSquare,
   marketing: Megaphone,
-  sdr: Radar,
+  sdr: Phone,
   messaging: MessageSquare,
   portal: Users,
   plm: Boxes,

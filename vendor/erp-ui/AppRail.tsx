@@ -25,9 +25,19 @@ export type ErpRailItem = {
  *
  * `enabled` is the acting organisation's entitlement list. Unentitled modules
  * are ABSENT rather than disabled — a greyed icon advertises a paywall on every
- * screen to someone who already decided not to buy it. Pass `undefined` to show
- * every live module, which is what a module does before it has fetched the
- * shell's answer.
+ * screen to someone who already decided not to buy it.
+ *
+ * `undefined` — or an EMPTY list — shows every live module. The empty case
+ * matters and is deliberate: modules used to fall back to "just me" when the
+ * entitlement lookup failed or a session predated the claim, on the reasoning
+ * that a rail must not promise doors it cannot open. In practice that reasoning
+ * is backwards. A failed lookup is not evidence of a small subscription, and
+ * collapsing to one icon makes the suite look broken to the customer most
+ * likely to own all of it. A door that bounces off the shell's token endpoint
+ * is a smaller failure than a rail that has silently lost eleven applications.
+ *
+ * The only thing that should ever shrink this rail is a real entitlement
+ * answer.
  *
  * `urls` overrides the registry's defaults per key, for the deployments that
  * point at different hosts (the same build serves app.vb.co and app.erp.io).
@@ -42,7 +52,7 @@ export function buildRailItems(opts: {
   const { enabled, urls, badges, handoff } = opts
   return ERP_MODULES
     .filter(m => m.live)
-    .filter(m => (enabled ? enabled.includes(m.key) : true))
+    .filter(m => (enabled?.length ? enabled.includes(m.key) : true))
     .map(m => {
       const url = urls?.[m.key] ?? m.url
       return {
