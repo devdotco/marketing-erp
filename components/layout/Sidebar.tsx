@@ -39,8 +39,14 @@ interface SidebarProps {
  * component. Passing that across the boundary compiles and builds, then throws
  * on every request — it took /crm down for a deploy.
  */
-export function MarketingRail({ brand }: { brand?: ErpBrand | null }) {
-  return <AppRail items={buildRailItems()} activeKey="marketing" brand={brand} />;
+export function MarketingRail({ brand, modules }: { brand?: ErpBrand | null; modules?: string[] | null }) {
+  return (
+    <AppRail
+      items={buildRailItems({ enabled: modules ?? undefined })}
+      activeKey="marketing"
+      brand={brand}
+    />
+  );
 }
 
 const NAV: ErpNavSection[] = [

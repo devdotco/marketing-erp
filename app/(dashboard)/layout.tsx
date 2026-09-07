@@ -8,6 +8,7 @@ import { AppShell } from "@erp-ui";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
+import { loadShellNav } from "@erp-ui/server";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   let session;
@@ -72,12 +73,20 @@ export default async function DashboardLayout({ children }: { children: React.Re
     members: w.members,
   }));
 
+  // White-label chrome and entitlement, both from the shell in one call.
+
+  // Best-effort: brandVars(null) draws the erp.io defaults.
+
+  const { brand, modules } = await loadShellNav();
+
+
   return (
     <>
       {activeWorkspaceId && <WorkspaceCookieSync workspaceId={activeWorkspaceId} />}
       <AppShell
+      brand={brand}
         moduleLabel="Marketing"
-        rail={<MarketingRail />}
+        rail={<MarketingRail brand={brand} modules={modules} />}
         sidebar={(
           <Sidebar
             workspaces={workspacesForSidebar}
