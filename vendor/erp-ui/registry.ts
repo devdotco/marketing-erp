@@ -43,16 +43,16 @@ export const ERP_MODULES: readonly ErpModule[] = [
   { key: 'crm',       label: 'CRM',           url: 'https://app.erp.io/crm',        live: true  },
   { key: 'pm',        label: 'Projects',      url: 'https://app.erp.io/pm',         live: true  },
   { key: 'marketing', label: 'Marketing',     url: 'https://app.erp.io/marketing',  live: true  },
-  { key: 'sdr',       label: 'Phony',         url: 'https://phony.erp.io',          live: true  },
-  { key: 'messaging', label: 'Chat',          url: 'https://chat.erp.io',           live: true  },
+  { key: 'sdr',       label: 'Phony',         url: 'https://app.erp.io/phony',          live: true  },
+  { key: 'messaging', label: 'Chat',          url: 'https://app.erp.io/chat',           live: true  },
   { key: 'portal',    label: 'Client Portal', url: 'https://portal.erp.io',         live: true  },
-  { key: 'plm',       label: 'PLM',           url: 'https://plm.erp.io',            live: true  },
-  { key: 'sign',      label: 'Sign',          url: 'https://sign.erp.io',           live: true  },
+  { key: 'plm',       label: 'PLM',           url: 'https://app.erp.io/plm',            live: true  },
+  { key: 'sign',      label: 'Sign',          url: 'https://app.erp.io/sign',           live: true  },
   { key: 'cfo',       label: 'CFO',           url: 'https://app.erp.io/cfo',        live: true  },
   { key: 'social',    label: 'Social',        url: 'https://social.erp.io',         live: false },
-  { key: 'canvas',    label: 'Canvas',        url: 'https://canvas.erp.io',         live: true  },
+  { key: 'canvas',    label: 'Canvas',        url: 'https://app.erp.io/canvas',     live: true  },
   { key: 'pey',       label: 'Pey',           url: 'https://pey.vb.co',             live: false },
-  { key: 'legal',     label: 'Legal',         url: 'https://legal.erp.io',          live: true  },
+  { key: 'legal',     label: 'Legal',         url: 'https://app.erp.io/legal',      live: true  },
 ]
 
 export const ERP_MODULE_KEYS: readonly ErpModuleKey[] = ERP_MODULES.map(m => m.key)
