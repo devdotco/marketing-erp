@@ -631,3 +631,165 @@
   .erp-rail-tip,
   .erp-foot-row { transition: none; }
 }
+
+/* ══ Assistant dock ══════════════════════════════════════════════════════════
+   Bottom right of every module. Uses the chrome's own tokens, so a white-label
+   customer's accent carries into it without a second palette to configure. */
+
+.erp-dock-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 90;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 22px;
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+.erp-dock-fab:hover { background: var(--erp-accent-hover); }
+.erp-dock-fab:focus-visible { outline: 2px solid var(--erp-accent); outline-offset: 3px; }
+
+.erp-dock {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 90;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  /* Tall enough to hold a conversation, capped so it never covers the page. */
+  height: min(560px, calc(100vh - 40px));
+  display: flex;
+  flex-direction: column;
+  background: var(--erp-sidebar-bg);
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  color: var(--erp-sidebar-text);
+  overflow: hidden;
+}
+
+.erp-dock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--erp-sidebar-border);
+  flex-shrink: 0;
+}
+.erp-dock-title { font-size: 13px; font-weight: 600; color: var(--erp-sidebar-strong); }
+.erp-dock-close {
+  background: none; border: none; cursor: pointer; padding: 2px;
+  color: var(--erp-sidebar-text-muted); display: flex;
+}
+.erp-dock-close:hover { color: var(--erp-sidebar-strong); }
+
+.erp-dock-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+}
+
+.erp-dock-hint {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--erp-sidebar-text-muted);
+}
+
+.erp-dock-starter {
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--erp-sidebar-text);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.erp-dock-starter:hover { background: var(--erp-sidebar-hover); }
+
+.erp-dock-turn { display: flex; flex-direction: column; gap: 6px; }
+.erp-dock-turn.is-you { align-items: flex-end; }
+.erp-dock-turn.is-you .erp-dock-text {
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  border-radius: 10px 10px 2px 10px;
+}
+.erp-dock-turn.is-assistant .erp-dock-text {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px 10px 10px 2px;
+}
+.erp-dock-text {
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 90%;
+  white-space: pre-wrap;
+}
+
+.erp-dock-sources { display: flex; flex-direction: column; gap: 2px; }
+.erp-dock-source {
+  font-size: 11px;
+  color: var(--erp-sidebar-text-muted);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.erp-dock-source:hover { color: var(--erp-accent); text-decoration: underline; }
+
+.erp-dock-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #ff8b8b;
+}
+
+.erp-dock-spin { animation: erp-dock-spin 1s linear infinite; }
+@keyframes erp-dock-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .erp-dock-spin { animation: none; } }
+
+.erp-dock-form {
+  display: flex;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid var(--erp-sidebar-border);
+  flex-shrink: 0;
+}
+.erp-dock-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--erp-sidebar-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--erp-sidebar-text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.erp-dock-input:focus-visible { border-color: var(--erp-accent); }
+.erp-dock-send {
+  width: 34px;
+  border: none;
+  border-radius: 8px;
+  background: var(--erp-accent);
+  color: var(--erp-accent-fg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.erp-dock-send:disabled { opacity: 0.45; cursor: default; }

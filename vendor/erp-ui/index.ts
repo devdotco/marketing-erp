@@ -12,6 +12,8 @@
  * there, sync, and deploy the modules you changed.
  */
 export { AppShell } from './AppShell'
+export { AgentDock } from './AgentDock'
+export { startersFor, STARTER_QUESTIONS } from './starter-questions'
 export { useErpChromeClose } from './chrome-context'
 export { AppRail, buildRailItems, type ErpRailItem } from './AppRail'
 export { ModuleSidebar, type ErpNavItem, type ErpNavSection } from './ModuleSidebar'
@@ -25,3 +27,8 @@ export {
   type ErpModule, type ErpModuleKey,
 } from './registry'
 export { ERP_MODULE_ICONS } from './icons'
+export {
+  fetchModuleLinks,
+  type ErpLinkedRecord,
+  type ErpLinkResponse,
+} from './module-links'
