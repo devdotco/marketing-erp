@@ -69,12 +69,19 @@ export const ERP_DEFAULT_BRAND: Required<Pick<ErpBrand, 'mark'>> & ErpBrand = {
 export function readableOn(hex: string): string {
   const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim())
   if (!m) return '#ffffff'
-  const h = m[1].length === 3 ? m[1].replace(/./g, c => c + c) : m[1]
-  const ch = [0, 2, 4].map(i => {
+  // `m[1]` is `string | undefined` under `noUncheckedIndexedAccess`, even though
+  // a successful match guarantees the group.
+  const raw = m[1] ?? ''
+  const h = raw.length === 3 ? raw.replace(/./g, c => c + c) : raw
+  // Destructured with defaults rather than indexed: under
+  // `noUncheckedIndexedAccess` — which cfo-erp-io enables — every element of a
+  // mapped array is `number | undefined`, and the arithmetic below would not
+  // compile in a module that has it on.
+  const [r = 0, g = 0, b = 0] = [0, 2, 4].map(i => {
     const v = parseInt(h.slice(i, i + 2), 16) / 255
     return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
   })
-  const lum = 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
   // 0.179 is the crossover where contrast against white and against black are
   // equal (both 4.5:1). Above it, black wins.
   return lum > 0.179 ? '#0a0d14' : '#ffffff'

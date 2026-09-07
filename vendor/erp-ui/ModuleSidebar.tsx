@@ -5,7 +5,7 @@
  */
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useState, type ComponentType, type ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { ChevronRight, Settings, LogOut } from 'lucide-react'
@@ -23,7 +23,15 @@ export type ErpNavItem = {
    */
   key?: string
   href?: string
-  icon?: LucideIcon
+  /**
+   * Any component that renders an icon.
+   *
+   * Widened from `LucideIcon` because a module may have its own kit — cfo-erp-io
+   * draws per-route glyphs from its `ds` package, and forcing those through a
+   * Lucide-shaped type meant either casting at every call site or not using the
+   * shared row at all.
+   */
+  icon?: ComponentType<{ size?: number; className?: string }>
   /** Unread or outstanding count. Zero and undefined both render nothing. */
   badge?: number
   /** Match this href only, never its children — for a hub above its own pages. */
