@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId, getUserWorkspaces, setActiveWorkspace } from "@/lib/actions/workspace";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { MarketingRail } from "@/components/layout/Sidebar";
-import { AppShell } from "@erp-ui";
+import { AppShell, AgentDock } from "@erp-ui";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
@@ -100,7 +100,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
           <ThemeToggle />
           {children}
         </div>
-      </AppShell>
+        {/* The assistant. Inside the frame so it is present on every page of
+          this module rather than remembered per page. */}
+      <AgentDock moduleKey="marketing" />
+    </AppShell>
     </>
   );
 }

@@ -25,6 +25,14 @@
  * as `/api/shell/nav` is. The module scopes the answer to the organisation that
  * cookie belongs to, so a module never has to be told which tenant is asking —
  * and cannot be lied to about it.
+ *
+ * MODULES ON ANOTHER ORIGIN cannot be reached that way. Portal's staff cookie
+ * is host-scoped to portal.erp.io on purpose — a suite-wide cookie is what
+ * once collided with the shell's and signed people out of everything — so the
+ * header CRM forwards simply does not contain it. Those modules are given a
+ * short-lived Ed25519 hand-off token from the shell instead. That is still a
+ * proof rather than an assertion: the shell signs it, the module verifies the
+ * signature and the audience, and CRM only carries it.
  */
 
 /** One record in another module, as that module describes itself. */
@@ -60,6 +68,8 @@ export async function fetchModuleLinks(
   query: { email?: string; q?: string },
   cookieHeader: string,
   timeoutMs = 2500,
+  /** For cross-origin modules: a shell hand-off token minted for that module. */
+  bearer?: string,
 ): Promise<ErpLinkedRecord[]> {
   const url = new URL(`${moduleUrl.replace(/\/$/, '')}/api/module-links`)
   if (query.email) url.searchParams.set('email', query.email)
@@ -67,7 +77,9 @@ export async function fetchModuleLinks(
 
   try {
     const res = await fetch(url, {
-      headers: { cookie: cookieHeader },
+      headers: bearer
+        ? { cookie: cookieHeader, authorization: `Bearer ${bearer}` }
+        : { cookie: cookieHeader },
       signal: AbortSignal.timeout(timeoutMs),
       cache: 'no-store',
     })
