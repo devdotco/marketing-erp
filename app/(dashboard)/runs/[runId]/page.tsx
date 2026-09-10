@@ -41,6 +41,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const needsApproval = run.status === "AWAITING_APPROVAL";
   const output = run.output as Record<string, unknown> | null;
 
+  // A failed run stores a structured error (see lib/ai/errors.ts). Older runs
+  // stored the provider's raw message as a bare string — render both.
+  const rawError = output?.["error"];
+  const runError =
+    rawError && typeof rawError === "object"
+      ? (rawError as { code?: string; message?: string; hint?: string; retryable?: boolean; attempts?: number; detail?: string })
+      : typeof rawError === "string"
+        ? { message: "The agent failed while running.", detail: rawError }
+        : null;
+  const hasReadableOutput = Boolean(output) && !runError;
+
   const dur = run.completedAt && run.startedAt
     ? Math.round((run.completedAt.getTime() - run.startedAt.getTime()) / 1000)
     : null;
@@ -116,7 +127,58 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: 20 }}>
         {/* Output */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {output && (
+          {runError && (
+            <div
+              className="card"
+              style={{ borderColor: "var(--danger, var(--warning))" }}
+            >
+              <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>This run did not complete</h2>
+              <p style={{ fontSize: 14, color: "var(--text)", lineHeight: 1.6, marginBottom: 10 }}>
+                {runError.message}
+              </p>
+              {runError.hint && (
+                <p style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 14 }}>
+                  {runError.hint}
+                </p>
+              )}
+              <p style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 14 }}>
+                Nothing you entered caused this, and no work was lost — the agent stopped before producing a draft.
+                {Number(run.costUsd) === 0 ? " You were not charged for it." : ""}
+              </p>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                <Link href={`/agents/${run.agentConfig.agentSlug}`} className="btn btn-secondary btn-sm">
+                  Back to agent
+                </Link>
+              </div>
+              {runError.detail && (
+                <details>
+                  <summary style={{ fontSize: 12, color: "var(--text-dim)", cursor: "pointer" }}>
+                    Technical detail{runError.code ? ` (${runError.code})` : ""}
+                    {runError.attempts ? ` — ${runError.attempts} attempt${runError.attempts === 1 ? "" : "s"}` : ""}
+                  </summary>
+                  <pre
+                    style={{
+                      fontSize: 11,
+                      fontFamily: "monospace",
+                      overflow: "auto",
+                      maxHeight: 260,
+                      background: "var(--surface-2)",
+                      padding: 14,
+                      borderRadius: "var(--radius)",
+                      color: "var(--text-muted)",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      marginTop: 10,
+                    }}
+                  >
+                    {runError.detail}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
+
+          {hasReadableOutput && output && (
             <div className="card">
               <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Output</h2>
 
@@ -170,7 +232,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             </div>
           )}
 
-          {!output && (
+          {!output && !runError && (
             <div
               style={{
                 background: "var(--surface-2)",

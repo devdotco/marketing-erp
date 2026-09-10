@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -254,7 +255,7 @@ Return JSON matching this exact shape (no markdown, no code fences):
 }`;
 
     const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: MODELS.fast,
       max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: "user", content: userPrompt }],
@@ -280,6 +281,8 @@ Return JSON matching this exact shape (no markdown, no code fences):
     await updateStatus("AWAITING_APPROVAL", output);
   }
 
-  const costUsd = isLive ? 0 : (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+  const costUsd = isLive
+    ? 0
+    : estimateCostUsd(MODELS.fast, { input_tokens: inputTokens, output_tokens: outputTokens });
   return { output, costUsd };
 };

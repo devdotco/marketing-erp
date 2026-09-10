@@ -8,6 +8,7 @@ import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/worksp
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
 import { RunModal } from "@/components/ui/RunModal";
+import { checkModelsAvailable } from "@/lib/ai/models";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +46,13 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
   const isEnabled = agentConfig?.enabled ?? false;
   const isActive = agent.status === "ACTIVE";
   const meta = AGENT_META[slug];
+
+  // Warn before the user presses "Run now", not after. Cached for 10 minutes,
+  // and never allowed to break the page.
+  const modelHealth = isActive
+    ? await checkModelsAvailable().catch(() => null)
+    : null;
+  const unavailableModels = modelHealth?.models.filter((m) => !m.ok) ?? [];
 
   const STATUS_BADGE: Record<string, string> = {
     PENDING: "badge-pending", RUNNING: "badge-running",
@@ -103,6 +111,27 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
           </div>
         )}
       </div>
+
+      {unavailableModels.length > 0 && (
+        <div
+          style={{
+            background: "var(--warning-bg)",
+            border: "1px solid var(--warning)",
+            borderRadius: "var(--radius)",
+            padding: "16px 20px",
+            marginBottom: 20,
+          }}
+        >
+          <p style={{ fontSize: 13, fontWeight: 600, color: "var(--warning)", marginBottom: 4 }}>
+            Runs will fail right now
+          </p>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 }}>
+            This workspace cannot reach {unavailableModels.map((m) => m.id).join(", ")}. Any run you start
+            will stop at the first API call without producing a draft. An administrator needs to fix the
+            model configuration before this agent will work.
+          </p>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 20 }}>
         {/* Left — main content */}

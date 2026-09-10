@@ -26,7 +26,10 @@ export function getAgentRunQueue(): Queue {
       defaultJobOptions: {
         removeOnComplete: { count: 200 },
         removeOnFail: { count: 100 },
-        attempts: 2,
+        // Transient faults (rate limits, upstream 5xx, network) get three
+        // shots; the worker throws UnrecoverableError for permanent ones
+        // (stale model id, bad key) so they surface immediately instead.
+        attempts: 3,
         backoff: { type: "exponential", delay: 5000 },
       },
     });

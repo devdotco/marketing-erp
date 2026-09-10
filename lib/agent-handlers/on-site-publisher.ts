@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -226,7 +227,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
   ].filter(Boolean).join("\n");
 
   const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: MODELS.fast,
     max_tokens: 2048,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -245,9 +246,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
   output.generatedAt = new Date().toISOString();
   output.note = "Simulated publish — connect a live CMS integration in Settings to enable real deployment.";
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   if (requireApproval) {
     await updateStatus("AWAITING_APPROVAL", output);

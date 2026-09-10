@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -88,7 +89,7 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
   ].filter(Boolean).join("\n");
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -105,11 +106,8 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-
-  // Sonnet 5 pricing: $3/M input, $15/M output
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  // Priced from lib/ai/models.ts — Sonnet 5 is $2/M input, $10/M output.
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

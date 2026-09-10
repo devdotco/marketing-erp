@@ -1,7 +1,9 @@
-import { Worker } from "bullmq";
+import { Worker, UnrecoverableError } from "bullmq";
 import { prisma } from "@/lib/prisma";
 import { getRedisConnection } from "@/lib/queue";
 import { getHandler } from "@/lib/agent-handlers/index";
+import { describeRunError } from "@/lib/ai/errors";
+import { checkModelsAvailable } from "@/lib/ai/models";
 
 const worker = new Worker(
   "agent-runs",
@@ -57,19 +59,46 @@ const worker = new Worker(
         });
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[worker] Run ${runId} failed:`, errorMsg);
+      const runError = describeRunError(err);
+      const attemptsMade = job.attemptsMade + 1;
+      const attemptsAllowed = job.opts.attempts ?? 1;
+      const willRetry = runError.retryable && attemptsMade < attemptsAllowed;
+
+      console.error(
+        `[worker] Run ${runId} failed (${runError.code}, attempt ${attemptsMade}/${attemptsAllowed}${willRetry ? ", will retry" : ""}):`,
+        runError.detail ?? runError.message
+      );
+
+      if (willRetry) {
+        // Leave the run RUNNING — a retry is queued and will finish it.
+        throw err;
+      }
 
       await prisma.agentRun.update({
         where: { id: runId },
         data: {
           status: "FAILED",
-          output: { error: errorMsg },
+          output: {
+            error: {
+              code: runError.code,
+              message: runError.message,
+              hint: runError.hint,
+              retryable: runError.retryable,
+              attempts: attemptsMade,
+              detail: runError.detail,
+              failedAt: new Date().toISOString(),
+            },
+          },
           completedAt: new Date(),
         },
       });
 
-      throw err; // BullMQ will retry if configured
+      // A stale model id or a bad key will fail identically on every retry —
+      // burning attempts on it only delays the error reaching the user.
+      if (!runError.retryable) {
+        throw new UnrecoverableError(`${runError.code}: ${runError.message}`);
+      }
+      throw err;
     }
   },
   {
@@ -85,6 +114,26 @@ worker.on("completed", (job) => {
 worker.on("failed", (job, err) => {
   console.error(`[worker] Job ${job?.id} failed:`, err.message);
 });
+
+// Pre-flight: fail loudly at boot rather than at the first API call of a run.
+// The 2026-09-08 Blog Writer failure was a stale model snapshot that nothing
+// checked until a user pressed "Run now".
+void checkModelsAvailable(true)
+  .then((health) => {
+    for (const model of health.models) {
+      if (!model.ok) {
+        console.error(`[worker] MODEL UNAVAILABLE: ${model.id} — ${model.error}`);
+      }
+    }
+    if (health.ok) {
+      console.log(`[worker] Models OK: ${health.models.map((m) => m.id).join(", ")}`);
+    } else {
+      console.error("[worker] One or more configured models are unavailable. Agent runs using them WILL fail.");
+    }
+  })
+  .catch((err) => {
+    console.error("[worker] Could not verify model availability:", err instanceof Error ? err.message : err);
+  });
 
 console.log("[worker] Agent worker started");
 

@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -421,7 +422,7 @@ Respond with a JSON object matching this exact structure:
 Make all numbers realistic for a ${businessProfile?.industry ?? "general"} business. The 3 significant movements must each have compelling, specific narratives — not generic filler. Chart data arrays must have exactly 7 entries. Campaign and keyword data should be realistic for the business scale.`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -450,9 +451,7 @@ Make all numbers realistic for a ${businessProfile?.industry ?? "general"} busin
     await updateStatus("AWAITING_APPROVAL", output);
   }
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   return { output, costUsd };
 };

@@ -8,6 +8,7 @@
     "build:worker": "esbuild workers/agent-worker.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --external:@prisma/client --external:*.node --tsconfig=tsconfig.json",
     "start": "next start",
     "lint": "eslint",
+    "check:models": "node scripts/check-models.mjs",
     "postinstall": "prisma skills sync || exit 0"
   },
   "dependencies": {

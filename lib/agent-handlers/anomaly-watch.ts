@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -222,7 +223,7 @@ ${JSON.stringify({
 ${source === "live" ? "Base the sessions anomaly entry on the pre-computed values provided. For allClear metrics, extrapolate reasonable values from the session data. Set alertsSent to an empty array unless alertRecipients are configured." : `Make anomaly values realistic for a ${businessProfile?.industry ?? "general"} business. Include 1-3 genuine anomalies and 4-6 all-clear metrics. Populate correlatedEvents with realistic possibilities (e.g., "Weekend traffic pattern", "Recent blog publish", "Seasonal variation").`}`;
 
   const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -246,11 +247,8 @@ ${source === "live" ? "Base the sessions anomaly entry on the pre-computed value
     output.simulationNote =
       "Connect GA4 in Settings to monitor real metric baselines. This report simulates anomaly detection based on your property configuration.";
   }
-
-  // Haiku 4.5 pricing: $0.80/M input, $4/M output
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+  // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
+  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

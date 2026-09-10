@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -132,7 +133,7 @@ Return exactly this JSON structure:
 }`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -156,9 +157,7 @@ Return exactly this JSON structure:
     await updateStatus("AWAITING_APPROVAL", output);
   }
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   return { output, costUsd };
 };

@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -210,7 +211,7 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
   ].filter(Boolean).join("\n");
 
   const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -235,11 +236,8 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-
-  // Haiku 4.5 pricing: $0.80/M input, $4/M output
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+  // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
+  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   const requireApproval = config.requireApproval !== false;
 

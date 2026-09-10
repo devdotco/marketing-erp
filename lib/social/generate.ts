@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { MODELS } from "@/lib/ai/models";
 import type { Site } from "@/lib/social/auto-post-sites";
 
 const client = new Anthropic();
@@ -43,7 +44,7 @@ ${callToAction ? `Call to action: ${callToAction}` : ""}
 Return ONLY the post text, nothing else.`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: MODELS.standard,
     max_tokens: 1024,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -85,7 +86,7 @@ Return a JSON array (no markdown, raw JSON only) with ${totalPosts} objects, eac
 Space the days out by ${Math.round(7 / postsPerWeek)} days between posts. Vary formats. Make topics specific and timely, not generic.`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: MODELS.standard,
     max_tokens: 2048,
     messages: [{ role: "user", content: userPrompt }],
   });
@@ -127,7 +128,7 @@ Length: 150–280 words total.
 Return ONLY the post text, nothing else.`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: MODELS.standard,
     max_tokens: 1024,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],

@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -197,7 +198,7 @@ ${JSON.stringify({
 Generate 5-7 channels per model with realistic percentage distributions that sum to 100%. Include 2-3 blind spots and 3-5 strategic insights. ${darkSocialEstimate ? "Include a meaningful dark social estimate (20-40% for B2B, 10-20% for B2C)." : ""}`;
 
   const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
+    model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -221,11 +222,8 @@ Generate 5-7 channels per model with realistic percentage distributions that sum
     output.simulationNote =
       "Connect GA4 and your CRM in Settings to pull real conversion and revenue data. This report uses estimated attribution based on your channel mix.";
   }
-
-  // Haiku 4.5 pricing: $0.80/M input, $4/M output
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 0.8 + outputTokens * 4) / 1_000_000;
+  // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
+  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

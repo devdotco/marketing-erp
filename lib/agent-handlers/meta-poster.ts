@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -67,7 +68,7 @@ Return exactly this JSON structure:
 }`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -207,9 +208,7 @@ Return exactly this JSON structure:
       "Connect Meta in Settings > Integrations to enable auto-publishing via Facebook Graph API. Store { page_access_token, page_id } for Facebook Pages; add ig_user_id for Instagram Business accounts.";
   }
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   return { output, costUsd };
 };

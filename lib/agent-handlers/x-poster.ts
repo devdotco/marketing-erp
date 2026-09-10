@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -89,7 +90,7 @@ Return exactly this JSON shape:
 }`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -192,9 +193,7 @@ Return exactly this JSON shape:
       "Connect X (Twitter) in Settings > Integrations to enable auto-publishing. Store OAuth 2.0 user access token as { access_token } with tweet.write and users.read scopes.";
   }
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   return { output, costUsd };
 };

@@ -2,6 +2,7 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
+import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 
 const client = new Anthropic();
 
@@ -93,7 +94,7 @@ Return exactly this JSON shape (no other keys at root level):
 }`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5-20251015",
+    model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
@@ -188,9 +189,7 @@ Return exactly this JSON shape (no other keys at root level):
       "Connect LinkedIn in Settings > Integrations to enable auto-publishing. Store credentials as { access_token, person_id } for personal profiles or add company_id for Company Pages.";
   }
 
-  const inputTokens = message.usage.input_tokens;
-  const outputTokens = message.usage.output_tokens;
-  const costUsd = (inputTokens * 3 + outputTokens * 15) / 1_000_000;
+  const costUsd = estimateCostUsd(MODELS.standard, message.usage);
 
   return { output, costUsd };
 };
