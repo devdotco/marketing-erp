@@ -6,6 +6,7 @@ import Link from "next/link";
 import { apiFetch } from "@/lib/base-path";
 
 const PROVIDER_MAP: Record<string, { name: string; enumValue: string }> = {
+  anthropic: { name: "Anthropic", enumValue: "ANTHROPIC" },
   apollo: { name: "Apollo.io", enumValue: "APOLLO" },
   instantly: { name: "Instantly", enumValue: "INSTANTLY" },
   aimfox: { name: "Aimfox", enumValue: "AIMFOX" },

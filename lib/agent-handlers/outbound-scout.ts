@@ -3,8 +3,9 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-
-const client = new Anthropic();
+import { textFrom } from "@/lib/ai/extract";
+import { resolveInputs } from "@/lib/agents/inputs";
+import { resolveAnthropic } from "@/lib/ai/client";
 
 const ICP_DEFINITIONS: Record<string, string> = {
   "DEV-01": `ICP: B2B SaaS or software companies, 50-500 employees, $10M-$250M estimated revenue, US or Canada.
@@ -52,6 +53,7 @@ const APOLLO_FILTERS: Record<
 };
 
 async function runClaudeSimulation(
+  client: Anthropic,
   playSlug: string,
   icpDefinition: string,
   maxProspects: number,
@@ -104,7 +106,7 @@ Generate realistic but fictional companies and contacts. Vary industries, compan
     messages: [{ role: "user", content: userPrompt }],
   });
 
-  const rawText = message.content[0].type === "text" ? message.content[0].text : "";
+  const rawText = textFrom(message);
   const jsonMatch = rawText.match(/\{[\s\S]+\}/);
   let simOutput: Record<string, unknown>;
   try {
@@ -120,7 +122,10 @@ Generate realistic but fictional companies and contacts. Vary industries, compan
 
 export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
-  const config = (run.agentConfig.config ?? {}) as Record<string, unknown>;
+
+  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
+  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const config = resolveInputs(run);
   const input = (run.input ?? {}) as Record<string, unknown>;
 
   const playSlug = (config.playSlug as string) ?? (input.playSlug as string) ?? "DEV-01";
@@ -205,6 +210,7 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
     if (apolloError) {
       // Apollo failed — fall back to Claude simulation
       const { simOutput, costUsd: simCost } = await runClaudeSimulation(
+        client,
         playSlug,
         icpDefinition,
         maxProspects,
@@ -227,6 +233,7 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   } else {
     // ── Claude simulation fallback ──────────────────────────────────────────
     const { simOutput, costUsd: simCost } = await runClaudeSimulation(
+      client,
       playSlug,
       icpDefinition,
       maxProspects,

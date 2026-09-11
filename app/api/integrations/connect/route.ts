@@ -2,6 +2,7 @@ import { getServerSession } from "@/lib/session";
 import { resolveWorkspaceId } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
 import { encryptCredentials } from "@/lib/crypto";
+import { forgetAnthropicKey, verifyAnthropicKey } from "@/lib/ai/client";
 import { IntegrationProvider } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -35,6 +36,17 @@ export async function POST(req: NextRequest) {
   }
 
   const typedProvider = provider as IntegrationProvider;
+
+  // Check the key before storing it. An unusable key fails identically to a
+  // stale model id at run time — except by then someone has queued work and is
+  // waiting on it. One cheap call here turns that into a form error.
+  if (typedProvider === "ANTHROPIC") {
+    const verdict = await verifyAnthropicKey(apiKey);
+    if (!verdict.ok) {
+      return NextResponse.json({ error: verdict.reason }, { status: 400 });
+    }
+  }
+
   const encrypted = await encryptCredentials({ apiKey });
 
   await prisma.integration.upsert({
@@ -51,6 +63,9 @@ export async function POST(req: NextRequest) {
       updatedAt: new Date(),
     },
   });
+
+  // The resolver memoises clients for a minute; a rotated key must take effect now.
+  if (typedProvider === "ANTHROPIC") forgetAnthropicKey(workspaceId);
 
   return NextResponse.json({ success: true });
 }

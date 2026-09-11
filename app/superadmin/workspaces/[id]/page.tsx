@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
+import { PlatformKeyToggle } from "./PlatformKeyToggle";
 
 export default async function SuperAdminWorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -16,6 +17,7 @@ export default async function SuperAdminWorkspacePage({ params }: { params: Prom
       members: { include: { user: { select: { name: true, email: true } } } },
       agentConfigs: true,
       businessProfile: true,
+      integrations: { select: { provider: true } },
       _count: { select: { runs: true } },
     },
   });
@@ -59,6 +61,7 @@ export default async function SuperAdminWorkspacePage({ params }: { params: Prom
               ["Business", workspace.businessProfile?.businessName ?? "—"],
               ["Industry", workspace.businessProfile?.industry ?? "—"],
               ["Website", workspace.businessProfile?.websiteUrl ?? "—"],
+              ["Anthropic key", workspace.integrations.some((i) => i.provider === "ANTHROPIC") ? "Own key connected" : "None connected"],
             ].map(([label, value]) => (
               <div key={label}>
                 <p style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>{label}</p>
@@ -67,6 +70,14 @@ export default async function SuperAdminWorkspacePage({ params }: { params: Prom
                 </p>
               </div>
             ))}
+          </div>
+
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+            <PlatformKeyToggle
+              workspaceId={workspace.id}
+              initial={workspace.allowPlatformKey}
+              hasOwnKey={workspace.integrations.some((i) => i.provider === "ANTHROPIC")}
+            />
           </div>
         </div>
 

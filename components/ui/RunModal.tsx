@@ -12,6 +12,30 @@ interface RunModalProps {
   agentConfigId?: string;
   inputs: AgentInput[];
   savedConfig: Record<string, unknown>;
+  /** Ordered step names. Two or more turns the modal into a wizard. */
+  groups?: string[];
+}
+
+/**
+ * Split the fields into the steps they belong to, dropping any step that ended
+ * up empty. A field whose `group` names no declared step lands in step one, so a
+ * typo in the metadata cannot hide an input.
+ */
+function buildSteps(
+  inputs: AgentInput[],
+  groups: string[] | undefined,
+): Array<{ title: string; fields: AgentInput[] }> {
+  if (!groups || groups.length < 2) {
+    return inputs.length > 0 ? [{ title: "", fields: inputs }] : [];
+  }
+  const known = new Set(groups);
+  const steps = groups.map((title) => ({
+    title,
+    fields: inputs.filter((input) => input.group === title),
+  }));
+  const orphans = inputs.filter((input) => !input.group || !known.has(input.group));
+  if (orphans.length > 0 && steps[0]) steps[0].fields = [...orphans, ...steps[0].fields];
+  return steps.filter((step) => step.fields.length > 0);
 }
 
 function buildInitialValues(
@@ -40,7 +64,10 @@ export function RunModal({
   agentConfigId,
   inputs,
   savedConfig,
+  groups,
 }: RunModalProps) {
+  const steps = buildSteps(inputs, groups);
+  const [step, setStep] = useState(0);
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>(() =>
     buildInitialValues(inputs, savedConfig),
@@ -54,6 +81,7 @@ export function RunModal({
   function handleOpen() {
     setValues(buildInitialValues(inputs, savedConfig));
     setError(null);
+    setStep(0);
     setOpen(true);
   }
 
@@ -65,8 +93,8 @@ export function RunModal({
     setValues((prev) => ({ ...prev, [key]: value }));
   }
 
-  function validate(): string | null {
-    for (const input of inputs) {
+  function validate(fields: AgentInput[]): string | null {
+    for (const input of fields) {
       if (input.required) {
         const val = values[input.key];
         if (val === undefined || val.trim() === "") {
@@ -120,13 +148,38 @@ export function RunModal({
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const validationError = validate();
+
+    // Validate only the step in front of the person. Validating the whole form
+    // on step one would reject a brief they have not been shown yet.
+    const validationError = validate(currentFields);
     if (validationError) {
       setError(validationError);
       return;
     }
+
+    if (!isLastStep) {
+      setError(null);
+      setStep((current) => current + 1);
+      return;
+    }
+
+    // A required field can still be empty on an earlier step if it was skipped.
+    const remaining = validate(inputs);
+    if (remaining) {
+      const culprit = inputs.find((input) => remaining.includes(`"${input.label}"`));
+      const culpritStep = steps.findIndex((s) => s.fields.includes(culprit!));
+      if (culpritStep >= 0) setStep(culpritStep);
+      setError(remaining);
+      return;
+    }
+
     fireRun(coerceValues());
   }
+
+  const currentStep = steps[step] ?? steps[0];
+  const currentFields = currentStep?.fields ?? [];
+  const isLastStep = step >= steps.length - 1;
+  const isWizard = steps.length > 1;
 
   const inputFieldStyle: React.CSSProperties = {
     width: "100%",
@@ -176,16 +229,23 @@ export function RunModal({
               borderRadius: 10,
               padding: 28,
               width: "100%",
-              maxWidth: 520,
+              maxWidth: 560,
               maxHeight: "80vh",
               overflowY: "auto",
             }}
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
-                Run {agentName}
-              </h2>
+              <div>
+                <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
+                  Run {agentName}
+                </h2>
+                {isWizard && (
+                  <p style={{ fontSize: 12, color: "var(--text-dim)", margin: "4px 0 0" }}>
+                    Step {step + 1} of {steps.length} &middot; {currentStep?.title}
+                  </p>
+                )}
+              </div>
               <button
                 onClick={handleClose}
                 disabled={pending}
@@ -204,8 +264,24 @@ export function RunModal({
               </button>
             </div>
 
+            {isWizard && (
+              <div style={{ display: "flex", gap: 4, marginBottom: 20 }} aria-hidden>
+                {steps.map((s, i) => (
+                  <div
+                    key={s.title}
+                    style={{
+                      flex: 1,
+                      height: 3,
+                      borderRadius: 2,
+                      background: i <= step ? "var(--accent, #2563eb)" : "var(--border)",
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              {inputs.map((input) => (
+              {currentFields.map((input) => (
                 <div key={input.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <label
                     htmlFor={`run-input-${input.key}`}
@@ -278,11 +354,11 @@ export function RunModal({
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
                 <button
                   type="button"
-                  onClick={handleClose}
+                  onClick={step === 0 ? handleClose : () => { setError(null); setStep((c) => c - 1); }}
                   disabled={pending}
                   className="btn btn-secondary btn-sm"
                 >
-                  Cancel
+                  {step === 0 ? "Cancel" : "Back"}
                 </button>
                 <button
                   type="submit"
@@ -290,7 +366,7 @@ export function RunModal({
                   className="btn btn-primary btn-sm"
                   style={{ opacity: pending ? 0.6 : 1 }}
                 >
-                  {pending ? "Starting…" : "Run with these inputs"}
+                  {pending ? "Starting…" : isLastStep ? "Run with these inputs" : "Next"}
                 </button>
               </div>
             </form>

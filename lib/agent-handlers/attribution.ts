@@ -3,8 +3,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-
-const client = new Anthropic();
+import { textFrom } from "@/lib/ai/extract";
+import { resolveInputs } from "@/lib/agents/inputs";
+import { resolveAnthropic } from "@/lib/ai/client";
 
 interface Ga4Row {
   dimensionValues: Array<{ value: string }>;
@@ -18,7 +19,10 @@ interface Ga4Response {
 export const attributionHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
-  const config = (run.agentConfig.config ?? {}) as Record<string, unknown>;
+  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
+  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+
+  const config = resolveInputs(run);
 
   const ga4Property = String(config.ga4Property ?? "");
   const crmIntegration = String(config.crmIntegration ?? "Manual");
@@ -204,8 +208,7 @@ Generate 5-7 channels per model with realistic percentage distributions that sum
     messages: [{ role: "user", content: userPrompt }],
   });
 
-  const rawText =
-    message.content[0].type === "text" ? message.content[0].text : "";
+  const rawText = textFrom(message);
   const jsonMatch = rawText.match(/\{[\s\S]+\}/);
   let output: Record<string, unknown>;
   try {

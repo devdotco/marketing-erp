@@ -85,6 +85,12 @@ model Workspace {
   outboundProspects OutboundProspect[]
   socialAccounts    SocialAccount[]
   socialPosts       SocialPost[]
+  editorialProfile  EditorialProfile?
+  /// Whether this workspace may fall back to the platform's own Anthropic key.
+  /// Off by default: every tenant brings its own, so model spend lands on the
+  /// account that asked for the work. Only a super admin turns this on, and
+  /// only for workspaces we operate ourselves.
+  allowPlatformKey  Boolean           @default(false)
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 }
@@ -206,6 +212,7 @@ enum IntegrationProvider {
   ZOOMINFO
   APOLLO
   GO_HIGH_LEVEL
+  ANTHROPIC
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────
@@ -243,6 +250,26 @@ model BusinessProfile {
   lastRefreshedAt        DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
+}
+
+// ─── Editorial ─────────────────────────────────────────────────────────────
+
+/// How this workspace's written content is allowed to sound.
+///
+/// The content pipeline is an engine with no opinion of its own: every voice
+/// rule, banned word, structural limit and sourcing rule it enforces comes from
+/// here. `preset` names a starting point shipped in lib/content/editorial.ts;
+/// `overrides` holds whatever the workspace changed on top of it. A workspace
+/// with no row uses the neutral default.
+model EditorialProfile {
+  id          String    @id @default(cuid())
+  workspaceId String    @unique
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  preset      String    @default("neutral-professional")
+  overrides   Json      @default("{}")
+  updatedBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────

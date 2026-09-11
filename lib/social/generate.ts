@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { MODELS } from "@/lib/ai/models";
 import type { Site } from "@/lib/social/auto-post-sites";
+import { textFrom } from "@/lib/ai/extract";
 
 const client = new Anthropic();
 
@@ -49,7 +50,7 @@ Return ONLY the post text, nothing else.`;
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
   });
-  const text = message.content[0].type === "text" ? message.content[0].text : "";
+  const text = textFrom(message);
   return text.trim();
 }
 
@@ -90,7 +91,7 @@ Space the days out by ${Math.round(7 / postsPerWeek)} days between posts. Vary f
     max_tokens: 2048,
     messages: [{ role: "user", content: userPrompt }],
   });
-  const text = message.content[0].type === "text" ? message.content[0].text : "";
+  const text = textFrom(message);
   const json = text.replace(/```json\n?|\n?```/g, "").trim();
   return JSON.parse(json) as CalendarPost[];
 }
@@ -133,7 +134,7 @@ Return ONLY the post text, nothing else.`;
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
   });
-  const text = message.content[0].type === "text" ? message.content[0].text : "";
+  const text = textFrom(message);
   return text.trim();
 }
 

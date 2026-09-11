@@ -65,9 +65,22 @@ export async function checkModelsAvailable(force = false): Promise<ModelHealth> 
 
   const ids = [...new Set(Object.values(MODELS))];
 
+  // With bring-your-own-key, a platform key is optional: most workspaces run on
+  // their own. Absent one there is simply nothing to health-check here, and
+  // reporting that as an outage would have the worker crying wolf at every boot.
+  // A workspace's own key is verified when it is connected instead.
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+    const result: ModelHealth = {
+      ok: true,
+      checkedAt: new Date().toISOString(),
+      models: ids.map((id) => ({ id, ok: true, error: "Not checked: no platform key. Workspaces run on their own." })),
+    };
+    cached = { at: Date.now(), result };
+    return result;
+  }
+
   let client: Anthropic;
   try {
-    // Throws when ANTHROPIC_API_KEY is unset — that is itself a health failure.
     client = new Anthropic();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

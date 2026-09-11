@@ -3,12 +3,16 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-
-const client = new Anthropic();
+import { textFrom } from "@/lib/ai/extract";
+import { resolveInputs } from "@/lib/agents/inputs";
+import { resolveAnthropic } from "@/lib/ai/client";
 
 export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
-  const config = (run.agentConfig.config ?? {}) as Record<string, unknown>;
+
+  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
+  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const config = resolveInputs(run);
 
   const leadEmail = (config.leadEmail as string) ?? "";
   const leadName = (config.leadName as string) ?? "";
@@ -264,7 +268,7 @@ Return JSON matching this exact shape (no markdown, no code fences):
     inputTokens = message.usage.input_tokens;
     outputTokens = message.usage.output_tokens;
 
-    const rawText = message.content[0].type === "text" ? message.content[0].text : "";
+    const rawText = textFrom(message);
     const jsonMatch = rawText.match(/\{[\s\S]+\}/);
     try {
       output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };

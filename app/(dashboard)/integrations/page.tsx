@@ -8,6 +8,15 @@ export const metadata = { title: "Integrations — marketing.erp.io" };
 
 const INTEGRATIONS = [
   {
+    provider: "ANTHROPIC",
+    name: "Anthropic",
+    description:
+      "Your own Claude API key. Every agent run is billed to it, on your account and under your own rate limits. Nothing runs without one.",
+    agents: ["Every agent"],
+    color: "#D97757",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
     provider: "GOOGLE_SEARCH_CONSOLE",
     name: "Google Search Console",
     description: "Index performance, keyword data, URL inspection",

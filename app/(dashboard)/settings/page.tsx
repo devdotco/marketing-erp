@@ -35,6 +35,7 @@ export default async function SettingsPage() {
       <div style={{ display: "flex", gap: 4, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 12 }}>
         <Link href="/settings" className="btn btn-primary btn-sm">General</Link>
         <Link href="/settings/members" className="btn btn-ghost btn-sm">Members ({memberCount})</Link>
+        <Link href="/settings/editorial" className="btn btn-ghost btn-sm">Editorial profile</Link>
       </div>
 
       <div style={{ maxWidth: 560, display: "flex", flexDirection: "column", gap: 20 }}>

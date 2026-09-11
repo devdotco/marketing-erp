@@ -23,7 +23,34 @@ export type RunError = {
   detail?: string;
 };
 
+/**
+ * A failure caused by what the run was asked to do, not by the agent or the
+ * provider. Without this, a blank brief falls through to the generic case and
+ * tells the person "this is a fault in the agent itself, not in anything you
+ * entered" — which is the opposite of true and sends them to the wrong place.
+ */
+export class AgentInputError extends Error {
+  readonly code: string;
+  readonly hint: string;
+
+  constructor(message: string, hint: string, code = "invalid_input") {
+    super(message);
+    this.name = "AgentInputError";
+    this.code = code;
+    this.hint = hint;
+  }
+}
+
 export function describeRunError(err: unknown): RunError {
+  if (err instanceof AgentInputError) {
+    return {
+      code: err.code,
+      message: err.message,
+      hint: err.hint,
+      retryable: false,
+    };
+  }
+
   const detail = err instanceof Error ? err.message : String(err);
 
   if (err instanceof Anthropic.NotFoundError) {

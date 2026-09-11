@@ -106,6 +106,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
                 agentConfigId={agentConfig?.id}
                 inputs={meta?.inputs ?? []}
                 savedConfig={(agentConfig?.config ?? {}) as Record<string, unknown>}
+                groups={meta?.groups}
               />
             )}
           </div>
@@ -141,7 +142,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
           {isActive && isEnabled && (
             <div className="card">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-                <h2 style={{ fontSize: 14, fontWeight: 600 }}>Configuration</h2>
+                <h2 style={{ fontSize: 14, fontWeight: 600 }}>Saved defaults</h2>
                 <Link href={`/agents/${slug}/configure`} className="btn btn-secondary btn-sm">
                   Edit config →
                 </Link>
@@ -157,9 +158,11 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
                 </div>
               ) : (
                 <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-                  No configuration yet.{" "}
+                  No saved defaults, which is fine — <strong>Run now</strong> asks for
+                  everything this agent needs. Save defaults here only to pre-fill that
+                  form and to give scheduled runs something to work from.{" "}
                   <Link href={`/agents/${slug}/configure`} style={{ color: "var(--success)" }}>
-                    Set it up →
+                    Save defaults →
                   </Link>
                 </p>
               )}

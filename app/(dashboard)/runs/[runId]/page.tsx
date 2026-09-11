@@ -52,6 +52,18 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         : null;
   const hasReadableOutput = Boolean(output) && !runError;
 
+  // Stage-by-stage progress, written by the handler as it goes. Without it a
+  // multi-minute pipeline is a spinner, and the QA note that "nothing in the UI
+  // warned this would fail" is half about that silence.
+  const metadata = run.metadata as { progress?: Array<{ stage: string; detail: string }> } | null;
+  const progress = Array.isArray(metadata?.progress) ? metadata.progress : [];
+
+  // The quality pass reports what it found. A reviewer approving a draft should
+  // see the defects before they read it, not after they publish it.
+  const quality = output?.["qualityReport"] as
+    | { pass?: boolean; defects?: string[]; warnings?: string[]; wordCount?: number; externalLinks?: number; repairRounds?: number }
+    | undefined;
+
   const dur = run.completedAt && run.startedAt
     ? Math.round((run.completedAt.getTime() - run.startedAt.getTime()) / 1000)
     : null;
@@ -174,6 +186,67 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                     {runError.detail}
                   </pre>
                 </details>
+              )}
+            </div>
+          )}
+
+          {isActive && progress.length > 0 && (
+            <div className="card">
+              <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Progress</h2>
+              <ol style={{ display: "flex", flexDirection: "column", gap: 8, margin: 0, paddingLeft: 18 }}>
+                {progress.map((entry, i) => (
+                  <li key={`${entry.stage}-${i}`} style={{ fontSize: 13 }}>
+                    <span style={{ fontWeight: 600 }}>{entry.stage}</span>
+                    <span style={{ color: "var(--text-muted)" }}> — {entry.detail}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          {quality && (
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <h2 style={{ fontSize: 14, fontWeight: 600 }}>Quality check</h2>
+                <span className={`badge ${quality.pass ? "badge-completed" : "badge-awaiting"}`}>
+                  {quality.pass ? "Passed" : `${quality.defects?.length ?? 0} to review`}
+                </span>
+              </div>
+
+              <p style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
+                {quality.wordCount} words &middot; {quality.externalLinks} external link
+                {quality.externalLinks === 1 ? "" : "s"} &middot; {quality.repairRounds} repair round
+                {quality.repairRounds === 1 ? "" : "s"}
+              </p>
+
+              {(quality.defects?.length ?? 0) > 0 && (
+                <>
+                  <p style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Unresolved</p>
+                  <ul style={{ display: "flex", flexDirection: "column", gap: 6, margin: "0 0 12px", paddingLeft: 18 }}>
+                    {quality.defects!.map((defect, i) => (
+                      <li key={i} style={{ fontSize: 12, color: "var(--text-muted)" }}>{defect}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+
+              {(quality.warnings?.length ?? 0) > 0 && (
+                <>
+                  <p style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Worth a look</p>
+                  <ul style={{ display: "flex", flexDirection: "column", gap: 6, margin: 0, paddingLeft: 18 }}>
+                    {quality.warnings!.map((warning, i) => (
+                      <li key={i} style={{ fontSize: 12, color: "var(--text-muted)" }}>{warning}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+
+              {quality.pass && (quality.warnings?.length ?? 0) === 0 && (
+                <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>
+                  Every check passed: length band, heading variety, filler and stock phrasing, paragraph
+                  length, link budget and anchors, uncited figures, unlinked source names, keyword
+                  placement, and the brief&rsquo;s own must-cover and must-avoid lists.
+                </p>
               )}
             </div>
           )}

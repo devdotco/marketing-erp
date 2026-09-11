@@ -45,6 +45,7 @@ export default async function MembersPage() {
       <div style={{ display: "flex", gap: 4, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 12 }}>
         <Link href="/settings" className="btn btn-ghost btn-sm">General</Link>
         <Link href="/settings/members" className="btn btn-primary btn-sm">Members ({members.length})</Link>
+        <Link href="/settings/editorial" className="btn btn-ghost btn-sm">Editorial profile</Link>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
