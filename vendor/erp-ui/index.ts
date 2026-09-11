@@ -29,6 +29,7 @@ export {
 export { ERP_MODULE_ICONS } from './icons'
 export {
   fetchModuleLinks,
+  fetchModuleLinkResponse,
   type ErpLinkedRecord,
   type ErpLinkResponse,
 } from './module-links'

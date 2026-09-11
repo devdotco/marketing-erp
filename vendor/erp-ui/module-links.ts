@@ -53,7 +53,18 @@ export type ErpLinkedRecord = {
   at?: string
 }
 
-export type ErpLinkResponse = { records: ErpLinkedRecord[] }
+export type ErpLinkResponse = {
+  records: ErpLinkedRecord[]
+  /**
+   * What the module answered FROM, in its own words — "SEO.co workspace",
+   * "Nead, LLC". Optional, and worth having because a module's scope is not
+   * always the shell's: somebody signed into the shell as HOLDDOTCO can be
+   * looking at the SEO.co workspace in the CRM, and an assistant that reports
+   * the shell's org as "the workspace you are in" is confidently wrong about
+   * the thing the reader can see on screen.
+   */
+  scope?: string
+}
 
 /**
  * Ask one module for records belonging to an email, or matching a query.
@@ -71,6 +82,17 @@ export async function fetchModuleLinks(
   /** For cross-origin modules: a shell hand-off token minted for that module. */
   bearer?: string,
 ): Promise<ErpLinkedRecord[]> {
+  return (await fetchModuleLinkResponse(moduleUrl, query, cookieHeader, timeoutMs, bearer)).records
+}
+
+/** As `fetchModuleLinks`, but keeps the module's reported scope. */
+export async function fetchModuleLinkResponse(
+  moduleUrl: string,
+  query: { email?: string; q?: string },
+  cookieHeader: string,
+  timeoutMs = 2500,
+  bearer?: string,
+): Promise<{ records: ErpLinkedRecord[]; scope?: string }> {
   const url = new URL(`${moduleUrl.replace(/\/$/, '')}/api/module-links`)
   if (query.email) url.searchParams.set('email', query.email)
   if (query.q) url.searchParams.set('q', query.q)
@@ -82,15 +104,34 @@ export async function fetchModuleLinks(
         : { cookie: cookieHeader },
       signal: AbortSignal.timeout(timeoutMs),
       cache: 'no-store',
+      // NEVER follow a redirect. A module whose middleware guards this path
+      // sends the caller to its SSO hand-off; `fetch` would follow, and the
+      // answer would be a sign-in page carrying a 200. That parses as "no
+      // records", so a misconfigured module is indistinguishable from an empty
+      // one — which is exactly how it went unnoticed until somebody asked why
+      // the picker was empty.
+      redirect: 'manual',
     })
-    if (!res.ok) return []
+    if (!res.ok || res.status === 0) return { records: [] }
+
+    // Same reasoning: only JSON is an answer. HTML with a 200 is a module that
+    // has not exempted this path, and it is worth saying so out loud rather
+    // than rendering it as emptiness.
+    const type = res.headers.get('content-type') ?? ''
+    if (!type.includes('application/json')) {
+      console.warn(
+        `[module-links] ${moduleUrl} answered ${res.status} ${type || 'with no content-type'} — ` +
+          'the route is probably behind that module\'s auth redirect',
+      )
+      return { records: [] }
+    }
 
     const body = (await res.json()) as Partial<ErpLinkResponse>
-    if (!Array.isArray(body.records)) return []
+    if (!Array.isArray(body.records)) return { records: [] }
 
     // Validated rather than trusted: this crosses a service boundary, and a
     // record missing an id or a url would render as a link to nowhere.
-    return body.records.flatMap(r => {
+    const records = body.records.flatMap(r => {
       const rec = r as Partial<ErpLinkedRecord>
       if (!rec?.id || !rec?.title || !rec?.url) return []
       return [{
@@ -102,7 +143,14 @@ export async function fetchModuleLinks(
         at: rec.at,
       }]
     })
-  } catch {
-    return []
+    return { records, scope: typeof body.scope === 'string' ? body.scope : undefined }
+  } catch (err) {
+    // Silence here is what made this hard to see: a timeout, a DNS failure and
+    // an empty workspace all rendered identically as "nothing found".
+    const reason = (err as Error)?.name === 'TimeoutError'
+      ? `did not answer within ${timeoutMs}ms`
+      : `failed: ${(err as Error)?.message ?? 'unknown error'}`
+    console.warn(`[module-links] ${moduleUrl} ${reason}`)
+    return { records: [] }
   }
 }

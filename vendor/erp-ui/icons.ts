@@ -5,7 +5,7 @@
  */
 import {
   MessageSquare, CheckSquare, Users, DollarSign, Handshake, Boxes,
-  FileSignature, TrendingUp, Megaphone, Share2, PenTool, CreditCard, Scale, Phone,
+  FileSignature, TrendingUp, Megaphone, PenTool, CreditCard, Scale, Phone,
   type LucideIcon,
 } from 'lucide-react'
 import type { ErpModuleKey } from './registry'
@@ -41,7 +41,6 @@ export const ERP_MODULE_ICONS: Record<ErpModuleKey, LucideIcon> = {
   plm: Boxes,
   sign: FileSignature,
   cfo: TrendingUp,
-  social: Share2,
   canvas: PenTool,
   pey: CreditCard,
   legal: Scale,
