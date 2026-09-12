@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { SITES } from "@/lib/social/auto-post-sites";
 import { generateAutoPost } from "@/lib/social/generate";
+import { resolveAnthropic } from "@/lib/ai/client";
+import { describeRunError } from "@/lib/ai/errors";
 import { publishLinkedInPost, refreshLinkedInToken } from "@/lib/social/linkedin-publish";
 import { uploadImage } from "@/lib/social/linkedin-upload";
 import { searchPhotos, downloadPhoto } from "@/lib/social/pexels";
@@ -45,6 +47,21 @@ export async function POST(req: NextRequest) {
 
   if (!account) {
     return NextResponse.json({ error: "No LinkedIn account connected for this workspace" }, { status: 400 });
+  }
+
+  // The copy is written on this workspace's own Anthropic key, like everything
+  // else. Refused here rather than billed to us: this route resolves a
+  // workspace by query param, or failing that whichever one was created first,
+  // so "whose key" was never a safe thing to leave implicit.
+  let client;
+  try {
+    ({ client } = await resolveAnthropic(workspaceId));
+  } catch (err) {
+    const runError = describeRunError(err);
+    return NextResponse.json(
+      { error: runError.message, hint: runError.hint, workspaceId },
+      { status: 400 },
+    );
   }
 
   // RATE LIMIT: hard cap at 3 posts/day per account
@@ -91,7 +108,7 @@ export async function POST(req: NextRequest) {
   const subPage = site.subPages[Math.floor(Math.random() * site.subPages.length)];
 
   // Generate content
-  const content = await generateAutoPost(site, subPage);
+  const content = await generateAutoPost(client, site, subPage);
 
   // Refresh token if needed (5-min buffer)
   const now = new Date();

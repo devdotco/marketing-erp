@@ -1,9 +1,17 @@
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { MODELS } from "@/lib/ai/models";
 import type { Site } from "@/lib/social/auto-post-sites";
 import { textFrom } from "@/lib/ai/extract";
 
-const client = new Anthropic();
+/**
+ * Every function here takes the client rather than building one.
+ *
+ * This module used to construct one at module scope with no argument, which
+ * reads the platform key. Social copy was therefore written on OUR Anthropic
+ * account and published to a TENANT's LinkedIn. It is the same billing leak the
+ * agent handlers had, surviving in the one place the BYOK sweep did not reach:
+ * this is driven by a cron route, not by an agent run.
+ */
 
 export interface GeneratePostOptions {
   topic: string;
@@ -14,7 +22,10 @@ export interface GeneratePostOptions {
   callToAction?: string;
 }
 
-export async function generatePost(opts: GeneratePostOptions): Promise<string> {
+export async function generatePost(
+  client: Anthropic,
+  opts: GeneratePostOptions,
+): Promise<string> {
   const {
     topic,
     tone = "professional",
@@ -70,7 +81,10 @@ export interface CalendarPost {
   format: string;
 }
 
-export async function generateCalendar(opts: GenerateCalendarOptions): Promise<CalendarPost[]> {
+export async function generateCalendar(
+  client: Anthropic,
+  opts: GenerateCalendarOptions,
+): Promise<CalendarPost[]> {
   const { niche, goal, audience, tone = "professional", postsPerWeek = 3, weeks = 4 } = opts;
 
   const totalPosts = postsPerWeek * weeks;
@@ -96,7 +110,11 @@ Space the days out by ${Math.round(7 / postsPerWeek)} days between posts. Vary f
   return JSON.parse(json) as CalendarPost[];
 }
 
-export async function generateAutoPost(site: Site, subPage: { url: string; title: string; description: string }): Promise<string> {
+export async function generateAutoPost(
+  client: Anthropic,
+  site: Site,
+  subPage: { url: string; title: string; description: string },
+): Promise<string> {
   const systemPrompt = `You are an expert LinkedIn content writer for a portfolio of premium web domains. You write posts that earn genuine engagement — clear, direct, and valuable.
 
 LinkedIn post rules:
