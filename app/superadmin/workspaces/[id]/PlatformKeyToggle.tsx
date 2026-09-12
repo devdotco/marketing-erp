@@ -15,10 +15,15 @@ export function PlatformKeyToggle({
   workspaceId,
   initial,
   hasOwnKey,
+  designated,
+  slug,
 }: {
   workspaceId: string;
   initial: boolean;
   hasOwnKey: boolean;
+  /** Whether the slug appears in PLATFORM_KEY_WORKSPACES. */
+  designated: boolean;
+  slug: string;
 }) {
   const [allowed, setAllowed] = useState(initial);
   const [error, setError] = useState<string | null>(null);
@@ -62,12 +67,20 @@ export function PlatformKeyToggle({
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
             {hasOwnKey
               ? "This workspace has its own key, which is used first either way."
-              : allowed
+              : allowed && designated
                 ? "This workspace has no key of its own, so its runs are billed to us."
                 : "This workspace has no key of its own, so agent runs will refuse until one is connected."}
           </span>
         </span>
       </label>
+      {!designated && (
+        <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "8px 0 0", paddingLeft: 24 }}>
+          This toggle is only half the gate. <code>{slug}</code> is not in{" "}
+          <code>PLATFORM_KEY_WORKSPACES</code>, so this workspace cannot use our key whatever
+          the toggle says. Adding it takes a deploy — deliberately, so no single click or
+          stray database write can put someone on our account.
+        </p>
+      )}
       {error && <p style={{ fontSize: 11, color: "var(--danger)", margin: "6px 0 0" }}>{error}</p>}
     </div>
   );

@@ -2,6 +2,7 @@ import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
+import { platformKeyEligibility } from "@/lib/ai/client";
 
 export const metadata = { title: "Super Admin — marketing.erp.io" };
 
@@ -14,6 +15,7 @@ export default async function SuperAdminPage() {
     prisma.workspace.findMany({
       include: {
         _count: { select: { members: true, runs: true } },
+        integrations: { where: { provider: "ANTHROPIC" }, select: { id: true } },
       },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -54,6 +56,12 @@ export default async function SuperAdminPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 32 }}>
           {[
             { label: "Workspaces", value: workspaces.length },
+            {
+              label: "On our key",
+              value: workspaces.filter(
+                (w) => w.integrations.length === 0 && platformKeyEligibility(w).eligible,
+              ).length,
+            },
             { label: "Total users", value: totalUsers },
             { label: "Total runs", value: totalRuns },
             { label: "Total cost", value: `$${Number(totalCost._sum.costUsd ?? 0).toFixed(2)}` },
@@ -72,7 +80,7 @@ export default async function SuperAdminPage() {
           </div>
           <table className="table">
             <thead>
-              <tr><th>Name</th><th>Slug</th><th>Plan</th><th>Members</th><th>Runs</th><th>Created</th><th></th></tr>
+              <tr><th>Name</th><th>Slug</th><th>Plan</th><th>Billed to</th><th>Members</th><th>Runs</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {workspaces.map((ws) => (
@@ -90,6 +98,15 @@ export default async function SuperAdminPage() {
                     }}>
                       {ws.plan}
                     </span>
+                  </td>
+                  <td style={{ fontSize: 11 }}>
+                    {ws.integrations.length > 0 ? (
+                      <span style={{ color: "var(--success)" }}>Own key</span>
+                    ) : platformKeyEligibility(ws).eligible ? (
+                      <span style={{ color: "var(--danger)", fontWeight: 600 }}>OUR KEY</span>
+                    ) : (
+                      <span style={{ color: "var(--text-dim)" }}>Blocked, no key</span>
+                    )}
                   </td>
                   <td style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}>{ws._count.members}</td>
                   <td style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}>{ws._count.runs}</td>

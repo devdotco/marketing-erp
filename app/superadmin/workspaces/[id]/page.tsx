@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { PlatformKeyToggle } from "./PlatformKeyToggle";
+import { isDesignatedForPlatformKey } from "@/lib/ai/client";
 
 export default async function SuperAdminWorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -75,7 +76,9 @@ export default async function SuperAdminWorkspacePage({ params }: { params: Prom
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
             <PlatformKeyToggle
               workspaceId={workspace.id}
+              slug={workspace.slug}
               initial={workspace.allowPlatformKey}
+              designated={isDesignatedForPlatformKey(workspace)}
               hasOwnKey={workspace.integrations.some((i) => i.provider === "ANTHROPIC")}
             />
           </div>

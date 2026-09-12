@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
+import { ByokPrompt } from "@/components/ui/ByokPrompt";
 import { getAgent } from "@/lib/agents";
 import Link from "next/link";
 import { RunActions } from "./RunActions";
@@ -139,6 +140,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: 20 }}>
         {/* Output */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {runError?.code === "no_api_key" && (
+            <ByokPrompt />
+          )}
+
           {runError && (
             <div
               className="card"

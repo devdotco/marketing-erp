@@ -1,0 +1,17 @@
+-- Take every workspace back off our Anthropic key.
+--
+-- The BYOK migration earlier today set `allowPlatformKey = true` for every
+-- existing workspace so that shipping BYOK would not stop production dead. The
+-- effect, once it deployed, was that other people's workspaces were running on
+-- our Anthropic account: our key, our bill, our rate limits, for their work.
+-- That is the opposite of what BYOK is for.
+--
+-- So: revoke all of it. From here a workspace runs on our key only if it is
+-- BOTH named in the PLATFORM_KEY_WORKSPACES environment variable (which takes a
+-- deploy) and toggled on below by a super admin. Two gates, one of them
+-- unreachable from the database, precisely so that a single well-meaning UPDATE
+-- like the last one cannot grant it again.
+--
+-- Everyone else is refused before a token is spent, and is shown how to connect
+-- a key of their own.
+UPDATE "Workspace" SET "allowPlatformKey" = false;

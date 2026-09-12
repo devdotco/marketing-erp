@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentInput } from "@/lib/agent-metadata";
+import { ByokPrompt } from "@/components/ui/ByokPrompt";
 import { apiFetch } from "@/lib/base-path";
 
 interface RunModalProps {
@@ -14,6 +15,8 @@ interface RunModalProps {
   savedConfig: Record<string, unknown>;
   /** Ordered step names. Two or more turns the modal into a wizard. */
   groups?: string[];
+  /** False when the workspace has no usable Anthropic key. */
+  keyReady?: boolean;
 }
 
 /**
@@ -65,6 +68,7 @@ export function RunModal({
   inputs,
   savedConfig,
   groups,
+  keyReady = true,
 }: RunModalProps) {
   const steps = buildSteps(inputs, groups);
   const [step, setStep] = useState(0);
@@ -139,6 +143,12 @@ export function RunModal({
   }
 
   function handleRunNow() {
+    // Without a key nothing can run, so the modal explains that instead of
+    // collecting a brief the workspace cannot act on.
+    if (!keyReady) {
+      setOpen(true);
+      return;
+    }
     if (!hasInputs) {
       fireRun({});
       return;
@@ -240,7 +250,7 @@ export function RunModal({
                 <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
                   Run {agentName}
                 </h2>
-                {isWizard && (
+                {keyReady && isWizard && (
                   <p style={{ fontSize: 12, color: "var(--text-dim)", margin: "4px 0 0" }}>
                     Step {step + 1} of {steps.length} &middot; {currentStep?.title}
                   </p>
@@ -264,7 +274,18 @@ export function RunModal({
               </button>
             </div>
 
-            {isWizard && (
+            {!keyReady && (
+              <>
+                <ByokPrompt variant="inline" />
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+                  <button onClick={handleClose} className="btn btn-secondary btn-sm">
+                    Close
+                  </button>
+                </div>
+              </>
+            )}
+
+            {keyReady && isWizard && (
               <div style={{ display: "flex", gap: 4, marginBottom: 20 }} aria-hidden>
                 {steps.map((s, i) => (
                   <div
@@ -280,6 +301,7 @@ export function RunModal({
               </div>
             )}
 
+            {keyReady && (
             <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {currentFields.map((input) => (
                 <div key={input.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -370,6 +392,7 @@ export function RunModal({
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}

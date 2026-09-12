@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Build output: the bundled worker and the bundled test runner. Linting
+    // generated bundles reported 124 errors in vendored code and drowned the
+    // handful that were real.
+    "dist/**",
   ]),
 ]);
 

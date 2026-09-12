@@ -9,6 +9,8 @@ import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
 import { RunModal } from "@/components/ui/RunModal";
 import { checkModelsAvailable } from "@/lib/ai/models";
+import { getKeyStatus } from "@/lib/ai/client";
+import { ByokPrompt } from "@/components/ui/ByokPrompt";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +33,10 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
   if (!workspaceId) redirect("/onboarding");
 
   await requireWorkspaceAccess(workspaceId);
+
+  // Whether this workspace can run anything at all. Asked before a button is
+  // shown rather than discovered by a failed run.
+  const keyStatus = await getKeyStatus(workspaceId);
 
   const [agentConfig, recentRuns] = await Promise.all([
     prisma.agentConfig.findUnique({
@@ -107,11 +113,18 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
                 inputs={meta?.inputs ?? []}
                 savedConfig={(agentConfig?.config ?? {}) as Record<string, unknown>}
                 groups={meta?.groups}
+                keyReady={keyStatus.ready}
               />
             )}
           </div>
         )}
       </div>
+
+      {!keyStatus.ready && (
+        <div style={{ marginBottom: 20 }}>
+          <ByokPrompt />
+        </div>
+      )}
 
       {unavailableModels.length > 0 && (
         <div

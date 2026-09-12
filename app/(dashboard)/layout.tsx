@@ -9,6 +9,8 @@ import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { WorkspaceCookieSync } from "@/components/layout/WorkspaceCookieSync";
 import { cookies } from "next/headers";
 import { loadShellNav } from "@erp-ui/server";
+import { getKeyStatus } from "@/lib/ai/client";
+import { ByokBanner } from "@/components/ui/ByokBanner";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   let session;
@@ -79,6 +81,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   const { brand, modules } = await loadShellNav();
 
+  // Whether this workspace can run anything at all. Best-effort: a lookup
+  // failure must never take the whole dashboard down with it.
+  const keyStatus = activeWorkspaceId
+    ? await getKeyStatus(activeWorkspaceId).catch(() => ({ ready: true }) as const)
+    : ({ ready: true } as const);
+
 
   return (
     <>
@@ -98,6 +106,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       >
         <div className="main-content">
           <ThemeToggle />
+          {!keyStatus.ready && <ByokBanner />}
           {children}
         </div>
         {/* The assistant. Inside the frame so it is present on every page of

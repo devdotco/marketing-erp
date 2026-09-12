@@ -9,6 +9,7 @@ import { textFrom, jsonFrom } from "@/lib/ai/extract";
 import { runQc } from "@/lib/content/qc";
 import { buildBrief } from "@/lib/content/brief";
 import { getPreset, resolveProfile, NEUTRAL_PROFILE } from "@/lib/content/editorial";
+import { isDesignatedForPlatformKey, platformKeyEligibility } from "@/lib/ai/client";
 import { normaliseArticle, renderHtml } from "@/lib/content/article";
 
 let failures = 0;
@@ -191,6 +192,29 @@ check('"in Three Passes" is not a place', !geoWarns("Run the Audit in Three Pass
 check('"in Practice" is not a place', !geoWarns("What This Looks Like in Practice"));
 check('"in Texas" is a place', geoWarns("What Changes in Texas"));
 check('"California" is a place', geoWarns("California Rules Are Different"));
+
+// 10. The platform key needs two gates, and the env one is not reachable from data.
+process.env.PLATFORM_KEY_WORKSPACES = "ours, another-of-ours, wsid_abc123";
+const ws = (slug: string, allowPlatformKey: boolean) => ({ id: `id-${slug}`, slug, allowPlatformKey });
+
+check("designated + toggled on is eligible", platformKeyEligibility(ws("ours", true)).eligible);
+check(
+  "a stray flag alone grants nothing",
+  !platformKeyEligibility(ws("someone-else", true)).eligible,
+);
+check(
+  "and the reason says why",
+  (platformKeyEligibility(ws("someone-else", true)) as { reason: string }).reason === "not_designated",
+);
+check("designated but toggled off is refused", !platformKeyEligibility(ws("ours", false)).eligible);
+check("matching is case-insensitive", isDesignatedForPlatformKey(ws("OURS", true)));
+check("ids work as well as slugs", isDesignatedForPlatformKey({ id: "wsid_abc123", slug: "unrelated" }));
+
+process.env.PLATFORM_KEY_WORKSPACES = "";
+check(
+  "an empty allowlist grants nobody, whatever the flag says",
+  !platformKeyEligibility(ws("ours", true)).eligible,
+);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
