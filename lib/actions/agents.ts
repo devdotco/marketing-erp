@@ -16,10 +16,13 @@ export async function toggleAgent(
   await requireWorkspaceAccess(workspaceId, "OPERATOR");
 
   if (agentConfigId) {
-    await prisma.agentConfig.update({
-      where: { id: agentConfigId },
+    // updateMany, because the id arrives from the client: the workspace filter is
+    // what stops an operator of one workspace toggling another's agent.
+    const { count } = await prisma.agentConfig.updateMany({
+      where: { id: agentConfigId, workspaceId },
       data: { enabled },
     });
+    if (count === 0) throw new Error("Agent not found in this workspace");
   } else {
     await prisma.agentConfig.upsert({
       where: { workspaceId_agentSlug: { workspaceId, agentSlug } },

@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -36,6 +38,7 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
   const requestTrigger = (config.requestTrigger as string) ?? "Post-purchase";
   const responseStyle = (config.responseStyle as string) ?? "Professional";
   const negativeEscalation = (config.negativeEscalation as boolean) ?? true;
+  const gbpLocation = (config.gbpLocation as string) ?? "";
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -54,28 +57,39 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
   let unansweredReviews: GbpReview[] = [];
   let isLive = false;
 
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated review drafts as "live".
   if (integration) {
     try {
-      const gbpCreds = await decryptCredentials<{
-        access_token: string;
-        account_id: string;
-        location_id: string;
-      }>(integration.encryptedCredentials);
+      const creds = await googleCredentials(integration);
+      // A submitted dropdown choice ("accountId/locationId") wins over the
+      // integration's saved default — but it's still just a client string,
+      // so it's checked against what this grant can actually reach first.
+      const resolvedLocation = await resolvePropertyOverride("GOOGLE_BUSINESS_PROFILE", creds, gbpLocation);
+      const [accountId, locationId] = resolvedLocation ? resolvedLocation.split("/") : [creds.account_id, creds.location_id];
+      if (!accountId || !locationId) {
+        throw new AgentInputError(
+          "Google Business Profile is connected, but no location has been selected.",
+          "Open Integrations → Google Business Profile and choose a location.",
+          "integration_not_configured",
+        );
+      }
+      const gbpCreds = { access_token: creds.access_token, account_id: accountId, location_id: locationId };
 
       const url = `https://mybusiness.googleapis.com/v4/accounts/${gbpCreds.account_id}/locations/${gbpCreds.location_id}/reviews`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${gbpCreds.access_token}` },
       });
-
-      if (res.ok) {
-        const data = (await res.json()) as { reviews?: GbpReview[] };
-        unansweredReviews = (data.reviews ?? []).filter((r) => !r.reviewReply);
-        isLive = true;
+      if (!res.ok) {
+        throw new Error(`Business Profile Reviews API ${res.status}: ${(await res.text()).slice(0, 300)}`);
       }
-    } catch {
-      // decryption or network error — fall back to simulation
-      unansweredReviews = [];
-      isLive = false;
+
+      const data = (await res.json()) as { reviews?: GbpReview[] };
+      unansweredReviews = (data.reviews ?? []).filter((r) => !r.reviewReply);
+      isLive = true;
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Business Profile", err instanceof Error ? err.message : String(err));
     }
   }
   // --- end live GBP setup ---

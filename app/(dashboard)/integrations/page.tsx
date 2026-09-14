@@ -3,6 +3,10 @@ import { redirect } from "next/navigation";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
+import { CONNECT_METHODS } from "@/lib/integrations/catalog";
+import { DisconnectButton } from "@/components/integrations/DisconnectButton";
+import { SETUP_GUIDES } from "@/lib/integrations/guides";
+import { SetupGuideExpander } from "@/components/integrations/SetupGuide";
 
 export const metadata = { title: "Integrations — marketing.erp.io" };
 
@@ -33,6 +37,30 @@ const INTEGRATIONS = [
     docsUrl: "#",
   },
   {
+    provider: "STORYBLOK",
+    name: "Storyblok",
+    description: "Publish blog posts as stories in your Storyblok space",
+    agents: ["On-site Publisher"],
+    color: "#09B3AF",
+    docsUrl: "#",
+  },
+  {
+    provider: "WEBFLOW",
+    name: "Webflow",
+    description: "Publish blog posts as CMS collection items",
+    agents: ["On-site Publisher"],
+    color: "#146EF5",
+    docsUrl: "#",
+  },
+  {
+    provider: "PAYLOAD",
+    name: "Payload CMS",
+    description: "Publish blog posts to your Payload instance, and let the Blog Writer link to your existing posts",
+    agents: ["Blog Writer", "On-site Publisher", "Internal Linking"],
+    color: "#000000",
+    docsUrl: "https://payloadcms.com/docs/authentication/api-keys",
+  },
+  {
     provider: "CARTESIA",
     name: "Cartesia",
     description: "Text-to-speech synthesis for podcast episodes",
@@ -47,7 +75,6 @@ const INTEGRATIONS = [
     agents: ["Paid Media agents"],
     color: "#FBBC05",
     docsUrl: "#",
-    comingSoon: true,
   },
   {
     provider: "META_ADS",
@@ -62,10 +89,9 @@ const INTEGRATIONS = [
     provider: "KLAVIYO",
     name: "Klaviyo",
     description: "Email and SMS lifecycle marketing campaigns",
-    agents: ["Lifecycle agents"],
+    agents: ["Email Marketing", "Newsletter"],
     color: "#6B2FFC",
     docsUrl: "#",
-    comingSoon: true,
   },
   {
     provider: "APOLLO",
@@ -110,7 +136,7 @@ const INTEGRATIONS = [
   {
     provider: "GOOGLE_BUSINESS_PROFILE",
     name: "Google Business Profile",
-    description: "GBP posts, review management, Q&A",
+    description: "GBP posts and review management",
     agents: ["Local SEO / GBP", "Review Engine"],
     color: "#4285F4",
     docsUrl: "#",
@@ -132,6 +158,14 @@ const INTEGRATIONS = [
     docsUrl: "#",
   },
   {
+    provider: "SEARCH_ATLAS",
+    name: "SearchAtlas",
+    description: "Topic ideas and content-gap keyword data — keywords competitors rank for that you don't",
+    agents: ["Topic Planner", "Competitor Watch", "Keyword Research"],
+    color: "#5B21B6",
+    docsUrl: "https://dashboard.searchatlas.com/settings?active_section=api",
+  },
+  {
     provider: "TRANSISTOR",
     name: "Transistor",
     description: "Podcast hosting — create and publish episodes",
@@ -148,6 +182,22 @@ const INTEGRATIONS = [
     docsUrl: "#",
   },
   {
+    provider: "MICROSOFT_365",
+    name: "Microsoft 365",
+    description: "Outlook inbox triage and outreach drafts",
+    agents: ["Outreach", "Inbox Responder"],
+    color: "#0078D4",
+    docsUrl: "#",
+  },
+  {
+    provider: "META",
+    name: "Meta",
+    description: "Publish to Facebook Pages and Instagram",
+    agents: ["Meta Poster"],
+    color: "#1877F2",
+    docsUrl: "#",
+  },
+  {
     provider: "MAILCHIMP",
     name: "Mailchimp",
     description: "Email campaigns and audience management",
@@ -156,9 +206,38 @@ const INTEGRATIONS = [
     textColor: "#000000",
     docsUrl: "#",
   },
+  {
+    provider: "CRM_ERP_IO",
+    name: "erp.io CRM",
+    description: "Stage a sequence and enroll a segment in app.erp.io/crm — per-tenant API key, never a shared secret",
+    agents: ["Email Marketing"],
+    color: "#4F46E5",
+    docsUrl: "#",
+  },
 ] as const;
 
-export default async function IntegrationsPage() {
+/**
+ * Whether this server holds what the provider's connect flow needs. Without it
+ * the Connect button would send someone to a flow that fails on the first
+ * redirect — show "Not set up" instead, which is the truth.
+ */
+function serverConfigured(provider: string, kind: string | undefined): boolean {
+  const env = process.env;
+  if (kind === "google") {
+    if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return false;
+    return provider !== "GOOGLE_ADS" || Boolean(env.GOOGLE_ADS_DEVELOPER_TOKEN);
+  }
+  if (kind === "microsoft") return Boolean(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET);
+  if (kind === "meta") return Boolean(env.META_APP_ID && env.META_APP_SECRET);
+  return true;
+}
+
+export default async function IntegrationsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
 
@@ -169,10 +248,12 @@ export default async function IntegrationsPage() {
 
   const connectedIntegrations = await prisma.integration.findMany({
     where: { workspaceId },
-    select: { provider: true, id: true },
+    select: { provider: true, id: true, label: true },
   });
 
-  const connectedSet = new Set(connectedIntegrations.map((i) => i.provider));
+  const connected = new Map<string, { label: string | null }>(
+    connectedIntegrations.map((i) => [i.provider, { label: i.label }]),
+  );
 
   return (
     <div className="scrollable">
@@ -183,10 +264,31 @@ export default async function IntegrationsPage() {
         </p>
       </div>
 
+      {error && (
+        <div
+          role="alert"
+          style={{
+            marginBottom: 16,
+            padding: "12px 16px",
+            background: "var(--danger-bg)",
+            color: "var(--danger)",
+            borderRadius: "var(--radius)",
+            fontSize: 13,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {INTEGRATIONS.map((integration) => {
-          const isConnected = connectedSet.has(integration.provider as never);
-          const isSoon = "comingSoon" in integration && integration.comingSoon;
+          const isConnected = connected.has(integration.provider);
+          // A provider with no connect method gets "Soon", never a Connect
+          // button that lands on "Unknown provider".
+          const method = CONNECT_METHODS[integration.provider]?.method;
+          const isSoon = ("comingSoon" in integration && integration.comingSoon) || (!method && !isConnected);
+          const connectedLabel = connected.get(integration.provider)?.label;
+          const notSetUp = !isSoon && !isConnected && !serverConfigured(integration.provider, method?.kind);
 
           return (
             <div
@@ -227,19 +329,29 @@ export default async function IntegrationsPage() {
                   <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{integration.name}</span>
                   {isConnected && <span className="badge badge-completed">Connected</span>}
                   {isSoon && <span className="badge badge-soon">Soon</span>}
+                  {notSetUp && <span className="badge badge-muted">Not set up</span>}
                 </div>
                 <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>{integration.description}</p>
                 <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "4px 0 0" }}>
                   Used by: {integration.agents.join(", ")}
+                  {isConnected && connectedLabel && connectedLabel !== integration.provider && (
+                    <> · Using <span style={{ color: "var(--text-muted)" }}>{connectedLabel}</span></>
+                  )}
                 </p>
+                {SETUP_GUIDES[integration.provider] && <SetupGuideExpander guide={SETUP_GUIDES[integration.provider]!} />}
               </div>
 
-              {!isSoon && (
+              {!isSoon && !notSetUp && (
                 <div style={{ flexShrink: 0 }}>
                   {isConnected ? (
-                    <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger)" }}>
-                      Disconnect
-                    </button>
+                    <span style={{ display: "inline-flex", gap: 6 }}>
+                      {method && method.kind !== "key" && (
+                        <Link href={`/integrations/connect/${integration.provider.toLowerCase()}`} className="btn btn-ghost btn-sm">
+                          Settings
+                        </Link>
+                      )}
+                      <DisconnectButton provider={integration.provider} name={integration.name} />
+                    </span>
                   ) : (
                     <Link href={`/integrations/connect/${integration.provider.toLowerCase()}`} className="btn btn-secondary btn-sm">
                       Connect

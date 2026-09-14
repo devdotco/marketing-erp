@@ -1,11 +1,10 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasTopicalMap, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
 
 export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -25,62 +24,52 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
   // --- Live API: Ahrefs → Semrush ---
   // Pull keyword data for competitor URLs to ground content gap analysis in real data
   let liveDataSection = "";
-  let source: "live" | "simulation" = "simulation";
-
   const competitorDomains = competitorUrls
     .split(/[\n,]+/)
-    .map((u) => u.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
-    .filter(Boolean);
+    .map(bareDomain)
+    .filter(Boolean)
+    .slice(0, 3);
 
-  const ahrefsIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
-  });
+  const liveResult = competitorDomains.length === 0
+    ? ({ source: "simulation" } as const)
+    : await resolveSeoLiveData(
+        run.agentConfig.workspaceId,
+        (data, provider) =>
+          provider === "AHREFS"
+            ? `\n\nLIVE AHREFS COMPETITOR KEYWORD DATA:\n${JSON.stringify(data, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Ahrefs metrics`
+            : `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(data, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Semrush metrics`,
+        {
+          ahrefs: async (apiKey) =>
+            Promise.all(competitorDomains.map(async (domain) => ({ domain, keywords: await fetchAhrefsOrganicKeywords(apiKey, domain) }))),
+          semrush: async (apiKey) =>
+            Promise.all(competitorDomains.map(async (domain) => ({ domain, data: await fetchSemrushDomainOrganic(apiKey, domain) })))
+              .then((r) => JSON.stringify(r)),
+        },
+      );
+  let source = liveResult.source;
+  if (liveResult.source === "live") liveDataSection = liveResult.section;
+  // --- End live API ---
 
-  if (ahrefsIntegration?.encryptedCredentials && competitorDomains.length > 0) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
-      const results: Record<string, unknown>[] = [];
-      for (const domain of competitorDomains.slice(0, 3)) {
-        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
-        const res = await fetch(url, { headers: { "Accept": "application/json" } });
-        if (res.ok) {
-          const data = await res.json() as unknown;
-          results.push({ domain, keywords: data });
-        }
-      }
-      if (results.length > 0) {
-        liveDataSection = `\n\nLIVE AHREFS COMPETITOR KEYWORD DATA:\n${JSON.stringify(results, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Ahrefs metrics`;
-        source = "live";
-      }
-    } catch {
-      // fall through to Semrush
-    }
-  }
-
-  if (source === "simulation") {
-    const semrushIntegration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
-    });
-    if (semrushIntegration?.encryptedCredentials && competitorDomains.length > 0) {
-      try {
-        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
-        const results: { domain: string; data: string }[] = [];
-        for (const domain of competitorDomains.slice(0, 3)) {
-          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
-          const res = await fetch(url);
-          if (res.ok) {
-            const text = await res.text();
-            results.push({ domain, data: text });
-          }
-        }
-        if (results.length > 0) {
-          liveDataSection = `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nUse this real data to:\n- Identify topics competitors dominate (topicsTheyDominateWeAreWeak)\n- Find keyword gaps they have missed (topicsTheyMissedThatWeCanWin)\n- Set realistic keywordDifficulty and volumeBracket values based on actual Semrush metrics`;
-          source = "live";
-        }
-      } catch {
-        // fall through to simulation
-      }
-    }
+  // --- Live API: SearchAtlas topic ideas ---
+  // Separate from the competitor-gap call above — SearchAtlas's Topical
+  // Authority Map takes a seed topic, not a competitor domain, and returns
+  // clustered keyword + article-title suggestions, which is a genuinely
+  // different (and better-fitting) input for topic ideation than the
+  // organic-keyword pulls above.
+  const contentTopic =
+    focusKeywords.split(/[\n,]+/)[0]?.trim()
+    || businessProfile?.industry
+    || targetAudience
+    || "content marketing";
+  const topicIdeasResult = await resolveSeoLiveData(
+    run.agentConfig.workspaceId,
+    (data) =>
+      `\n\nLIVE SEARCHATLAS TOPICAL AUTHORITY MAP for "${contentTopic}":\n${JSON.stringify(data, null, 2)}\n\nUse these real keyword clusters and article title suggestions as the backbone of the weekly calendar topics — prefer them over invented titles.`,
+    { searchAtlas: (apiKey) => fetchSearchAtlasTopicalMap(apiKey, contentTopic) },
+  );
+  if (topicIdeasResult.source === "live") {
+    liveDataSection += topicIdeasResult.section;
+    source = "live";
   }
   // --- End live API ---
 
@@ -206,7 +195,7 @@ Return this exact JSON structure (no markdown, no code fences):
     delete output.simulationNote;
   } else {
     output.simulationNote =
-      "Connect Google Search Console in Settings to pull real near-ranking queries, impressions, and CTR data. Connect Ahrefs or Semrush to get live keyword difficulty and volume instead of estimates.";
+      "Connect Google Search Console in Settings to pull real near-ranking queries, impressions, and CTR data. Connect Ahrefs or Semrush to get live keyword difficulty and volume instead of estimates, or SearchAtlas for real AI-generated topic ideas and clustered keywords instead of invented ones.";
   }
 
   const requireApproval = config.requireApproval !== false;

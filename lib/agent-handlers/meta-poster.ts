@@ -6,6 +6,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { META_GRAPH_VERSION, type MetaCredentials } from "@/lib/integrations/meta";
 
 export const metaPosterHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -97,33 +98,38 @@ Return exactly this JSON structure:
 
   // ── Auto-publish Facebook text posts when approval not required ──────────
   if (!requireApproval && metaIntegration) {
-    try {
-      const creds = await decryptCredentials<{
-        page_access_token: string;
-        page_id: string;
-        ig_user_id?: string;
-      }>(metaIntegration.encryptedCredentials);
+    // Deliberately NOT wrapped in try/catch: a decrypt failure here means the
+    // stored credentials are corrupt or this integration predates the current
+    // shape — a real config fault, and nothing has posted yet, so throwing is
+    // safe and correct (the run fails legibly instead of reporting "draft",
+    // which would read as "nothing happened" when the actual state is
+    // unknown). Once posting starts, per-post failures below are caught
+    // individually instead, because by then some posts may already be live
+    // on Facebook/Instagram — losing that fact by throwing mid-loop would be
+    // worse than recording it.
+    const creds = await decryptCredentials<MetaCredentials>(metaIntegration.encryptedCredentials);
 
-      const posts = (output.posts as Array<Record<string, unknown>>) ?? [];
-      let publishedCount = 0;
+    const posts = (output.posts as Array<Record<string, unknown>>) ?? [];
+    let publishedCount = 0;
 
-      for (const post of posts) {
-        const caption = String(post.caption ?? "");
-        const hashtags = ((post.hashtags as string[]) ?? []).join(" ");
-        const fullText = [caption, hashtags].filter(Boolean).join("\n\n");
-        const platform = String(post.platform ?? "Facebook");
-        const surface = String(post.surface ?? "feed");
+    for (const post of posts) {
+      const caption = String(post.caption ?? "");
+      const hashtags = ((post.hashtags as string[]) ?? []).join(" ");
+      const fullText = [caption, hashtags].filter(Boolean).join("\n\n");
+      const platform = String(post.platform ?? "Facebook");
+      const surface = String(post.surface ?? "feed");
 
-        // Facebook feed posts — publish via Pages API (text only; media requires upload)
-        if (
-          (platforms === "Facebook" || platforms === "Both") &&
-          platform === "Facebook" &&
-          surface === "feed" &&
-          creds.page_id &&
-          creds.page_access_token
-        ) {
+      // Facebook feed posts — publish via Pages API (text only; media requires upload)
+      if (
+        (platforms === "Facebook" || platforms === "Both") &&
+        platform === "Facebook" &&
+        surface === "feed" &&
+        creds.page_id &&
+        creds.page_access_token
+      ) {
+        try {
           const fbRes = await fetch(
-            `https://graph.facebook.com/v21.0/${creds.page_id}/feed`,
+            `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.page_id}/feed`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -144,21 +150,25 @@ Return exactly this JSON structure:
             const errBody = await fbRes.text().catch(() => "");
             post.publishError = `Facebook API ${fbRes.status}: ${errBody}`;
           }
+        } catch (err) {
+          post.publishError = `Facebook feed publish failed: ${err instanceof Error ? err.message : String(err)}`;
         }
+      }
 
-        // Instagram feed posts require an image_url — skip without media
-        // Mark Instagram posts as needing manual publish if no image URL is provided
-        if (
-          (platforms === "Instagram" || platforms === "Both") &&
-          platform === "Instagram" &&
-          surface === "feed" &&
-          creds.ig_user_id
-        ) {
-          const imageUrl = post.imageUrl as string | undefined;
-          if (imageUrl) {
+      // Instagram feed posts require an image_url — skip without media
+      // Mark Instagram posts as needing manual publish if no image URL is provided
+      if (
+        (platforms === "Instagram" || platforms === "Both") &&
+        platform === "Instagram" &&
+        surface === "feed" &&
+        creds.ig_user_id
+      ) {
+        const imageUrl = post.imageUrl as string | undefined;
+        if (imageUrl) {
+          try {
             // Step 1: create container
             const containerRes = await fetch(
-              `https://graph.facebook.com/v21.0/${creds.ig_user_id}/media`,
+              `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.ig_user_id}/media`,
               {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -169,12 +179,17 @@ Return exactly this JSON structure:
                 }),
               }
             );
-            if (containerRes.ok) {
+            if (!containerRes.ok) {
+              const errBody = await containerRes.text().catch(() => "");
+              post.publishError = `Instagram media (container) ${containerRes.status}: ${errBody}`;
+            } else {
               const containerData = (await containerRes.json()) as { id?: string };
-              if (containerData.id) {
+              if (!containerData.id) {
+                post.publishError = "Instagram media container was created without an id";
+              } else {
                 // Step 2: publish container
                 const publishRes = await fetch(
-                  `https://graph.facebook.com/v21.0/${creds.ig_user_id}/media_publish`,
+                  `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.ig_user_id}/media_publish`,
                   {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -190,26 +205,32 @@ Return exactly this JSON structure:
                   post.igPostId = igData.id;
                   post.publishedAt = new Date().toISOString();
                   publishedCount++;
+                } else {
+                  const errBody = await publishRes.text().catch(() => "");
+                  post.publishError = `Instagram media_publish ${publishRes.status}: ${errBody}`;
                 }
               }
             }
-          } else {
-            post.publishNote = "Provide imageUrl field to enable Instagram auto-publish";
+          } catch (err) {
+            post.publishError = `Instagram publish failed: ${err instanceof Error ? err.message : String(err)}`;
           }
+        } else {
+          post.publishNote = "Provide imageUrl field to enable Instagram auto-publish";
         }
       }
-
-      output.posts = posts;
-      output.publishedCount = publishedCount;
-      output.source = publishedCount > 0 ? "live" : "draft";
-    } catch (err) {
-      output.publishError = err instanceof Error ? err.message : "Meta publish failed";
-      output.source = "draft";
     }
+
+    output.posts = posts;
+    output.publishedCount = publishedCount;
+    // "live": at least one post actually went out. "draft": Meta is connected
+    // and posting was attempted but nothing went out — check each post's
+    // publishError/publishNote for why, rather than treating this the same
+    // as "not connected".
+    output.source = publishedCount > 0 ? "live" : "draft";
   } else if (!metaIntegration) {
     output.source = "draft";
     output.simulationNote =
-      "Connect Meta in Settings > Integrations to enable auto-publishing via Facebook Graph API. Store { page_access_token, page_id } for Facebook Pages; add ig_user_id for Instagram Business accounts.";
+      "Connect Meta in Settings > Integrations to enable auto-publishing via Facebook Graph API.";
   }
 
   const costUsd = estimateCostUsd(MODELS.standard, message.usage);

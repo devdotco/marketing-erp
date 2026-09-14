@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -46,14 +48,24 @@ export const technicalAuditHandler: AgentHandler = async (run, updateStatus) => 
     },
   });
 
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated data as "live".
   if (integration) {
     try {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        property_url: string;
-      }>(integration.encryptedCredentials);
+      // Refreshes the hour-long access token first.
+      const creds = await googleCredentials(integration);
 
-      const propertyUrl = creds.property_url || gscProperty;
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const propertyUrl = await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, gscProperty);
+      if (!propertyUrl) {
+        throw new AgentInputError(
+          "Google Search Console is connected, but no property has been selected.",
+          "Open Integrations → Google Search Console and choose a property.",
+          "integration_not_configured",
+        );
+      }
       const encodedUrl = encodeURIComponent(propertyUrl);
       const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
       const headers: Record<string, string> = {
@@ -81,28 +93,30 @@ export const technicalAuditHandler: AgentHandler = async (run, updateStatus) => 
           rowLimit: 25000,
         }),
       });
+      if (!res.ok) {
+        throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      }
 
-      if (res.ok) {
-        const data = (await res.json()) as GscResponse;
-        const rows = data.rows ?? [];
+      const data = (await res.json()) as GscResponse;
+      const rows = data.rows ?? [];
 
-        // Sort pages: zero-click pages first (indexability risk), then by clicks desc
-        const zeroClickPages = rows
-          .filter((r) => r.clicks === 0 && r.impressions > 0)
-          .sort((a, b) => b.impressions - a.impressions)
-          .slice(0, 50);
+      // Sort pages: zero-click pages first (indexability risk), then by clicks desc
+      const zeroClickPages = rows
+        .filter((r) => r.clicks === 0 && r.impressions > 0)
+        .sort((a, b) => b.impressions - a.impressions)
+        .slice(0, 50);
 
-        const topPages = rows
-          .filter((r) => r.clicks > 0)
-          .sort((a, b) => b.clicks - a.clicks)
-          .slice(0, 100);
+      const topPages = rows
+        .filter((r) => r.clicks > 0)
+        .sort((a, b) => b.clicks - a.clicks)
+        .slice(0, 100);
 
-        const totalIndexedPages = rows.length;
-        const totalClicks = rows.reduce((s, r) => s + r.clicks, 0);
-        const totalImpressions = rows.reduce((s, r) => s + r.impressions, 0);
-        const pagesWithNoClicks = rows.filter((r) => r.clicks === 0).length;
+      const totalIndexedPages = rows.length;
+      const totalClicks = rows.reduce((s, r) => s + r.clicks, 0);
+      const totalImpressions = rows.reduce((s, r) => s + r.impressions, 0);
+      const pagesWithNoClicks = rows.filter((r) => r.clicks === 0).length;
 
-        gscIndexabilityContext = `REAL GSC INDEXABILITY SIGNAL (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
+      gscIndexabilityContext = `REAL GSC INDEXABILITY SIGNAL (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
 Property: ${propertyUrl}
 Total pages with impressions in GSC: ${totalIndexedPages}
 Pages receiving clicks: ${totalIndexedPages - pagesWithNoClicks}
@@ -116,10 +130,10 @@ ${JSON.stringify(zeroClickPages.map((r) => ({ url: r.keys[0], impressions: r.imp
 Top performing pages by clicks (top 100):
 ${JSON.stringify(topPages.map((r) => ({ url: r.keys[0], clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position })), null, 2)}`;
 
-        isGscLive = true;
-      }
-    } catch {
-      // Fall through — crawl simulation still runs
+      isGscLive = true;
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Search Console", err instanceof Error ? err.message : String(err));
     }
   }
 

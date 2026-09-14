@@ -1,10 +1,12 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { listPublishedPosts, type PayloadCredentials, type PayloadPost } from "@/lib/integrations/payload";
 
 export const internalLinkingHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -12,13 +14,36 @@ export const internalLinkingHandler: AgentHandler = async (run, updateStatus) =>
   // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
+  const workspaceId = run.agentConfig.workspaceId;
 
-  const siteUrl = typeof config.siteUrl === "string" ? config.siteUrl : "https://example.com";
+  // When Payload is connected, ground this in the workspace's real pages
+  // instead of letting the model invent a plausible-looking site structure —
+  // this is still a Claude-simulated link-graph analysis (no real inbound/
+  // outbound counts or crawl are performed), just no longer working from
+  // fabricated URLs. Best effort: a Payload hiccup falls back to the fully
+  // simulated behaviour rather than failing this agent.
+  const payloadIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId, provider: "PAYLOAD" } },
+  });
+  let payloadPosts: PayloadPost[] = [];
+  let payloadCreds: PayloadCredentials | null = null;
+  if (payloadIntegration) {
+    try {
+      payloadCreds = await decryptCredentials<PayloadCredentials>(payloadIntegration.encryptedCredentials);
+      payloadPosts = await listPublishedPosts(payloadCreds, 150);
+    } catch {
+      // Falls through to the simulated page inventory below.
+    }
+  }
+
+  const siteUrl = typeof config.siteUrl === "string" && config.siteUrl
+    ? config.siteUrl
+    : payloadCreds?.siteUrl ?? "https://example.com";
   const maxPagesToAnalyze = typeof config.maxPagesToAnalyze === "number" ? config.maxPagesToAnalyze : 200;
   const anchorDiversityMode = config.anchorDiversityMode !== false;
   const priorityPages = typeof config.priorityPages === "string" ? config.priorityPages : "";
 
-  const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId: run.agentConfig.workspaceId } });
+  const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId } });
 
   const systemPrompt = `You are a technical SEO specialist who builds and optimizes internal link graphs for large content sites. You identify orphaned pages (zero inbound internal links), link equity leaks (pages with many outbound links but few inbound), and high-value contextual linking opportunities. You enforce anchor text diversity to avoid over-optimization penalties — no anchor should appear more than 15% of the time for any given target page. You think in PageRank distribution, topical authority clustering, and crawl efficiency. Always return valid, minified JSON with no markdown fences.`;
 
@@ -36,6 +61,9 @@ Configuration:
 
 Priority pages that MUST receive strong internal link support (money pages):
 ${priorityPages || "Infer high-value pages from site structure (pricing, contact, main service pages)"}
+${payloadPosts.length > 0 ? `
+ACTUAL PAGES on this site, read from the connected Payload CMS (title — URL). Use these exact URLs for every page they cover instead of inventing one; only infer a URL for a page genuinely absent from this list (e.g. the homepage or a pricing page not managed in Payload):
+${payloadPosts.slice(0, 80).map((p) => `- ${p.title || "(untitled)"} — ${p.url}`).join("\n")}` : ""}
 
 Tasks:
 1. Map the current internal link graph (pages, inbound links, outbound links, orphan status)
@@ -160,9 +188,11 @@ Return this exact JSON structure (no markdown, no code fences):
   }
 
   output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
-  output.simulationNote =
-    "Connect your site via the Crawler integration in Settings to enable live sitemap ingestion and real-time link graph mapping across all " + maxPagesToAnalyze + " pages. Live crawl data will replace the simulated page inventory with actual URLs, anchor text counts, and link depth measurements.";
+  output.workspaceId = workspaceId;
+  output.payloadPostsUsed = payloadPosts.length;
+  output.simulationNote = payloadPosts.length > 0
+    ? `Page URLs and titles for ${payloadPosts.length} page(s) came from your connected Payload CMS. Inbound/outbound link counts, depth and the proposed link graph are still a Claude estimate, not a real crawl — there is no live sitemap crawler yet.`
+    : "Connect Payload CMS (or another CMS) under Settings → Integrations to ground this in your site's actual pages instead of an inferred structure. Inbound/outbound link counts, depth and the proposed link graph are still a Claude estimate, not a real crawl — there is no live sitemap crawler yet.";
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

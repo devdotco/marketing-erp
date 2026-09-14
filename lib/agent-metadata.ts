@@ -3,7 +3,14 @@ export interface AgentStep {
   detail: string;
 }
 
-export type InputType = "text" | "url" | "number" | "boolean" | "textarea" | "select";
+export type InputType = "text" | "url" | "number" | "boolean" | "textarea" | "select" | "integration_resource";
+
+/** Which connected Google integration an `integration_resource` field reads its options from. */
+export type IntegrationResourceProvider =
+  | "GOOGLE_SEARCH_CONSOLE"
+  | "GOOGLE_ANALYTICS_4"
+  | "GOOGLE_ADS"
+  | "GOOGLE_BUSINESS_PROFILE";
 
 export interface AgentInput {
   key: string;
@@ -17,6 +24,8 @@ export interface AgentInput {
   /** Which step of the Run modal this field belongs to. Must name one of the
    *  agent's `groups`. Fields with no group land in the first step. */
   group?: string;
+  /** type: "integration_resource" only — which connected account backs the dropdown. */
+  provider?: IntegrationResourceProvider;
 }
 
 export interface AgentMeta {
@@ -86,7 +95,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "schemaType", label: "Structured Data Type", type: "select", group: "Output and delivery", options: ["Article", "BlogPosting", "NewsArticle", "HowTo", "TechArticle"], defaultValue: "Article", hint: "The JSON-LD emitted with the draft. Built from the piece that was actually written, never from this form alone." },
       { key: "geographicScope", label: "Geographic Scope", type: "text", group: "Output and delivery", defaultValue: "Universal (no place-specific framing)", hint: "Leave as-is for content that works anywhere. Replace with a place to deliberately write a local piece." },
       { key: "maxRepairRounds", label: "Maximum Repair Rounds", type: "number", group: "Output and delivery", defaultValue: "2", hint: "How many times a defective draft is sent back. Each round costs another pass. 0 delivers the first draft with its defects listed." },
-      { key: "cmsTarget", label: "CMS Target", type: "select", group: "Output and delivery", options: ["None (draft only)", "WordPress", "Storyblok", "Webflow"], defaultValue: "None (draft only)", hint: "Where the piece is pushed as a draft when approval is not required. The integration must be connected in Settings." },
+      { key: "cmsTarget", label: "CMS Target", type: "select", group: "Output and delivery", options: ["None (draft only)", "WordPress", "Storyblok", "Webflow", "Payload"], defaultValue: "None (draft only)", hint: "Where the piece is pushed as a draft when approval is not required. The integration must be connected in Settings." },
       { key: "requireApproval", label: "Hold for Approval Before Publishing", type: "boolean", group: "Output and delivery", defaultValue: "true", hint: "On, the run waits for you to approve. Off, the draft goes straight to the CMS as a draft post." },
     ],
     outputs: ["Publication-ready body (CMS-safe HTML, no inline styles)", "The same piece as markdown, for review or pasting into a doc", "Metadata: title, slug, meta description, focus keyword", "JSON-LD structured data, including FAQPage when an FAQ was written", "Citation manifest: each claim, its source, and whether the piece actually used it", "Quality report: defects, warnings, word count, link counts, repair rounds", "FAQ entries and image briefs with alt text, when requested", "Verified source list from the research pass", "Per-stage cost and timing, and which API key the run was billed to"],
@@ -103,7 +112,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "draftId", label: "Draft ID", type: "text", placeholder: "e.g. draft_a1b2c3d4", required: true, hint: "The unique ID of the approved draft in the agent queue, assigned by the Blog Writer or Content Refresh agent." },
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow"], required: true, hint: "The CMS where the draft will be published; the integration must be authenticated in Settings." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS where the draft will be published; the integration must be authenticated in Settings." },
       { key: "publishStatus", label: "Publish Status", type: "select", options: ["Draft", "Scheduled", "Published"], defaultValue: "Draft", hint: "Set to Published to go live immediately, Scheduled to use the datetime below, or Draft to stage without publishing." },
       { key: "scheduledAt", label: "Scheduled Publish Time", type: "text", placeholder: "2026-09-15T09:00:00Z", hint: "ISO 8601 datetime for scheduled publishing; only used when Publish Status is set to Scheduled." },
       { key: "primaryCategory", label: "Primary Category or Collection", type: "text", placeholder: "e.g. content-marketing", hint: "The CMS category slug or collection name to assign this post to on publish." },
@@ -132,7 +141,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "excludedTopics", label: "Excluded Topics or Keywords", type: "textarea", placeholder: "competitor brand names, out-of-scope product categories...", hint: "Topics or keyword strings that should never appear in the generated plan, regardless of score." },
     ],
     outputs: ["4-week editorial calendar with weekly assignments (JSON)", "Prioritised topic list with winnability scores and rationale", "Near-rank keyword opportunities report (CSV)", "Competitor content gap analysis by domain (JSON)", "Recommended format and target word count per topic"],
-    requirements: ["Google Search Console property connected in Settings", "At least one SEO tool (Ahrefs or Semrush) connected, or competitor domains provided manually", "Business Profile completed in Settings"],
+    requirements: ["Google Search Console property connected in Settings", "At least one SEO tool (Ahrefs, Semrush, or SearchAtlas) connected, or competitor domains provided manually", "Business Profile completed in Settings"],
   },
   "content-refresh": {
     overview: "The Content Refresh agent queries a 16-month Google Search Console window to detect posts with declining click and impression trajectories, then performs section-level decay analysis to isolate exactly which passages have lost relevance \u2014 avoiding unnecessary full rewrites. Claude AI rewrites only the deteriorated sections, updating outdated statistics, addressing newly ranked subtopics, and tightening thin paragraphs, while preserving the original URL, internal links, H1, and publication metadata to protect accumulated SEO equity. Posts republish on their original URLs, recovering rankings at a fraction of the cost of new content.",
@@ -144,11 +153,11 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Republish and Reindex", detail: "Push updated content to the CMS on the original URL, set the modified date, and submit the URL to Google Search Console via the Indexing API for expedited recrawling." },
     ],
     inputs: [
-      { key: "gscProperty", label: "GSC Property URL", type: "text", placeholder: "sc-domain:example.com", required: true, hint: "Google Search Console property to pull click and impression decay data from; must be connected in Settings." },
+      { key: "siteUrl", label: "GSC Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Google Search Console property to pull click and impression decay data from. Defaults to the property chosen for your connected integration." },
       { key: "analysisWindowMonths", label: "Analysis Window (Months)", type: "number", defaultValue: "16", hint: "Lookback period for GSC decay detection; 16 months captures two seasonal cycles for accurate trending." },
       { key: "decayThresholdPercent", label: "Decay Threshold (%)", type: "number", defaultValue: "20", hint: "Minimum percentage click decline over the analysis window required to flag a post as a refresh candidate." },
       { key: "maxPostsPerRun", label: "Max Posts Per Run", type: "number", defaultValue: "5", hint: "Caps the number of posts refreshed in a single agent run to manage CMS write volume and review load." },
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow"], required: true, hint: "The CMS where refreshed posts will be updated; integration must be authenticated with read/write permissions." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS where refreshed posts will be updated; integration must be authenticated with read/write permissions." },
       { key: "preservePublishDate", label: "Preserve Original Publish Date", type: "boolean", defaultValue: "false", hint: "Keep the original publication date on republish; disable to surface the post as recently updated in feeds and sitemaps." },
     ],
     outputs: ["Refreshed article HTML per post", "Section-level decay report with scores (JSON)", "Post refresh log: original URL, sections rewritten, and publish timestamp", "GSC reindex submission confirmation", "Before/after word count and section diff summary (JSON)"],
@@ -164,7 +173,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Inject and Audit", detail: "Apply link injections directly to CMS posts, enforce the per-post cap, skip excluded URLs, and write a complete change log with before/after HTML diffs for editorial review." },
     ],
     inputs: [
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow"], required: true, hint: "The CMS to crawl for content and update with injected links; must have read/write permissions configured." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS to crawl for content and update with injected links; must have read/write permissions configured." },
       { key: "maxLinksPerPost", label: "Max New Links Per Post", type: "number", defaultValue: "3", hint: "Hard cap on new internal links added to any single existing post in one run." },
       { key: "prioritiseOrphanPages", label: "Prioritise Orphan Pages", type: "boolean", defaultValue: "true", hint: "When enabled, pages with zero inbound internal links receive the highest link injection priority." },
       { key: "anchorMatchMode", label: "Anchor Text Match Mode", type: "select", options: ["Semantic", "Exact keyword", "Both"], defaultValue: "Semantic", hint: "Semantic mode writes naturally varied anchor text; Exact keyword mode inserts the target page's primary keyword verbatim." },
@@ -503,16 +512,16 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Prioritised Report Generation", detail: "Claude AI ranks every issue by estimated traffic impact, generates developer-ready fix tickets, and outputs a scored technical health summary with remediation timelines." },
     ],
     inputs: [
-      { key: "siteUrl", label: "Site URL", type: "url", placeholder: "https://example.com", required: true, hint: "Root domain to crawl; the agent begins here and follows all internal links recursively up to the page limit." },
+      { key: "websiteUrl", label: "Site URL", type: "url", placeholder: "https://example.com", required: true, hint: "Root domain to crawl; the agent begins here and follows all internal links recursively up to the page limit." },
       { key: "maxPages", label: "Max Pages to Crawl", type: "number", defaultValue: "500", hint: "Maximum number of pages to crawl per run; increase for large sites or reduce to control cost per execution." },
       { key: "crawlDepth", label: "Crawl Depth", type: "number", defaultValue: "5", hint: "Maximum number of link hops from the root URL the crawler will traverse before stopping that branch." },
       { key: "includeExternalLinks", label: "Check External Links", type: "boolean", defaultValue: "false", hint: "When enabled, the agent checks all outbound external links for 4xx and 5xx HTTP status codes." },
       { key: "respectRobotsTxt", label: "Respect robots.txt", type: "boolean", defaultValue: "true", hint: "Honour robots.txt Disallow rules during crawl; disable only if you need to audit blocked sections." },
-      { key: "gscPropertyUrl", label: "GSC Property URL", type: "url", placeholder: "https://example.com/", hint: "Google Search Console property URL used to cross-reference crawled URLs against the indexed page set." },
+      { key: "gscProperty", label: "GSC Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Cross-references crawled URLs against this property's indexed page set. Defaults to the property chosen for your connected Google Search Console integration." },
       { key: "focusKeywords", label: "Focus Keywords", type: "textarea", placeholder: "best crm software, crm pricing", hint: "Comma-separated priority keywords used to flag thin-content pages that currently rank for commercially valuable terms." },
     ],
     outputs: ["Technical audit report (PDF + JSON)", "Prioritised issue list with developer tickets (CSV)", "Broken link manifest (CSV)", "Core Web Vitals proxy scores per page", "Schema validation error log"],
-    requirements: ["Google Search Console integration connected", "Site sitemap.xml publicly accessible at /sitemap.xml", "Business Profile completed in Settings"],
+    requirements: ["Google Search Console integration connected (or a GSC Property override)", "Site sitemap.xml publicly accessible at /sitemap.xml", "Business Profile completed in Settings"],
   },
   "keyword-research": {
     overview: "Keyword Research builds a comprehensive, intent-segmented keyword universe by combining your seed terms with gap analysis against up to five competitor domains via the Ahrefs and Semrush APIs simultaneously. Claude AI classifies every keyword by search intent \u2014 informational, commercial, transactional, or navigational \u2014 scores each on a composite metric combining difficulty, volume, and estimated business value, and groups terms into topical content clusters. The output is a structured keyword map ready to assign to existing pages or slot directly into your content calendar.",
@@ -533,7 +542,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "includeQuestions", label: "Include Question Queries", type: "boolean", defaultValue: "true", hint: "When enabled, People Also Ask and question-format queries are included in the expanded keyword universe." },
     ],
     outputs: ["Keyword universe spreadsheet with scores (CSV)", "Intent-segmented topical cluster map (JSON)", "Competitor keyword gap report (CSV)", "Content calendar suggestions (markdown)", "Top 50 quick-win keyword shortlist"],
-    requirements: ["Ahrefs or Semrush integration connected (at least one required)", "Target domain configured in Project Settings", "Business Profile completed in Settings"],
+    requirements: ["Ahrefs, Semrush, or SearchAtlas integration connected (at least one required)", "Target domain configured in Project Settings", "Business Profile completed in Settings"],
   },
   "rank-tracker": {
     overview: "Rank Tracker pulls daily keyword position data from the Google Search Console Search Analytics API, cross-references it against your configured target keyword list, and detects statistically significant rank movements with directional delta calculations across 1-day, 7-day, and 28-day windows. Claude AI contextualises each movement cluster \u2014 correlating changes against known algorithm update dates, competitor displacement events, and keyword cannibalization patterns \u2014 so you receive not just data but a narrative explanation with recommended next actions, delivered as a daily digest with zero analyst overhead.",
@@ -545,15 +554,16 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Daily Digest Delivery", detail: "Compile top movers, new rankings, and losers into a formatted digest delivered via platform notification or email with ranked action recommendations for each keyword." },
     ],
     inputs: [
-      { key: "gscPropertyUrl", label: "GSC Property URL", type: "url", placeholder: "https://example.com/", required: true, hint: "Google Search Console property URL; must match the exact verified property string including trailing slash if applicable." },
+      { key: "gscPropertyUrl", label: "GSC Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Overrides the property chosen for your connected Google Search Console integration. Only needed if you want a different property, or if GSC isn't connected yet (in which case tracking is simulated)." },
       { key: "targetKeywords", label: "Target Keywords", type: "textarea", placeholder: "best crm software\ncrm pricing\ncrm for agencies", required: true, hint: "Newline-separated list of keywords to track daily; these drive the movement alerts and digest prioritisation logic." },
       { key: "movementThreshold", label: "Movement Alert Threshold", type: "number", defaultValue: "3", hint: "Minimum position change (in ranking positions) required to flag a keyword as a notable mover in the daily digest." },
-      { key: "deviceSegment", label: "Device Segment", type: "select", options: ["web", "mobile", "tablet", "all"], defaultValue: "web", hint: "Device type to filter GSC position data by; 'web' refers to desktop results in Search Console terminology." },
-      { key: "countryFilter", label: "Country Filter", type: "select", options: ["all", "us", "gb", "au", "ca", "de"], defaultValue: "all", hint: "Restrict rank tracking to a specific country market to avoid position dilution from international traffic mixing." },
-      { key: "alertOnLoss", label: "Alert on Rank Loss", type: "boolean", defaultValue: "true", hint: "When enabled, an immediate platform notification fires if any target keyword drops beyond the movement threshold in a single day." },
+      { key: "deviceSegment", label: "Device Segment", type: "select", options: ["All", "Desktop", "Mobile", "Tablet"], defaultValue: "All", hint: "Device type to filter GSC position data by, using Search Console's own device dimension." },
+      { key: "countryFilter", label: "Country Filter", type: "select", options: ["All", "United States", "United Kingdom", "Australia", "Canada", "Germany"], defaultValue: "All", hint: "Restrict rank tracking to a specific country market to avoid position dilution from international traffic mixing." },
+      { key: "alertOnLoss", label: "Alert on Rank Loss", type: "boolean", defaultValue: "true", hint: "When enabled, the digest highlights rank losses beyond the movement threshold; when off, it reports both gains and losses evenly." },
+      { key: "competitorDomains", label: "Competitor Domains", type: "textarea", placeholder: "competitor1.com\ncompetitor2.com", hint: "Newline-separated competitor root domains, up to 3. Search Console can't see competitor rankings, so this pulls from Ahrefs, Semrush, or SearchAtlas instead — connect one of those to get live competitor data." },
     ],
     outputs: ["Daily rank movement digest (HTML email + JSON)", "Position history time series per keyword (CSV)", "Top movers and losers summary with deltas", "Algorithm correlation annotations (markdown)", "New keyword rankings alert list"],
-    requirements: ["Google Search Console integration connected", "Target keyword list configured with a minimum of 5 keywords", "Business Profile completed in Settings"],
+    requirements: ["Google Search Console integration connected (or a GSC Property URL override)", "Target keyword list configured with a minimum of 5 keywords", "Business Profile completed in Settings", "Ahrefs, Semrush, or SearchAtlas connected for live competitor domain data (optional)"],
   },
   "gsc-analyst": {
     overview: "GSC Analyst transforms raw Search Console data into a structured intelligence brief by clustering queries semantically, calculating CTR gaps between cluster averages and individual page performance, and pinpointing pages where high impressions are suppressed by weak title or meta copy. Claude AI generates per-cluster narrative insights covering seasonal trends, cannibalisation warnings, and ranking equity leakage \u2014 then produces rewrite recommendations for underperforming titles and meta descriptions, paired directly with each finding for immediate implementation without a separate copywriting step.",
@@ -565,15 +575,17 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Insight Report Assembly", detail: "Claude AI produces a structured weekly brief with cluster-level narratives, meta rewrite suggestions, cannibalisation warnings, and a ranked list of highest-impact opportunities." },
     ],
     inputs: [
-      { key: "gscPropertyUrl", label: "GSC Property URL", type: "url", placeholder: "https://example.com/", required: true, hint: "Exact Google Search Console property URL from which the agent pulls all search analytics data for this analysis run." },
-      { key: "lookbackDays", label: "Lookback Period (Days)", type: "number", defaultValue: "90", hint: "Number of days of GSC data to include per run; use 180 or more for reliable seasonal trend detection." },
-      { key: "minImpressions", label: "Minimum Impressions", type: "number", defaultValue: "50", hint: "Queries with fewer impressions than this value are excluded from cluster analysis to eliminate low-signal statistical noise." },
-      { key: "deviceSegment", label: "Device Segment", type: "select", options: ["web", "mobile", "tablet", "all"], defaultValue: "web", hint: "Device type to filter GSC query and page data by for analysis; choose 'all' for a blended view across devices." },
+      { key: "gscPropertyUrl", label: "GSC Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Overrides the property chosen for your connected Google Search Console integration. Only needed if you want a different property, or if GSC isn't connected yet (in which case the brief is simulated)." },
+      { key: "comparisonPeriod", label: "Comparison Period", type: "select", options: ["WoW", "MoM", "YoY"], defaultValue: "WoW", hint: "Week-over-week, month-over-month (28d), or year-over-year (28d vs. the same period last year) — sets both the data window and the delta comparison." },
+      { key: "minImpressions", label: "Minimum Impressions", type: "number", defaultValue: "50", hint: "Queries with fewer impressions than this value are excluded from the striking-distance and CTR-gap lists to eliminate low-signal noise." },
+      { key: "strikingDistanceRange", label: "Striking Distance Range", type: "text", defaultValue: "11-20", placeholder: "11-20", hint: "Position range (e.g. 11-20) that counts as \"striking distance\" — close enough to page one to be worth pushing over." },
+      { key: "deviceSegment", label: "Device Segment", type: "select", options: ["All", "Desktop", "Mobile", "Tablet"], defaultValue: "All", hint: "Device type to filter GSC query and page data by for analysis, using Search Console's own device dimension." },
       { key: "focusOnPages", label: "Focus URL Paths", type: "textarea", placeholder: "/blog/\n/solutions/", hint: "Optional URL path prefixes to restrict analysis to specific site sections; leave blank to analyse all pages." },
       { key: "includeMetaRewrites", label: "Generate Meta Rewrites", type: "boolean", defaultValue: "true", hint: "When enabled, Claude AI generates rewritten title tags and meta descriptions for every CTR-gap page identified in the analysis." },
+      { key: "reportFormat", label: "Report Format", type: "select", options: ["Narrative", "Bullet", "Executive"], defaultValue: "Narrative", hint: "Narrative writes flowing prose, Bullet stays terse throughout, Executive caps the write-up at 3 bullets for a leadership audience." },
     ],
     outputs: ["Weekly GSC intelligence brief (PDF + HTML)", "CTR gap pages list with meta rewrite suggestions (CSV)", "Query cluster performance breakdown (JSON)", "Seasonal trend annotation report", "Keyword cannibalisation warning list"],
-    requirements: ["Google Search Console integration connected", "Site property verified in Google Search Console", "Business Profile completed in Settings"],
+    requirements: ["Google Search Console integration connected (or a GSC Property URL override)", "Site property verified in Google Search Console", "Business Profile completed in Settings"],
   },
   "competitor-watch": {
     overview: "Competitor Watch uses Ahrefs and Semrush APIs to continuously monitor up to ten competitor domains \u2014 tracking new backlink acquisition velocity, freshly published content, keyword rank gains, and SERP feature captures including featured snippets, People Also Ask placements, and image packs. Claude AI synthesises these weekly signals into a competitive delta report that quantifies the organic traffic your competitors are gaining and highlights the specific moves worth responding to. Agencies use it to defend existing rankings proactively and identify content gaps before competitors can fully exploit them.",
@@ -593,7 +605,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "contentMonitoring", label: "Monitor New Content", type: "boolean", defaultValue: "true", hint: "Enable competitor sitemap and RSS crawling to detect newly published or refreshed content with keyword targeting data." },
     ],
     outputs: ["Weekly competitive delta report (PDF + HTML)", "New competitor backlinks log with domain ratings (CSV)", "Competitor keyword gains and losses table", "New competitor content log with estimated keyword targets", "SERP feature capture change summary"],
-    requirements: ["Ahrefs or Semrush integration connected (at least one required)", "Target domain configured in Project Settings", "Business Profile completed in Settings"],
+    requirements: ["Ahrefs, Semrush, or SearchAtlas integration connected (at least one required)", "Target domain configured in Project Settings", "Business Profile completed in Settings"],
   },
   "schema": {
     overview: "Schema Markup audits your site's existing structured data against Google's Rich Results Test requirements, then uses Claude AI to generate valid Article, FAQ, HowTo, BreadcrumbList, and Product JSON-LD blocks tailored to each eligible page's content type and live CMS content. Generated markup is injected directly into your connected CMS \u2014 WordPress via REST API, Storyblok via Management API, or Webflow via CMS API \u2014 eliminating developer involvement for routine schema deployment. Monthly runs ensure new pages are covered and previously flagged validation errors are resolved, directly improving rich result eligibility and organic CTR.",
@@ -606,7 +618,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "siteUrl", label: "Site URL", type: "url", placeholder: "https://example.com", required: true, hint: "Root domain to crawl for existing schema and eligible pages; the agent scans all indexable URLs found in the sitemap." },
-      { key: "cmsTarget", label: "CMS Target", type: "select", options: ["wordpress", "storyblok", "webflow"], required: true, hint: "CMS where generated JSON-LD will be injected; this determines which API credentials and write method the agent uses." },
+      { key: "cmsTarget", label: "CMS Target", type: "select", options: ["wordpress", "storyblok", "webflow", "payload"], required: true, hint: "CMS where generated JSON-LD will be injected; this determines which API credentials and write method the agent uses." },
       { key: "schemaTypes", label: "Schema Types to Generate", type: "textarea", defaultValue: "Article, BreadcrumbList, FAQ", hint: "Comma-separated schema types to generate; supported values: Article, FAQ, HowTo, BreadcrumbList, Product, LocalBusiness." },
       { key: "organisationName", label: "Organisation Name", type: "text", placeholder: "Acme Corp", required: true, hint: "Used to populate Organisation and Publisher entities within all generated schema blocks across the site." },
       { key: "organisationUrl", label: "Organisation URL", type: "url", placeholder: "https://example.com", hint: "Canonical URL of your organisation, used in structured data publisher and sameAs entity relationship fields." },
@@ -625,7 +637,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Weekly Post Publishing", detail: "Publish the approved GBP post via the Business Profile API with the attached photo and UTM-tagged destination link to sustain GBP freshness signals and track engagement." },
     ],
     inputs: [
-      { key: "gbpLocationId", label: "GBP Location Resource ID", type: "text", placeholder: "accounts/123456/locations/789012", required: true, hint: "Google Business Profile location resource ID in the format accounts/{accountId}/locations/{locationId}; find it in your GBP API dashboard." },
+      { key: "gbpLocation", label: "GBP Location", type: "integration_resource", provider: "GOOGLE_BUSINESS_PROFILE", hint: "Defaults to the location chosen for your connected Google Business Profile integration." },
       { key: "businessCategory", label: "Business Category", type: "text", placeholder: "Pest Control Service", required: true, hint: "Primary GBP business category, used by Claude AI to calibrate copy tone, vocabulary, and local search intent targeting." },
       { key: "targetKeywords", label: "Target Local Keywords", type: "textarea", placeholder: "pest control bentonville, ant exterminator nw arkansas", required: true, hint: "Local service keywords used both for post copy optimisation and as the keyword list for geo-grid rank monitoring checks." },
       { key: "serviceArea", label: "Primary Service Area", type: "text", placeholder: "Bentonville, AR", hint: "Primary city or region; the agent uses this as the centre point for geo-grid local pack rank monitoring." },
@@ -650,7 +662,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "brandTerms", label: "Brand Terms", type: "textarea", placeholder: "Acme Corp, AcmeCorp, acme.com", required: true, hint: "Brand name variants, product names, and domain references the agent searches for within AI platform responses to calculate citation rate." },
       { key: "targetPlatforms", label: "Target AI Platforms", type: "select", options: ["all", "chatgpt", "perplexity", "google-aio"], defaultValue: "all", hint: "Select which AI search platforms to probe for brand and content citations; 'all' runs the audit across all three platforms." },
       { key: "testQueryCount", label: "Test Queries per Platform", type: "number", defaultValue: "25", hint: "Number of test queries submitted per platform per run; more queries improve statistical reliability but extend run time and cost." },
-      { key: "gscPropertyUrl", label: "GSC Property URL", type: "url", placeholder: "https://example.com/", hint: "Google Search Console property URL used to cross-reference your top-traffic pages against AI citation coverage gaps." },
+      { key: "siteUrl", label: "GSC Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Cross-references your top-traffic pages against AI citation coverage gaps. Defaults to the property chosen for your connected integration, or your Business Profile website if neither is set." },
       { key: "industryContext", label: "Industry Context", type: "textarea", placeholder: "B2B SaaS, marketing automation software", hint: "Brief description of your industry and product type; helps Claude AI generate representative, high-fidelity test queries for your vertical." },
       { key: "includeCompetitorBenchmark", label: "Include Competitor Benchmark", type: "boolean", defaultValue: "false", hint: "When enabled, the same citation audit runs against one competitor domain so you can benchmark your AI visibility score comparatively." },
     ],
@@ -658,13 +670,15 @@ export const AGENT_META: Record<string, AgentMeta> = {
     requirements: ["Google Search Console integration connected", "Business Profile with brand name and organisation details completed in Settings", "Target domain configured in Project Settings"],
   },
   "prospector": {
-    overview: "The Prospector agent automates the most time-intensive phase of link building by pulling competitor backlink profiles from Ahrefs and Semrush, then cross-referencing them against resource pages and broken-link opportunities across your niche. Each prospect is scored by Domain Authority, topical relevance to your target URLs, and link-acquisition difficulty. Claude AI synthesises these signals into a prioritised, deduplicated prospect list your team can act on immediately, reducing manual research time from days to minutes.",
+    overview: "The Prospector agent automates the most time-intensive phase of link building by pulling competitor backlink profiles from Ahrefs and Semrush, then cross-referencing them against resource pages and broken-link opportunities across your niche. Each prospect is scored by Domain Authority, topical relevance to your target URLs, and link-acquisition difficulty. Claude AI synthesises these signals into a prioritised, deduplicated prospect list your team can act on immediately, reducing manual research time from days to minutes. Optionally, it can also stage a full Instantly cold-outreach campaign — subject lines, a multi-step sequence, and every prospect with a real email address — as a Draft that sends nothing until you review and approve it.",
+    groups: ["Prospect Criteria", "Outreach via Instantly"],
     steps: [
       { title: "Competitor Backlink Pull", detail: "Fetches full backlink profiles for up to 10 competitor domains via Ahrefs and Semrush APIs, deduplicating results across both data sources." },
       { title: "Resource Page Discovery", detail: "Crawls resource and links pages in your niche using targeted search operators, flagging pages that are actively maintained and likely to accept new additions." },
       { title: "Broken Link Mining", detail: "Identifies 404-generating links within competitor backlink profiles and resource pages, surfacing replacement opportunities matched to your target content URLs." },
       { title: "Relevance and DA Scoring", detail: "Assigns each referring domain a composite score that weights Domain Authority, topical relevance, spam score, and estimated link-acquisition difficulty." },
       { title: "Prioritised List Export", detail: "Claude AI compiles and ranks all prospects into a deduplicated report with personalised outreach angle notes attached to each entry." },
+      { title: "Instantly Campaign Staging", detail: "When Outreach via Instantly is on: writes a personalised email sequence, filters prospects down to real non-generic addresses, and creates the campaign in Instantly as a Draft with every eligible prospect added — nothing sends until you approve the run." },
     ],
     inputs: [
       { key: "targetUrls", label: "Target URLs", type: "textarea", placeholder: "https://yourdomain.com/page\nhttps://yourdomain.com/another-page", required: true, hint: "Enter one URL per line for the pages you want to build inbound links to." },
@@ -675,9 +689,22 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "includeResourcePages", label: "Include Resource Page Discovery", type: "boolean", defaultValue: "true", hint: "When enabled, the agent discovers resource and links pages that commonly accept new additions." },
       { key: "includeBrokenLinks", label: "Include Broken Link Mining", type: "boolean", defaultValue: "true", hint: "When enabled, the agent mines 404-generating links in competitor profiles as replacement opportunities." },
       { key: "maxProspects", label: "Max Prospects Per Run", type: "number", defaultValue: "200", hint: "Cap on the number of unique prospects returned per run; increase for broader campaigns." },
+      // ── Outreach via Instantly ───────────────────────────────────────────
+      { key: "sendViaInstantly", label: "Outreach via Instantly", type: "boolean", group: "Outreach via Instantly", defaultValue: "false", hint: "When on, stages a Draft Instantly campaign with this run's prospects and a generated email sequence. Nothing sends until you review and approve the run — approval is what launches it. Requires Instantly to be connected under Settings → Integrations." },
+      { key: "instantlyCampaignName", label: "Campaign Name", type: "text", group: "Outreach via Instantly", placeholder: "Leave blank to name it from today's date", hint: "Shown in Instantly. Defaults to \"Prospector Outreach – <today's date>\" when left blank." },
+      { key: "sequenceSteps", label: "Sequence Steps", type: "number", group: "Outreach via Instantly", defaultValue: "3", hint: "How many emails in the follow-up sequence, from 1 to 4." },
+      { key: "stepDelayDays", label: "Days Between Steps", type: "number", group: "Outreach via Instantly", defaultValue: "3", hint: "Wait time between each follow-up after the first email, which always sends immediately." },
+      { key: "outreachAngle", label: "Outreach Angle", type: "textarea", group: "Outreach via Instantly", placeholder: "e.g. we're citing your resource page and want to contribute an updated data point", hint: "The overall hook for this batch of outreach. Each email is still personalised per prospect using their own link placement opportunity." },
+      { key: "offer", label: "What You're Offering", type: "textarea", group: "Outreach via Instantly", placeholder: "e.g. a data-backed guest contribution, an updated stat, a free tool mention", hint: "Grounds the copy in something real so it doesn't read as generic outsourcing or link-begging." },
+      { key: "senderName", label: "Sender Name", type: "text", group: "Outreach via Instantly", placeholder: "e.g. Jane Smith", hint: "Who the emails are signed as." },
+      { key: "senderSignature", label: "Sender Signature", type: "textarea", group: "Outreach via Instantly", placeholder: "e.g. Jane Smith\nHead of Content, yourcompany.com", hint: "Appended sign-off on every email." },
+      { key: "sendingAccounts", label: "Sending Accounts", type: "textarea", group: "Outreach via Instantly", placeholder: "you@yourdomain.com", hint: "One or more Instantly-connected mailbox addresses to send from, one per line. Checked against your Instantly account's connected mailboxes when the campaign is staged." },
+      { key: "sendDayOfWeek", label: "Preferred Send Day", type: "select", group: "Outreach via Instantly", options: ["Any weekday (default)", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], defaultValue: "Any weekday (default)", hint: "Leave as default to send Monday through Friday; pick one day to narrow the schedule to just that day." },
+      { key: "sendWindow", label: "Send Window", type: "select", group: "Outreach via Instantly", options: ["9am–5pm (default)", "8am–6pm", "7am–7pm", "10am–3pm"], defaultValue: "9am–5pm (default)", hint: "The local time window Instantly is allowed to send within." },
+      { key: "timezone", label: "Timezone", type: "text", group: "Outreach via Instantly", placeholder: "America/New_York", defaultValue: "America/New_York", hint: "IANA timezone name for the send window." },
     ],
-    outputs: ["Scored prospect list with outreach angle notes (CSV)", "Ahrefs and Semrush backlink gap report (JSON)", "Resource page opportunities list with contact details", "Broken link replacement targets with suggested anchor text (JSON)", "Prospect deduplication and exclusion log"],
-    requirements: ["Ahrefs integration connected with an active API subscription", "Semrush integration connected with an active API subscription", "Target website added under Business Profile in Settings"],
+    outputs: ["Scored prospect list with outreach angle notes (CSV)", "Ahrefs and Semrush backlink gap report (JSON)", "Resource page opportunities list with contact details", "Broken link replacement targets with suggested anchor text (JSON)", "Prospect deduplication and exclusion log", "Instantly campaign staged as Draft, with the full email sequence and lead list for review (only when Outreach via Instantly is on)"],
+    requirements: ["Ahrefs integration connected with an active API subscription", "Semrush integration connected with an active API subscription", "Target website added under Business Profile in Settings", "Instantly integration connected under Settings → Integrations — only required when Outreach via Instantly is turned on"],
   },
   "outreach": {
     overview: "The Outreach agent drafts hyper-personalised cold emails for every prospect in your pipeline by reading each target site's recent content and referencing specific articles, stats, or angles that make each pitch feel genuinely hand-crafted rather than templated. Claude AI composes every email in your configured voice and tone, then queues a multi-step follow-up sequence with varied messaging per contact. All sending happens exclusively through your own Gmail or Microsoft 365 inbox \u2014 no shared bulk ESP \u2014 preserving deliverability and sender reputation at scale.",
@@ -753,15 +780,15 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "targetDomain", label: "Target Domain", type: "url", placeholder: "https://yourdomain.com", required: true, hint: "The root domain whose full backlink profile you want to monitor and protect." },
-      { key: "gscPropertyUrl", label: "Google Search Console Property URL", type: "url", placeholder: "https://yourdomain.com", required: true, hint: "The exact Google Search Console property URL for the domain being monitored." },
-      { key: "minimumDaAlert", label: "Minimum DA for Lost-Link Alerts", type: "number", defaultValue: "30", hint: "Only send alerts for lost links from referring domains with a DA at or above this value." },
-      { key: "toxicityThreshold", label: "Toxicity Score Threshold", type: "number", defaultValue: "70", hint: "Spam score threshold from 0 to 100 above which a referring domain is automatically flagged as toxic." },
-      { key: "alertEmail", label: "Alert Email Address", type: "text", placeholder: "alerts@yourdomain.com", hint: "Email address that receives daily lost-link and toxic-domain alert digests." },
-      { key: "autoDisavow", label: "Auto-Add Toxic Domains to Disavow Draft", type: "boolean", defaultValue: "false", hint: "When enabled, domains flagged as toxic are automatically appended to the pending disavow file draft." },
-      { key: "checkFrequency", label: "Check Frequency", type: "select", options: ["Daily", "Weekly"], defaultValue: "Daily", hint: "Controls how often the agent runs its snapshot comparison and issues link-health alerts." },
+      { key: "competitorDomains", label: "Competitor Domains", type: "textarea", placeholder: "competitor1.com\ncompetitor2.com", hint: "Newline-separated competitor root domains to compare link profiles against, when Ahrefs or Semrush is connected." },
+      { key: "minimumDaAlert", label: "Minimum DA for Lost-Link Alerts", type: "number", defaultValue: "30", hint: "Only surface lost-link alerts for referring domains with a DA at or above this value." },
+      { key: "toxicityThreshold", label: "Toxicity Score Threshold", type: "number", defaultValue: "70", hint: "Spam score threshold from 0 to 100 at or above which a referring domain is flagged as toxic." },
+      { key: "alertOnLost", label: "Alert on Lost Links", type: "boolean", defaultValue: "true", hint: "When enabled, the report leads with lost links above the DA threshold; when off, new and lost links are given equal billing." },
+      { key: "autoDisavow", label: "Draft Disavow File for Toxic Domains", type: "boolean", defaultValue: "false", hint: "When enabled, domains flagged as toxic are compiled into a downloadable disavow.txt draft. This never uploads to Google — you still submit it yourself in Search Console." },
+      { key: "checkFrequency", label: "Check Frequency", type: "select", options: ["Daily", "Weekly"], defaultValue: "Daily", hint: "How often you intend to run this agent — shown in the report header; schedule the run to match in your workspace's cron/queue setup." },
     ],
     outputs: ["Daily backlink snapshot with referring domain metrics (JSON)", "Lost links report with DA, anchor text, and last-seen date (CSV)", "Toxic domain flagging report with spam scores (CSV)", "Disavow file draft ready for Google Search Console upload (TXT)", "Reconsideration request draft for manual penalty recovery (HTML)"],
-    requirements: ["Ahrefs integration connected with an active API subscription", "Google Search Console integration authorised for the monitored property", "Target domain added under Business Profile in Settings"],
+    requirements: ["Ahrefs or Semrush integration connected for live backlink data (falls back to AI-estimated data otherwise)", "Target domain added under Business Profile in Settings"],
   },
   "google-ads": {
     overview: "The Google Ads agent connects to your Google Ads account and Google Analytics 4 to perform a daily audit of campaign structure, keyword quality scores, and conversion attribution. Claude AI analyzes search term reports to identify low-intent queries burning budget, then rewrites underperforming ad copy using proven headline formulas and calls-to-action aligned to your offer. By surfacing bid strategy mismatches and wasted spend patterns, the agent delivers actionable changes that improve ROAS without requiring manual account review.",
@@ -773,7 +800,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Produce Audit Report", detail: "Compiles bid strategy recommendations, negative keyword list, and rewritten ad copy into a structured report ready for one-click implementation." },
     ],
     inputs: [
-      { key: "accountId", label: "Google Ads Customer ID", type: "text", placeholder: "123-456-7890", required: true, hint: "Your 10-digit Google Ads customer ID, found in the top-right corner of the Google Ads dashboard." },
+      { key: "accountId", label: "Google Ads Account", type: "integration_resource", provider: "GOOGLE_ADS", hint: "Defaults to the account chosen for your connected Google Ads integration." },
       { key: "auditWindowDays", label: "Audit Window (Days)", type: "number", defaultValue: "30", hint: "Number of days of historical performance data the agent will analyze for each audit run." },
       { key: "primaryConversionAction", label: "Primary Conversion Action", type: "text", placeholder: "e.g. Submit Lead Form", required: true, hint: "The exact name of the Google Ads conversion action the agent should use to evaluate campaign and ad-level performance." },
       { key: "minImpressions", label: "Minimum Impressions Threshold", type: "number", defaultValue: "100", hint: "Ads with fewer impressions than this value are excluded from copy rewrite evaluation to avoid low-sample noise." },
@@ -861,7 +888,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Log Experiment Results", detail: "Accepts concluded experiment outcome data and appends a standardized entry to the experiment ledger, including winner, measured lift, and confidence level." },
     ],
     inputs: [
-      { key: "ga4PropertyId", label: "GA4 Property ID", type: "text", placeholder: "123456789", required: true, hint: "Your Google Analytics 4 numeric property ID, found under Admin > Property Settings in the GA4 interface." },
+      { key: "ga4Property", label: "GA4 Property", type: "integration_resource", provider: "GOOGLE_ANALYTICS_4", hint: "Defaults to the property chosen for your connected Google Analytics 4 integration." },
       { key: "targetUrls", label: "Target URLs for Funnel Analysis", type: "textarea", placeholder: "https://example.com/pricing, https://example.com/signup, https://example.com/checkout", required: true, hint: "Comma-separated list of page URLs to include in the funnel drop-off analysis. Focus on pages in your primary conversion path." },
       { key: "analysisDateRange", label: "Analysis Date Range (Days)", type: "number", defaultValue: "90", hint: "Number of days of GA4 historical data to analyze. Longer windows reduce noise but may obscure recent changes to site behavior." },
       { key: "hypothesesPerRun", label: "Hypotheses to Generate Per Run", type: "number", defaultValue: "5", hint: "Number of prioritized A/B test hypotheses the agent produces per monthly run, ranked by estimated revenue impact." },
@@ -873,26 +900,28 @@ export const AGENT_META: Record<string, AgentMeta> = {
     requirements: ["Google Analytics 4 property connected via OAuth in Integrations with read access", "GA4 funnel exploration events or goal conversion events configured and actively firing", "Minimum 90 days of GA4 data available for the configured target URL set"],
   },
   "email-marketing": {
-    overview: "The Email Marketing agent connects to Mailchimp or Klaviyo and uses Claude AI to generate broadcast campaigns and automated sequences calibrated to each audience segment. It analyzes historical engagement data \u2014 open rates, click patterns, and purchase history \u2014 to assign each contact an engagement score and map them to a lifecycle stage (cold, nurturing, active, at-risk, or lapsed). Campaign copy, subject lines, and send-time optimization are produced and scheduled automatically, cutting campaign setup time from hours to minutes while improving deliverability and revenue-per-email.",
+    overview: "The Email Marketing agent connects to Mailchimp, Klaviyo, Instantly, Apollo.io, or the erp.io CRM (app.erp.io/crm) and uses Claude AI to generate broadcast campaigns and automated sequences calibrated to each audience segment. It analyzes historical engagement data \u2014 open rates, click patterns, and purchase history \u2014 to assign each contact an engagement score and map them to a lifecycle stage (cold, nurturing, active, at-risk, or lapsed). Campaign copy, subject lines, and send-time optimization are produced and scheduled automatically, cutting campaign setup time from hours to minutes while improving deliverability and revenue-per-email. On Instantly, Apollo.io, and the erp.io CRM, the run only STAGES the campaign \u2014 a paused Instantly campaign, an unactivated Apollo sequence, a DRAFT CRM sequence \u2014 with no audience attached and nothing able to send; approving the run is what adds the audience and makes it live, the same as every other agent's approval gate, so nothing goes out to real people unattended.",
     steps: [
       { title: "Sync Audience Data", detail: "Pull all contacts from Mailchimp or Klaviyo \u2014 including tags, engagement history, and purchase events \u2014 into a normalized audience graph for analysis." },
       { title: "Segment and Score Contacts", detail: "Classify each contact by lifecycle stage and compute an engagement score using recency, frequency, and monetary (RFM) signals from the trailing 90-day window." },
       { title: "Generate Campaign Copy", detail: "Claude AI drafts subject lines, preview text, and body copy for each segment, calibrated to brand tone, campaign goal, and stage-appropriate messaging." },
-      { title: "Schedule and A/B Test", detail: "Configure platform-native send-time optimization and assign subject line variants for A/B testing across the top two audience segments before queueing." },
+      { title: "Stage in the Chosen Platform", detail: "On Mailchimp or Klaviyo, creates a campaign draft. On Instantly, creates a Draft-status campaign with the generated sequence. On Apollo.io, creates an unactivated sequence with the generated steps. On the erp.io CRM, creates a DRAFT Sequence with the generated steps. None of these can send yet \u2014 no audience is attached until approval." },
+      { title: "Approve to Activate", detail: "Approving the run adds the configured audience \u2014 an Instantly Lead List, Apollo Contacts, or a CRM Contact Segment \u2014 and makes the campaign live: Instantly's campaign is activated, Apollo's contacts are enrolled, the CRM sequence flips DRAFT \u2192 ACTIVE. Rejecting or leaving the run un-approved sends nothing." },
       { title: "Report and Iterate", detail: "After delivery, pull open, click, unsubscribe, and conversion data and update engagement scores and segment assignments to inform the next campaign cycle." },
     ],
     inputs: [
-      { key: "platform", label: "Email Platform", type: "select", options: ["Mailchimp", "Klaviyo"], required: true, hint: "Select the ESP this campaign will be created and sent through." },
-      { key: "audienceId", label: "Audience or List ID", type: "text", placeholder: "e.g. a1b2c3d4 or abc123xyz", required: true, hint: "Your Mailchimp Audience ID or Klaviyo List ID to target for this campaign." },
+      { key: "platform", label: "Email Platform", type: "select", options: ["Mailchimp", "Klaviyo", "Instantly", "Apollo", "erp.io CRM"], required: true, hint: "Which platform this campaign is created and (on approval) sent through. Instantly, Apollo, and erp.io CRM are staged unsent \u2014 approving the run is what adds the audience and activates delivery." },
+      { key: "audienceId", label: "Audience or List ID", type: "text", placeholder: "e.g. a1b2c3d4 or abc123xyz", required: true, hint: "Mailchimp: Audience ID. Klaviyo: List ID. Instantly: an existing Lead List ID \u2014 that list's leads move into the new campaign on approval. Apollo: one or more email addresses already saved as Contacts in Apollo, one per line \u2014 each is resolved to a Contact and enrolled on approval. erp.io CRM: a Contact Segment ID from Contacts \u2192 Segments in app.erp.io/crm \u2014 every member is enrolled on approval." },
+      { key: "senderAccountId", label: "Sender Account ID (Apollo only)", type: "text", placeholder: "Apollo email account ID", hint: "Required only when Email Platform is Apollo \u2014 the Apollo-connected mailbox this sequence sends from. Find it under Settings \u2192 Mailboxes in Apollo. Ignored for every other platform." },
       { key: "campaignGoal", label: "Campaign Goal", type: "select", options: ["Nurture", "Promotional", "Re-engagement", "Product Announcement"], required: true, hint: "The primary objective of this campaign \u2014 determines tone, structure, and call-to-action strategy." },
       { key: "offerOrCta", label: "Offer or Call to Action", type: "text", placeholder: "e.g. Book a free 30-min strategy call", hint: "The specific offer, discount, link, or CTA that anchors this campaign." },
       { key: "brandVoice", label: "Brand Voice Notes", type: "textarea", placeholder: "e.g. Authoritative but approachable, avoids jargon, speaks to CMOs and agency owners...", hint: "Describe your brand tone and persona so Claude AI writes in your voice." },
       { key: "segmentByLifecycle", label: "Segment by Lifecycle Stage", type: "boolean", defaultValue: "true", hint: "When enabled, the agent generates separate copy variants tailored to each lifecycle segment." },
       { key: "abTestSubjectLines", label: "A/B Test Subject Lines", type: "boolean", defaultValue: "true", hint: "Generates two subject line variants and splits the send for statistically significant testing." },
-      { key: "sendDayOfWeek", label: "Preferred Send Day", type: "select", options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], hint: "The agent uses platform send-time optimization but anchors scheduling to this preferred day." },
+      { key: "sendDayOfWeek", label: "Preferred Send Day", type: "select", options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], hint: "The agent uses platform send-time optimization but anchors scheduling to this preferred day. On Instantly this narrows the campaign's send schedule to that single day." },
     ],
-    outputs: ["Segmented audience list with lifecycle stage and engagement score (CSV)", "Campaign copy drafts per segment (HTML email)", "Scheduled campaign IDs in Mailchimp or Klaviyo", "A/B test subject line variants with predicted open-rate scores (JSON)", "Post-send performance report with per-segment metrics (PDF)"],
-    requirements: ["Mailchimp or Klaviyo integration authenticated in Settings", "Business Profile and brand voice completed in Settings", "Target audience or list contains at least 100 contacts"],
+    outputs: ["Segmented audience list with lifecycle stage and engagement score (CSV)", "Campaign copy drafts per segment (HTML email)", "Staged campaign/sequence IDs in Mailchimp, Klaviyo, Instantly, Apollo.io, or the erp.io CRM", "A/B test subject line variants with predicted open-rate scores (JSON)", "Post-send performance report with per-segment metrics (PDF)"],
+    requirements: ["Mailchimp, Klaviyo, Instantly, Apollo.io, or erp.io CRM integration authenticated in Settings", "Business Profile and brand voice completed in Settings", "Target audience or list contains at least 100 contacts", "Instantly/Apollo/erp.io CRM campaigns stay unsent until the run is approved \u2014 a workspace admin or operator must approve it for anything to reach the audience"],
   },
   "lead-enrichment": {
     overview: "The Lead Enrichment agent monitors a configured inbox or CRM pipeline for new contact records and immediately triggers a multi-source enrichment pipeline on each new email address detected. It resolves the contact's LinkedIn profile, fetches firmographic data \u2014 company size, industry, revenue range, tech stack, and recent funding events \u2014 and runs a live news search for signals relevant to your ICP. Claude AI synthesizes all raw data into a structured prospect brief with a lead quality score (0\u2013100) mapped against your defined ideal customer profile, then writes the enriched record directly back to your CRM, eliminating hours of manual SDR research per lead.",
@@ -924,7 +953,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Update Sentiment Tracker", detail: "Log each processed review to the sentiment time-series store, recalculate the rolling 30-day net sentiment score, and surface trends and anomalies in the reporting dashboard." },
     ],
     inputs: [
-      { key: "googleLocationId", label: "Google Business Profile Location ID", type: "text", placeholder: "e.g. ChIJN1t_tDeuEmsRUsoyG83frY4", required: true, hint: "Your GBP location ID from the Google Business Profile dashboard or Places API." },
+      { key: "gbpLocation", label: "GBP Location", type: "integration_resource", provider: "GOOGLE_BUSINESS_PROFILE", hint: "Defaults to the location chosen for your connected Google Business Profile integration." },
       { key: "responsePersona", label: "Response Persona and Tone", type: "textarea", placeholder: "e.g. Warm and professional, sign off as 'The [Business] Team', never make promises about refunds...", required: true, hint: "Describe how responses should sound so Claude AI writes in your business voice consistently." },
       { key: "negativeThreshold", label: "Negative Review Threshold (Stars)", type: "number", defaultValue: "3", hint: "Reviews at or below this star rating are escalated for human approval rather than auto-posted." },
       { key: "escalationEmail", label: "Escalation Notification Email", type: "text", placeholder: "reputation@yourbusiness.com", hint: "Email address that receives alerts when a negative review is flagged and queued for approval." },
@@ -966,9 +995,9 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "brandName", label: "Brand Name", type: "text", placeholder: "Acme Corp", required: true, hint: "Appears in the report header and is used by Claude AI to personalise commentary." },
-      { key: "ga4PropertyId", label: "GA4 Property ID", type: "text", placeholder: "123456789", required: true, hint: "Your numeric Google Analytics 4 property ID, found in GA4 Admin > Property Settings." },
-      { key: "gscSiteUrl", label: "Google Search Console Site URL", type: "url", placeholder: "https://example.com", required: true, hint: "Must match the exact verified property URL in your Search Console account." },
-      { key: "googleAdsCustomerId", label: "Google Ads Customer ID", type: "text", placeholder: "123-456-7890", required: true, hint: "Your 10-digit Google Ads customer ID in XXX-XXX-XXXX format." },
+      { key: "ga4Property", label: "GA4 Property", type: "integration_resource", provider: "GOOGLE_ANALYTICS_4", hint: "Defaults to the property chosen for your connected Google Analytics 4 integration." },
+      { key: "gscProperty", label: "Google Search Console Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Defaults to the property chosen for your connected Google Search Console integration. Shown in the report header only — this agent doesn't yet pull live GSC search data." },
+      { key: "adsAccount", label: "Google Ads Account", type: "integration_resource", provider: "GOOGLE_ADS", hint: "Defaults to the account chosen for your connected Google Ads integration." },
       { key: "reportingWindowDays", label: "Reporting Window (Days)", type: "number", defaultValue: "7", hint: "Number of days to include in the report, measured back from yesterday." },
       { key: "comparisonPeriod", label: "Comparison Period", type: "select", options: ["Previous period", "Same period last year", "Both"], defaultValue: "Previous period", hint: "Determines the benchmark period used for all percentage delta calculations." },
       { key: "includedMetrics", label: "Included Metric Groups", type: "select", options: ["Traffic + Conversions only", "Traffic + Conversions + Spend", "Full (all available metrics)"], defaultValue: "Traffic + Conversions + Spend" },
@@ -987,17 +1016,18 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Dispatch graded alerts", detail: "Sends severity-graded alerts to configured channels, including the metric delta, severity rating, Claude's cause hypothesis, and a recommended immediate action for each finding." },
     ],
     inputs: [
-      { key: "ga4PropertyId", label: "GA4 Property ID", type: "text", placeholder: "123456789", required: true, hint: "Your numeric Google Analytics 4 property ID, found in GA4 Admin > Property Settings." },
-      { key: "gscSiteUrl", label: "Google Search Console Site URL", type: "url", placeholder: "https://example.com", required: true },
-      { key: "googleAdsCustomerId", label: "Google Ads Customer ID", type: "text", placeholder: "123-456-7890", hint: "Optional but strongly recommended \u2014 enables spend and Quality Score anomaly detection." },
-      { key: "sensitivityLevel", label: "Detection Sensitivity", type: "select", options: ["Low (2\u03c3 threshold)", "Medium (1.5\u03c3 threshold)", "High (1\u03c3 threshold)"], defaultValue: "Medium (1.5\u03c3 threshold)", hint: "Higher sensitivity catches subtle anomalies earlier but increases the volume of informational alerts." },
-      { key: "alertChannels", label: "Alert Delivery Channels", type: "select", options: ["Dashboard only", "Email", "Email + Dashboard"], defaultValue: "Email + Dashboard" },
-      { key: "alertRecipients", label: "Alert Recipient Emails", type: "textarea", placeholder: "marketing@company.com, seo@company.com", hint: "Comma-separated email addresses for anomaly alert notifications." },
-      { key: "minimumSessionThreshold", label: "Minimum Daily Sessions Threshold", type: "number", defaultValue: "100", hint: "Anomaly checks are skipped on days where total sessions fall below this value to avoid noise on low-traffic periods." },
-      { key: "pauseOnWeekends", label: "Pause Checks on Weekends", type: "boolean", defaultValue: "false", hint: "Enable this if your business does not operate on weekends and weekend dips are expected." },
+      { key: "ga4PropertyId", label: "GA4 Property", type: "integration_resource", provider: "GOOGLE_ANALYTICS_4", hint: "Overrides the property chosen for your connected Google Analytics 4 integration. Only needed to use a different property, or as a label when GA4 isn't connected yet (in which case checks are simulated)." },
+      { key: "gscSiteUrl", label: "Google Search Console Property", type: "integration_resource", provider: "GOOGLE_SEARCH_CONSOLE", hint: "Overrides the property chosen for your connected Google Search Console integration. Optional \u2014 adds impressions/clicks anomaly detection alongside GA4 traffic." },
+      { key: "googleAdsCustomerId", label: "Google Ads Account", type: "integration_resource", provider: "GOOGLE_ADS", hint: "Overrides the account chosen for your connected Google Ads integration. Optional but recommended \u2014 enables spend and click anomaly detection." },
+      { key: "trackedMetrics", label: "Tracked Metrics", type: "select", options: ["All", "Traffic only", "Conversions only", "Revenue only"], defaultValue: "All", hint: "Which metric family to run deviation checks against. \"All\" checks traffic, conversions, and revenue together." },
+      { key: "sensitivityLevel", label: "Detection Sensitivity", type: "select", options: ["Low", "Medium", "High"], defaultValue: "Medium", hint: "Low flags deviations beyond 3\u03c3, Medium beyond 2\u03c3, High beyond 1.5\u03c3. Higher sensitivity catches subtler anomalies but raises more informational alerts." },
+      { key: "correlateDeployDates", label: "Correlate with Deploy Dates", type: "boolean", defaultValue: "true", hint: "When enabled, Claude AI cross-references anomalies against known site/campaign changes to suggest a likely cause rather than reporting the deviation alone." },
+      { key: "alertRecipients", label: "Alert Recipient Emails", type: "textarea", placeholder: "marketing@company.com, seo@company.com", hint: "Comma-separated email addresses this run's alerts are intended for. Shown in the report; no email is sent automatically yet." },
+      { key: "minimumSessionThreshold", label: "Minimum Daily Sessions Threshold", type: "number", defaultValue: "100", hint: "Anomaly checks are skipped on days where the GA4 baseline's average daily sessions fall below this value, to avoid noise on low-traffic properties." },
+      { key: "pauseOnWeekends", label: "Pause Checks on Weekends", type: "boolean", defaultValue: "false", hint: "When enabled, the run exits immediately (no API or AI calls) on Saturdays and Sundays. Enable this if your business does not operate on weekends and weekend dips are expected." },
     ],
     outputs: ["Daily anomaly alert email (HTML)", "Anomaly event log (JSON, appended daily)", "Severity-graded in-dashboard notifications", "Claude AI cause-hypothesis summaries (Markdown)", "7-day anomaly trend digest (delivered weekly)"],
-    requirements: ["Google Analytics 4 integration connected in Settings", "Google Search Console integration connected in Settings", "Google Ads integration connected in Settings (optional but strongly recommended)"],
+    requirements: ["Google Analytics 4 integration connected in Settings (or a GA4 Property ID override)", "Google Search Console integration connected in Settings (optional, adds search anomaly detection)", "Google Ads integration connected in Settings (optional, adds spend anomaly detection)"],
   },
   "attribution": {
     overview: "The Attribution agent exports raw GA4 event and conversion data, then applies multi-touch attribution models \u2014 first-touch, last-touch, linear, time-decay, and data-driven \u2014 across organic search, paid search, email, and social channels. Claude AI interprets the resulting channel-contribution matrix, explaining which touchpoints are driving the most revenue-weighted assists versus last-click credit, and surfaces budget reallocation opportunities. Monthly reports give marketing teams and CFOs an evidence-based view of true channel ROI beyond the limitations of single-touch reporting.",
@@ -1009,7 +1039,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Produce monthly report", detail: "Assembles a formatted HTML and PDF report containing the multi-model comparison matrix, channel contribution charts, and Claude's budget reallocation recommendations." },
     ],
     inputs: [
-      { key: "ga4PropertyId", label: "GA4 Property ID", type: "text", placeholder: "123456789", required: true, hint: "Your numeric Google Analytics 4 property ID. The agent reads raw event export data from this property." },
+      { key: "ga4Property", label: "GA4 Property", type: "integration_resource", provider: "GOOGLE_ANALYTICS_4", hint: "Defaults to the property chosen for your connected Google Analytics 4 integration. The agent reads raw event export data from this property." },
       { key: "conversionEventNames", label: "Conversion Event Names", type: "textarea", placeholder: "purchase, lead_form_submit, demo_request", required: true, hint: "Comma-separated list of GA4 event names to model \u2014 must match exactly how they appear in GA4." },
       { key: "attributionModel", label: "Primary Attribution Model", type: "select", options: ["All models compared", "Data-driven", "Linear", "Time-decay", "First-touch", "Last-touch"], defaultValue: "All models compared", hint: "Selecting a specific model highlights it as the primary view; all models are still computed and exported." },
       { key: "lookbackWindowDays", label: "Attribution Lookback Window (Days)", type: "number", defaultValue: "30", hint: "Maximum number of days before a conversion that touchpoints are eligible for attribution credit." },
@@ -1101,64 +1131,68 @@ export const AGENT_META: Record<string, AgentMeta> = {
   },
 
   "outbound-strategist": {
-    overview: "The Outbound Strategist scores each sourced prospect 0–100 across six dimensions — signal quality, service fit, firmographics, persona match, timing, and data quality — and generates a Prospect Intelligence Object with a pain hypothesis, messaging angle, and proof points. Prospects scoring 80+ are routed to both email and LinkedIn sequences; 65–79 to email only; 50–64 go to a watchlist; below 50 are discarded. Only Claude AI is required — no external integration needed.",
+    overview: "The Outbound Strategist scores each sourced prospect 0–100 across six dimensions — signal quality, service fit, firmographics, persona match, timing, and data quality — and generates a Prospect Intelligence Object with a pain hypothesis, messaging angle, and proof points. Prospects scoring 80+ are routed to both email and LinkedIn sequences; 65–79 to email only; 50–64 go to a watchlist; below 50 are discarded. When Apollo.io is connected, it enriches each prospect's company and role from Apollo first — real firmographics, funding, tech stack, and hiring signals ground the score and the Intelligence Object instead of Claude inferring them; without Apollo it scores from the prospect record alone, clearly labelled as not enriched.",
     steps: [
-      { title: "Load Prospect and Play Context", detail: "Fetches the OutboundProspect record and the play's ICP definition to anchor scoring against the specific service offer and firmographic target." },
-      { title: "Score Across Six Dimensions", detail: "Evaluates signal quality (25pts), service fit (20pts), firmographics (25pts), persona match (15pts), timing (10pts), and data quality (5pts) to produce a 0–100 composite score." },
-      { title: "Generate Intelligence Object", detail: "Produces the Prospect Intelligence Object: painHypothesis, primarySignal, bestOffer, messagingAngle, avoid, proofPoints, and companyContext — used by every downstream agent." },
-      { title: "Route by Channel", detail: "Sets the prospect channel: EMAIL_AND_LINKEDIN (80+), EMAIL_ONLY (65–79), WATCHLIST (50–64), or DISCARDED (<50). Updates the OutboundProspect record in the database." },
+      { title: "Load Prospect and Play Context", detail: "Reads the prospect(s) passed in (directly, or from the Outbound Scout) and the play's ICP definition to anchor scoring against the specific service offer and firmographic target." },
+      { title: "Enrich with Apollo", detail: "For each prospect missing Apollo data or whose cached data is older than the freshness window, fetches organization enrichment (industry, size, revenue, funding, tech stack), person enrichment (title, seniority, department — never email or phone), and job postings (hiring signal) — deduping company lookups shared by prospects at the same domain and capped at maxApolloLookups calls per run. Skipped entirely when Apollo isn't connected." },
+      { title: "Score Across Six Dimensions", detail: "Evaluates signal quality (25pts), service fit (20pts), firmographics (25pts), persona match (15pts), timing (10pts), and data quality (5pts) to produce a 0–100 composite score, grounded in the Apollo data just fetched where available." },
+      { title: "Generate Intelligence Object", detail: "Produces the Prospect Intelligence Object: painHypothesis, primarySignal, bestOffer, messagingAngle, avoid, proofPoints, and companyContext — used by every downstream agent. Every Apollo-sourced fact it relies on is listed separately from anything it inferred, so nothing is presented as verified that wasn't." },
+      { title: "Route by Channel", detail: "Sets the prospect channel: EMAIL_AND_LINKEDIN (80+), EMAIL_ONLY (65–79), WATCHLIST (50–64), or DISCARDED (<50). Updates the OutboundProspect record in the database, including the Apollo enrichment it fetched for reuse next time." },
     ],
     inputs: [
-      { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered automatically by the Outbound Scout — the Scout passes the prospect ID directly." },
+      { key: "playSlug", label: "Outbound Play", type: "select", options: ["DEV-01", "DEV-02", "DEV-03"], defaultValue: "DEV-01", hint: "DEV-01: SaaS Engineering Capacity | DEV-02: Agency White-Label | DEV-03: PE-Backed Modernisation. Populated automatically when triggered by the Outbound Scout." },
+      { key: "prospect", label: "Prospect (JSON)", type: "textarea", placeholder: "Populated automatically by Outbound Scout", hint: "Leave blank in normal operation — the Scout hands off the sourced prospect record(s) directly. Only fill this in to score a single prospect manually via the API." },
+      { key: "maxApolloLookups", label: "Max Apollo Lookups per Run", type: "number", defaultValue: "25", hint: "Caps total Apollo organization/person/job-postings calls across every prospect in this run, so a large batch can't drain the account's credit balance in one pass." },
+      { key: "enrichmentFreshnessDays", label: "Apollo Data Freshness (days)", type: "number", defaultValue: "30", hint: "Cached Apollo data younger than this is reused instead of spending another credit; older or missing data is refetched." },
     ],
-    outputs: ["Updated OutboundProspect with score, channel, and intelligence JSON", "Prospect Intelligence Object: painHypothesis, messagingAngle, bestOffer, proofPoints", "Scoring breakdown by dimension (JSON)"],
-    requirements: ["Outbound Scout must run first to create OutboundProspect records"],
+    outputs: ["Updated OutboundProspect with score, channel, intelligence JSON, and cached Apollo enrichment", "Prospect Intelligence Object: painHypothesis, messagingAngle, bestOffer, proofPoints, apolloFactsUsed, inferredAssumptions", "Scoring breakdown by dimension (JSON)"],
+    requirements: ["Outbound Scout must run first to source prospects", "Apollo.io API key connected in Settings → Integrations for live enrichment (optional — scores from the prospect record alone without it)"],
   },
 
   "outbound-email": {
-    overview: "The Outbound Email agent generates hyper-personalised Instantly campaign variables for each scored prospect — pain signal, trigger, offer angle, company context, and proof point — then adds the prospect to the correct Instantly email sequence for their play. Variables are derived from the Prospect Intelligence Object created by the Strategist, so every message references a real observable signal rather than a generic pitch.",
+    overview: "The Outbound Email agent generates hyper-personalised Instantly campaign variables for each scored prospect — pain signal, trigger, offer angle, company context, and proof point — then stages the prospect for the correct Instantly email sequence for their play. Variables are derived from the Prospect Intelligence Object created by the Strategist, so every message references a real observable signal rather than a generic pitch. Adding the lead to a live campaign always waits for a workspace admin to approve the run — nothing is sent to Instantly until then.",
     steps: [
       { title: "Load Intelligence Object", detail: "Reads the prospect's scoring output and Intelligence Object from the OutboundProspect record — specifically painHypothesis, primarySignal, messagingAngle, bestOffer, and avoid." },
       { title: "Generate Personalisation Variables", detail: "Uses Claude Haiku to produce six campaign variables in the exact character counts required by the Instantly template: pain_signal, trigger, offer_angle, company_context, and proof_point." },
-      { title: "Add Lead to Instantly Campaign", detail: "Calls the Instantly v1 Lead Add API to enrol the prospect in the correct campaign (DEV-01-SAAS-V1, DEV-02-AGENCY-V1, or DEV-03-PE-V1) with all personalisation variables injected." },
-      { title: "Update Pipeline Record", detail: "Sets prospect.instantlyLeadId and status = IN_SEQUENCE in the OutboundProspect record so the Revenue agent can correlate reply webhooks back to the right record." },
+      { title: "Resolve Target Campaign", detail: "Looks up the correct Instantly campaign (DEV-01-SAAS-V1, DEV-02-AGENCY-V1, or DEV-03-PE-V1) by name — a read-only lookup, not a write. Stages the exact lead payload and pauses as Awaiting Approval." },
+      { title: "Add Lead on Approval", detail: "Only once a workspace admin approves the run: calls the Instantly v2 Lead Add API (with skip_if_in_campaign, so a duplicate approval can't double-enrol the same lead) to enrol the prospect, then sets prospect.instantlyLeadId and status = IN_SEQUENCE." },
     ],
     inputs: [
       { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered by the Strategist — it passes the prospect ID automatically." },
     ],
-    outputs: ["Instantly campaign variables JSON (pain_signal, trigger, offer_angle, company_context, proof_point)", "Instantly lead ID", "Quality notes flagging any variables that required guessing"],
-    requirements: ["Instantly API key connected in Settings → Integrations", "Outbound Strategist must run first to generate the Intelligence Object"],
+    outputs: ["Instantly campaign variables JSON (pain_signal, trigger, offer_angle, company_context, proof_point)", "Staged delivery plan: target campaign, lead payload, connected account — awaiting approval", "Instantly lead ID once approved", "Quality notes flagging any variables that required guessing"],
+    requirements: ["Instantly API key connected in Settings → Integrations", "Outbound Strategist must run first to generate the Intelligence Object", "A workspace admin to approve the run before anything is added to Instantly"],
   },
 
   "outbound-linkedin": {
-    overview: "The Outbound LinkedIn agent writes the Aimfox connection note and two follow-up messages for each 80+ prospect, then adds them to the correct Aimfox campaign via the Aimfox MCP Server. Messages are written by Claude Haiku to sound like a peer outreach, not a vendor pitch — referencing the prospect's observable signal and never using outsourcing or staffing language.",
+    overview: "The Outbound LinkedIn agent writes the Aimfox connection note and two follow-up messages for each 80+ prospect, then stages them for the correct Aimfox campaign. Messages are written by Claude Haiku to sound like a peer outreach, not a vendor pitch — referencing the prospect's observable signal and never using outsourcing or staffing language. Adding the profile to a live campaign always waits for a workspace admin to approve the run — nothing is sent to Aimfox until then.",
     steps: [
       { title: "Check Channel Eligibility", detail: "Verifies the prospect's channel is EMAIL_AND_LINKEDIN (score 80+). Prospects below 80 are skipped with a log entry — LinkedIn sequences are reserved for the highest-signal opportunities." },
       { title: "Generate LinkedIn Messages", detail: "Uses Claude Haiku to write a connection note (≤300 chars), Message 1 (post-accept, ≤500 chars), and Message 2 (5-day follow-up, ≤500 chars) — all grounded in the prospect's Intelligence Object." },
-      { title: "Add Profile to Aimfox Campaign via MCP", detail: "Connects to the Aimfox MCP Server (mcp.aimfox.com) using the stored OAuth token and calls add_profile_to_campaign with the prospect's LinkedIn URL and all three messages as custom variables." },
-      { title: "Record Lead ID", detail: "Stores the Aimfox lead ID on the OutboundProspect record so the Aimfox reply webhook can route incoming replies back to the correct prospect." },
+      { title: "Resolve Target Campaign", detail: "Looks up the correct Aimfox campaign by name via the Aimfox REST API — a read-only lookup, not a write. Stages the profile and all three messages and pauses as Awaiting Approval." },
+      { title: "Add Profile on Approval", detail: "Only once a workspace admin approves the run: calls the Aimfox add-to-campaign-audience API with the prospect's LinkedIn URL and all three messages as custom variables, then stores the Aimfox lead ID on the OutboundProspect record so the reply webhook can route back to it." },
     ],
     inputs: [
       { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Leave blank when triggered automatically — the Strategist passes the ID directly." },
     ],
-    outputs: ["Aimfox lead ID", "LinkedIn message set: connectionNote, message1, message2 with character counts", "Tone quality notes from Claude"],
-    requirements: ["Aimfox OAuth token connected in Settings → Integrations (uses MCP, not a REST API key)", "Prospect must have a LinkedIn URL and channel = EMAIL_AND_LINKEDIN"],
+    outputs: ["Staged delivery plan: target campaign, connection note, message1, message2, connected account — awaiting approval", "Aimfox lead ID once approved", "LinkedIn message set: connectionNote, message1, message2 with character counts", "Tone quality notes from Claude"],
+    requirements: ["Aimfox API key connected in Settings → Integrations (a REST Bearer key, not MCP)", "Prospect must have a LinkedIn URL and channel = EMAIL_AND_LINKEDIN", "A workspace admin to approve the run before anything is added to Aimfox"],
   },
 
   "outbound-revenue": {
-    overview: "The Outbound Revenue agent fires when a prospect replies to an email or LinkedIn message. It classifies the event (reply, interested, meeting booked), creates or updates a GoHighLevel contact and opportunity record, and updates the pipeline status in the database. This agent is triggered automatically by Instantly and Aimfox webhooks — not manually.",
+    overview: "The Outbound Revenue agent fires when a prospect replies to an email or LinkedIn message. It classifies the event (reply, interested, meeting booked) and stages the GoHighLevel contact and opportunity record it would create or update. This agent is triggered automatically by Instantly and Aimfox webhooks — not manually — which is exactly why writing to GoHighLevel always waits for a workspace admin to approve the run: a webhook firing must never itself create a live CRM record.",
     steps: [
-      { title: "Receive Engagement Event", detail: "Reads the event type (email_reply, linkedin_reply, interested, meeting_booked) and the prospect ID from the incoming webhook payload or run input." },
+      { title: "Receive Engagement Event", detail: "Reads the event type (email_reply, linkedin_reply, interested, meeting_booked) and the prospect ID from the incoming webhook payload or run input. Records the reply/interest/meeting on the OutboundProspect record immediately — that's just logging what already happened, not a write to GoHighLevel." },
       { title: "Generate CRM Record Data", detail: "Uses Claude Haiku to produce the GHL contact and opportunity field values — company name, tags, ICP score, pain hypothesis, pipeline stage — based on the Intelligence Object and event type." },
-      { title: "Create GHL Contact and Opportunity", detail: "Calls the GoHighLevel REST API to create the contact record and, for interested/meeting_booked events, an opportunity in the Outbound pipeline at the correct stage." },
-      { title: "Update Pipeline Status", detail: "Sets the OutboundProspect status (REPLIED, INTERESTED, MEETING_BOOKED) and the relevant timestamp (emailRepliedAt, interestedAt, meetingBookedAt) in the database." },
+      { title: "Resolve Pipeline and Stage", detail: "For interested/meeting_booked events with no opportunity yet on file for this prospect, looks up the GHL pipeline and stage by name — a read-only lookup, not a write. Stages the contact/opportunity payload and pauses as Awaiting Approval." },
+      { title: "Write to GoHighLevel on Approval", detail: "Only once a workspace admin approves the run: upserts the GHL contact (safe to repeat — GHL dedupes by email) and, only if no opportunity already exists for this prospect, creates one — opportunity creation is not idempotent on GHL's side, so an existing id is reused instead of creating a second one." },
     ],
     inputs: [
       { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Populated automatically by Instantly and Aimfox webhooks — no manual entry needed in normal operation." },
       { key: "event", label: "Event Type", type: "select", options: ["email_reply", "linkedin_reply", "interested", "meeting_booked"], defaultValue: "email_reply", hint: "For manual testing. In production this is set by the Instantly or Aimfox webhook." },
       { key: "replyText", label: "Reply Text (optional)", type: "textarea", placeholder: "The prospect's reply message for context...", hint: "Paste the prospect's reply to help Claude generate a more contextual CRM note." },
     ],
-    outputs: ["GHL contact ID", "GHL opportunity ID (for interested/meeting_booked events)", "Pipeline stage set in GHL", "Updated OutboundProspect status and timestamp"],
+    outputs: ["Staged CRM record plan: contact fields, opportunity fields, pipeline/stage, connected account — awaiting approval", "GHL contact ID once approved", "GHL opportunity ID (for interested/meeting_booked events) once approved", "Updated OutboundProspect status and timestamp (recorded immediately, independent of approval)"],
     requirements: ["GoHighLevel API key connected in Settings → Integrations", "Outbound Email or LinkedIn agent must have run first"],
   },
 

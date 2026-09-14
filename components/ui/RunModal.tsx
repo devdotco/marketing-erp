@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentInput } from "@/lib/agent-metadata";
 import { ByokPrompt } from "@/components/ui/ByokPrompt";
+import { ResourceSelect } from "@/components/ui/ResourceSelect";
 import { apiFetch } from "@/lib/base-path";
 
 interface RunModalProps {
@@ -341,6 +342,15 @@ export function RunModal({
                         <option key={opt} value={opt}>{opt}</option>
                       ))}
                     </select>
+                  ) : input.type === "integration_resource" ? (
+                    <ResourceSelect
+                      id={`run-input-${input.key}`}
+                      optionsUrl={`/api/integrations/google/resource/options?provider=${input.provider}`}
+                      value={values[input.key] ?? ""}
+                      onChange={(v) => handleChange(input.key, v)}
+                      disabled={pending}
+                      fieldStyle={inputFieldStyle}
+                    />
                   ) : input.type === "textarea" ? (
                     <textarea
                       id={`run-input-${input.key}`}

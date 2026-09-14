@@ -6,6 +6,8 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import { apolloMatchPerson } from "@/lib/integrations/apollo";
 
 export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -71,35 +73,53 @@ export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => 
   let isLive = false;
 
   if (apolloIntegration && leadEmail) {
+    // Auth is an `x-api-key` header, not an `api_key` body field. See
+    // lib/integrations/catalog.ts (field key "apiKey") and
+    // lib/integrations/verify/outbound.ts.
+    const creds = await decryptCredentials<{ apiKey: string }>(
+      apolloIntegration.encryptedCredentials
+    );
+
+    const nameParts = leadName.trim().split(" ");
+    const matchBody: Record<string, string> = { email: leadEmail };
+    if (nameParts.length >= 1 && nameParts[0]) matchBody.first_name = nameParts[0];
+    if (nameParts.length >= 2) matchBody.last_name = nameParts.slice(1).join(" ");
+    if (leadCompany) matchBody.organization_name = leadCompany;
+
+    let apolloRes: Response;
     try {
-      const creds = await decryptCredentials<{ api_key: string }>(
-        apolloIntegration.encryptedCredentials
+      apolloRes = await apolloMatchPerson(creds.apiKey, matchBody);
+    } catch (err) {
+      throw new AgentInputError(
+        `Couldn't reach Apollo.io to enrich ${leadEmail}.`,
+        "This is usually a transient network problem — try running Lead Enrichment again. If it keeps happening, check Apollo's status page.",
+        "apollo_unreachable",
       );
+    }
 
-      const nameParts = leadName.trim().split(" ");
-      const matchBody: Record<string, string> = {
-        api_key: creds.api_key,
-        email: leadEmail,
-      };
-      if (nameParts.length >= 1 && nameParts[0]) matchBody.first_name = nameParts[0];
-      if (nameParts.length >= 2) matchBody.last_name = nameParts.slice(1).join(" ");
-      if (leadCompany) matchBody.organization_name = leadCompany;
+    if (apolloRes.status === 401 || apolloRes.status === 403) {
+      throw new AgentInputError(
+        `Apollo.io rejected the enrichment call for ${leadEmail} (HTTP ${apolloRes.status}).`,
+        "The Apollo API key in Settings → Integrations → Apollo.io is invalid, revoked, or out of credits — check it there.",
+        "apollo_auth_failed",
+      );
+    }
+    if (!apolloRes.ok) {
+      throw new AgentInputError(
+        `Apollo.io returned an error enriching ${leadEmail} (HTTP ${apolloRes.status}).`,
+        "Check the Apollo.io account status in Settings → Integrations, then try again.",
+        "apollo_enrich_failed",
+      );
+    }
 
-      const apolloRes = await fetch("https://api.apollo.io/v1/people/match", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(matchBody),
-      });
-
-      if (apolloRes.ok) {
-        const apolloJson = (await apolloRes.json()) as { person?: ApolloPerson };
-        if (apolloJson.person) {
-          apolloData = apolloJson.person;
-          isLive = true;
-        }
-      }
-    } catch {
-      // Fall through to Claude simulation
+    // A clean 200 with no person is Apollo correctly saying "not in our
+    // database" — not a failure. Falling through to the Claude simulation
+    // below is the right behaviour for that case, same as no integration at
+    // all; it is clearly labelled `source: "simulation"` either way.
+    const apolloJson = (await apolloRes.json()) as { person?: ApolloPerson };
+    if (apolloJson.person) {
+      apolloData = apolloJson.person;
+      isLive = true;
     }
   }
 

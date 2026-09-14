@@ -1,11 +1,10 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
 
 export const competitorWatchHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -37,63 +36,36 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
 
   const domains = competitorDomains
     .split(/[\n,]+/)
-    .map((d) => d.trim())
-    .filter(Boolean);
+    .map(bareDomain)
+    .filter(Boolean)
+    .slice(0, 3);
 
-  // --- Live API: Ahrefs → Semrush ---
+  // --- Live API: Ahrefs → Semrush → SearchAtlas ---
+  const primaryDomain = bareDomain(businessProfile?.websiteUrl ?? "");
   let liveDataSection = "";
-  let source: "live" | "simulation" = "simulation";
-
-  const ahrefsIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
-  });
-
-  if (ahrefsIntegration?.encryptedCredentials && domains.length > 0) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
-      const results: Record<string, unknown>[] = [];
-      for (const domain of domains.slice(0, 3)) {
-        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
-        const res = await fetch(url, { headers: { "Accept": "application/json" } });
-        if (res.ok) {
-          const data = await res.json() as unknown;
-          results.push({ domain, data });
-        }
-      }
-      if (results.length > 0) {
-        liveDataSection = `\n\nLIVE AHREFS KEYWORD DATA per competitor:\n${JSON.stringify(results, null, 2)}\n\nUse this real keyword data to identify what each competitor is actually ranking for. Base estimatedNewKeywords on this data.`;
-        source = "live";
-      }
-    } catch {
-      // fall through to Semrush
-    }
-  }
-
-  if (source === "simulation") {
-    const semrushIntegration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
-    });
-    if (semrushIntegration?.encryptedCredentials && domains.length > 0) {
-      try {
-        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
-        const results: { domain: string; data: string }[] = [];
-        for (const domain of domains.slice(0, 3)) {
-          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
-          const res = await fetch(url);
-          if (res.ok) {
-            const text = await res.text();
-            results.push({ domain, data: text });
-          }
-        }
-        if (results.length > 0) {
-          liveDataSection = `\n\nLIVE SEMRUSH DOMAIN ORGANIC DATA per competitor (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nBase estimatedNewKeywords and keyword intent analysis on this real organic keyword data.`;
-          source = "live";
-        }
-      } catch {
-        // fall through to simulation
-      }
-    }
-  }
+  const liveResult = domains.length === 0
+    ? ({ source: "simulation" } as const)
+    : await resolveSeoLiveData(
+        run.agentConfig.workspaceId,
+        (data, provider) =>
+          provider === "AHREFS"
+            ? `\n\nLIVE AHREFS KEYWORD DATA per competitor:\n${JSON.stringify(data, null, 2)}\n\nUse this real keyword data to identify what each competitor is actually ranking for. Base estimatedNewKeywords on this data.`
+            : provider === "SEMRUSH"
+              ? `\n\nLIVE SEMRUSH DOMAIN ORGANIC DATA per competitor (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(data, null, 2)}\n\nBase estimatedNewKeywords and keyword intent analysis on this real organic keyword data.`
+              : `\n\nLIVE SEARCHATLAS KEYWORD GAP DATA — keywords these competitors rank for that ${primaryDomain} does not:\n${JSON.stringify(data, null, 2)}\n\nBase estimatedNewKeywords directly on this real content-gap data; these are keywords the client is provably missing, not estimates.`,
+        {
+          ahrefs: async (apiKey) =>
+            Promise.all(domains.map(async (domain) => ({ domain, data: await fetchAhrefsOrganicKeywords(apiKey, domain) }))),
+          semrush: async (apiKey) =>
+            Promise.all(domains.map(async (domain) => ({ domain, data: await fetchSemrushDomainOrganic(apiKey, domain) })))
+              .then((r) => JSON.stringify(r)),
+          searchAtlas: primaryDomain
+            ? (apiKey) => fetchSearchAtlasKeywordGap(apiKey, primaryDomain, domains)
+            : undefined,
+        },
+      );
+  const source = liveResult.source;
+  if (liveResult.source === "live") liveDataSection = liveResult.section;
   // --- End live API ---
 
   const systemPrompt = [
@@ -182,7 +154,7 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
         },
       ],
       simulationNote:
-        "Connect Ahrefs or Semrush in Settings to pull real competitor data. This report uses AI analysis of your competitor profile.",
+        "Connect Ahrefs, Semrush, or SearchAtlas in Settings to pull real competitor data. This report uses AI analysis of your competitor profile.",
     }),
   ].filter(Boolean).join("\n");
 

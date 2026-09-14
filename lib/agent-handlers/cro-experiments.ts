@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -28,7 +30,11 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
   const trafficMonthly = (config.trafficMonthly as number) ?? 10000;
   const hypothesisCount = (config.hypothesisCount as number) ?? 5;
   const baselineConvRate = (config.baselineConvRate as number | undefined) ?? null;
-  const ga4Property = (config.ga4Property as string) ?? "Not specified";
+  // "" rather than a placeholder string: resolvePropertyOverride below treats
+  // a non-empty value as a real dropdown choice to verify against the
+  // connected grant, so a fake fallback here would fail every run that
+  // didn't explicitly pick something.
+  const ga4Property = (config.ga4Property as string) ?? "";
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -38,25 +44,35 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
   let livePageBlock: string | null = null;
   let source = "simulation";
 
-  try {
-    const ga4Integration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "GOOGLE_ANALYTICS_4",
-        },
+  const ga4Integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_ANALYTICS_4",
       },
-    });
+    },
+  });
 
-    if (ga4Integration?.encryptedCredentials) {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        property_id: string;
-      }>(ga4Integration.encryptedCredentials);
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated numbers as "live".
+  if (ga4Integration) {
+    try {
+      const creds = await googleCredentials(ga4Integration);
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const ga4PropertyId = await resolvePropertyOverride("GOOGLE_ANALYTICS_4", creds, ga4Property);
+      if (!ga4PropertyId) {
+        throw new AgentInputError(
+          "Google Analytics 4 is connected, but no property has been selected.",
+          "Open Integrations → Google Analytics 4 and choose a property.",
+          "integration_not_configured",
+        );
+      }
 
       // Fetch top landing pages by sessions with bounce rate, conversions, avg session duration
       const ga4Res = await fetch(
-        `https://analyticsdata.googleapis.com/v1beta/properties/${creds.property_id}:runReport`,
+        `https://analyticsdata.googleapis.com/v1beta/properties/${ga4PropertyId}:runReport`,
         {
           method: "POST",
           headers: {
@@ -77,47 +93,49 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
           }),
         }
       );
-
-      if (ga4Res.ok) {
-        const ga4Data = (await ga4Res.json()) as Ga4Response;
-        const pages = (ga4Data.rows ?? []).map((row) => ({
-          pagePath: row.dimensionValues[0]?.value ?? "/",
-          sessions: Number(row.metricValues[0]?.value ?? 0),
-          bounceRate: Math.round(Number(row.metricValues[1]?.value ?? 0) * 1000) / 10,
-          conversions: Number(row.metricValues[2]?.value ?? 0),
-          avgSessionDurationSec: Math.round(Number(row.metricValues[3]?.value ?? 0)),
-        }));
-
-        // Try to find the target page URL in results
-        const targetPath = pageUrl !== "Not specified"
-          ? pageUrl.replace(/^https?:\/\/[^/]+/, "")
-          : null;
-
-        const targetPage = targetPath
-          ? pages.find((p) => p.pagePath.includes(targetPath))
-          : null;
-
-        const realConvRate = targetPage && targetPage.sessions > 0
-          ? Math.round((targetPage.conversions / targetPage.sessions) * 10000) / 100
-          : null;
-
-        livePageBlock = [
-          targetPage
-            ? `Target Page Metrics (${targetPage.pagePath}, last 30 days):\n${JSON.stringify(targetPage, null, 2)}`
-            : null,
-          realConvRate !== null
-            ? `Observed conversion rate: ${realConvRate}%`
-            : null,
-          `Top 20 pages by sessions (for context):\n${JSON.stringify(pages, null, 2)}`,
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-
-        source = "live";
+      if (!ga4Res.ok) {
+        throw new Error(`GA4 Data API ${ga4Res.status}: ${(await ga4Res.text()).slice(0, 300)}`);
       }
+
+      const ga4Data = (await ga4Res.json()) as Ga4Response;
+      const pages = (ga4Data.rows ?? []).map((row) => ({
+        pagePath: row.dimensionValues[0]?.value ?? "/",
+        sessions: Number(row.metricValues[0]?.value ?? 0),
+        bounceRate: Math.round(Number(row.metricValues[1]?.value ?? 0) * 1000) / 10,
+        conversions: Number(row.metricValues[2]?.value ?? 0),
+        avgSessionDurationSec: Math.round(Number(row.metricValues[3]?.value ?? 0)),
+      }));
+
+      // Try to find the target page URL in results
+      const targetPath = pageUrl !== "Not specified"
+        ? pageUrl.replace(/^https?:\/\/[^/]+/, "")
+        : null;
+
+      const targetPage = targetPath
+        ? pages.find((p) => p.pagePath.includes(targetPath))
+        : null;
+
+      const realConvRate = targetPage && targetPage.sessions > 0
+        ? Math.round((targetPage.conversions / targetPage.sessions) * 10000) / 100
+        : null;
+
+      livePageBlock = [
+        targetPage
+          ? `Target Page Metrics (${targetPage.pagePath}, last 30 days):\n${JSON.stringify(targetPage, null, 2)}`
+          : null,
+        realConvRate !== null
+          ? `Observed conversion rate: ${realConvRate}%`
+          : null,
+        `Top 20 pages by sessions (for context):\n${JSON.stringify(pages, null, 2)}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      source = "live";
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Analytics 4", err instanceof Error ? err.message : String(err));
     }
-  } catch {
-    // fall through to simulation
   }
 
   const resolvedConvRate = baselineConvRate;
@@ -143,7 +161,7 @@ Page Configuration:
 - Monthly Traffic: ${trafficMonthly}
 - Number of Hypotheses: ${hypothesisCount}
 - Baseline Conversion Rate: ${resolvedConvRate !== null ? `${resolvedConvRate}%` : "Unknown"}
-- GA4 Property: ${ga4Property}
+- GA4 Property: ${ga4Property || "Not specified"}
 ${liveDataSection}
 
 For sample size calculations, use 80% statistical power, 95% confidence level, and assume a minimum detectable effect of 20% relative lift unless the baseline conversion rate suggests otherwise. Calculate required sample size per variant.

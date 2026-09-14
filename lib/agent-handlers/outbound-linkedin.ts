@@ -6,36 +6,92 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import type { OutboundLinkedinDelivery } from "./outbound-linkedin-delivery";
 
+// Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
+// implementation lives in outbound-linkedin-delivery.ts, which imports neither Prisma nor
+// Anthropic, so it can be pulled into the test bundle on its own. See that file for why the
+// stage/activate split exists.
+export {
+  activateOutboundLinkedinDelivery,
+  buildAimfoxAudienceBody,
+  type OutboundLinkedinDelivery,
+} from "./outbound-linkedin-delivery";
+
+// A target campaign *name* to look up in the workspace's own Aimfox account —
+// Aimfox campaign ids are per-workspace and assigned when a campaign is
+// created there, so nothing here can know one in advance. See
+// resolveAimfoxCampaignId below.
 const AIMFOX_CAMPAIGN_MAP: Record<string, string> = {
   "DEV-01": "DEV-01-LI-V1",
   "DEV-02": "DEV-02-LI-V1",
   "DEV-03": "DEV-03-LI-V1",
 };
 
-async function callAimfoxMcp(
-  accessToken: string,
-  tool: string,
-  params: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  // Aimfox uses MCP over HTTP (https://mcp.aimfox.com) — no traditional REST API
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { StreamableHTTPClientTransport } = await import(
-    "@modelcontextprotocol/sdk/client/streamableHttp.js"
-  );
+const AIMFOX_TIMEOUT_MS = 15_000;
 
-  const mcpClient = new Client({ name: "marketing-erp", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL("https://mcp.aimfox.com"), {
-    requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
-  });
+/** Per-run memo so a batch of leads for the same play only lists campaigns once. */
+const campaignIdCache = new Map<string, { at: number; id: string }>();
+const CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 
-  await mcpClient.connect(transport);
+/**
+ * Aimfox has a real REST API (api.aimfox.com/api/v2, Bearer key) — it is not
+ * MCP-only. The MCP server at mcp.aimfox.com exists for chat clients like
+ * Claude/ChatGPT; a server-to-server integration like this one uses the REST
+ * API directly, which is simpler and doesn't require holding an MCP session
+ * open for one call.
+ *
+ * This is a read-only lookup — safe to run while staging, before approval.
+ */
+async function resolveAimfoxCampaignId(
+  apiKey: string,
+  targetName: string,
+  playSlug: string,
+): Promise<string> {
+  const cacheKey = `${apiKey}:${playSlug}`;
+  const cached = campaignIdCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < CAMPAIGN_CACHE_TTL_MS) return cached.id;
+
+  let res: Response;
   try {
-    const result = await mcpClient.callTool({ name: tool, arguments: params });
-    return (result as { content?: unknown; result?: unknown }) as Record<string, unknown>;
-  } finally {
-    await mcpClient.close();
+    res = await fetch("https://api.aimfox.com/api/v2/campaigns", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(AIMFOX_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new AgentInputError(
+      "Couldn't reach Aimfox to look up the outbound LinkedIn campaign.",
+      "This is usually a transient network problem — try running Outbound LinkedIn again.",
+      "aimfox_unreachable",
+    );
   }
+  if (!res.ok) {
+    throw new AgentInputError(
+      `Aimfox rejected the campaign lookup (HTTP ${res.status}).`,
+      res.status === 401 || res.status === 403
+        ? "The Aimfox API key in Settings → Integrations → Aimfox is invalid, revoked, or Read-only — reconnect it with an \"All\" permission key."
+        : "Check the Aimfox account status in Settings → Integrations, then try again.",
+      "aimfox_campaign_lookup_failed",
+    );
+  }
+
+  const body = (await res.json()) as { items?: Array<{ id: string; name: string }>; data?: Array<{ id: string; name: string }> };
+  const campaigns = body.items ?? body.data ?? [];
+  const match =
+    campaigns.find((c) => c.name === targetName) ??
+    campaigns.find((c) => c.name.toLowerCase().includes(playSlug.toLowerCase()));
+
+  if (!match) {
+    throw new AgentInputError(
+      `No Aimfox campaign named "${targetName}" (or matching play ${playSlug}) exists in this workspace's Aimfox account.`,
+      `Create a campaign in Aimfox named "${targetName}", or rename an existing one to include "${playSlug}", then try again.`,
+      "aimfox_campaign_not_found",
+    );
+  }
+
+  campaignIdCache.set(cacheKey, { at: Date.now(), id: match.id });
+  return match.id;
 }
 
 export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) => {
@@ -136,61 +192,58 @@ Return exactly:
     msgOutput = {};
   }
 
-  const campaignId = AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-LI-V1";
-  let aimfoxLeadId: string;
+  const targetCampaignName = AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? AIMFOX_CAMPAIGN_MAP["DEV-01"];
+  let campaignId: string = targetCampaignName;
+  const connected = Boolean(aimfoxIntegration);
+
+  if (aimfoxIntegration) {
+    // Auth is a Bearer API key, not an MCP OAuth access token. See
+    // lib/integrations/catalog.ts and lib/integrations/verify/outbound.ts.
+    const creds = await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials);
+    // Read-only lookup — safe to run before approval.
+    campaignId = await resolveAimfoxCampaignId(creds.apiKey, targetCampaignName, prospect.play.slug);
+  }
+
+  const connectionNote = String(msgOutput.connectionNote ?? "");
+  const message1 = String(msgOutput.message1 ?? "");
+  const message2 = String(msgOutput.message2 ?? "");
+
+  const delivery: OutboundLinkedinDelivery = {
+    status: "staged",
+    prospectId,
+    firstName: prospect.firstName,
+    company: prospect.company,
+    linkedInUrl: prospect.linkedInUrl,
+    campaignName: targetCampaignName,
+    campaignId,
+    connected,
+    connectionNote,
+    message1,
+    message2,
+  };
+
   const output: Record<string, unknown> = {
     prospectId,
     firstName: prospect.firstName,
     company: prospect.company,
     linkedInUrl: prospect.linkedInUrl,
-    campaignId,
-    connectionNote: msgOutput.connectionNote,
-    message1: msgOutput.message1,
-    message2: msgOutput.message2,
+    campaignName: targetCampaignName,
+    connectionNote,
+    message1,
+    message2,
     characterCounts: msgOutput.characterCounts,
     toneNotes: msgOutput.toneNotes,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
+    delivery,
+    approvalRequired: true,
+    approvalNote: connected
+      ? `Adding ${prospect.firstName} (${prospect.linkedInUrl}) to the live Aimfox campaign "${targetCampaignName}" requires workspace admin approval. Nothing has been sent to Aimfox yet.`
+      : `No Aimfox integration is connected — approving this run will record a simulated add instead of a live one.`,
   };
-
-  if (aimfoxIntegration) {
-    try {
-      const creds = await decryptCredentials<{ accessToken: string }>(
-        aimfoxIntegration.encryptedCredentials
-      );
-      // Aimfox exposes LinkedIn automation via MCP — no REST API
-      const result = await callAimfoxMcp(creds.accessToken, "add_profile_to_campaign", {
-        campaign_id: campaignId,
-        profile_url: prospect.linkedInUrl,
-        custom_variables: {
-          connection_note: msgOutput.connectionNote,
-          message_1: msgOutput.message1,
-          message_2: msgOutput.message2,
-        },
-      });
-      aimfoxLeadId = (result as { id?: string }).id ?? `aimfox_mcp_${prospect.id.slice(-8)}`;
-      output.source = "aimfox_live";
-      output.mcpResult = result;
-    } catch (err) {
-      aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
-      output.source = "simulation";
-      output.aimfoxError = err instanceof Error ? err.message : String(err);
-      output.simulationNote = "Aimfox MCP call failed — see aimfoxError. Reconnect via Settings → Integrations → Aimfox.";
-    }
-  } else {
-    aimfoxLeadId = `aimfox_${prospect.id.slice(-8)}_${Date.now()}`;
-    output.source = "simulation";
-    output.simulationNote = "Connect Aimfox via Settings → Integrations → Aimfox (uses MCP OAuth, not a REST API key)";
-  }
-
-  output.aimfoxLeadId = aimfoxLeadId;
-
-  await prisma.outboundProspect.update({
-    where: { id: prospectId },
-    data: { aimfoxLeadId },
-  });
 
   const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
+  await updateStatus("AWAITING_APPROVAL", output);
   return { output, costUsd };
 };

@@ -31,9 +31,29 @@ export async function requireWorkspaceAccess(workspaceId: string, minRole: Membe
   return { member, session };
 }
 
+/**
+ * The active workspace from the cookie — but only if the signed-in user belongs
+ * to it. The cookie is unsigned, so its value is whatever the browser sends:
+ * the social post/account routes, the LinkedIn/X OAuth callbacks and onboarding
+ * all trusted it directly, which let anyone who edited the cookie act on
+ * another tenant's workspace. Checking here closes every caller at once.
+ */
 export async function getActiveWorkspaceId(): Promise<string | null> {
   const jar = await cookies();
-  return jar.get("active_workspace_id")?.value || null;
+  const fromCookie = jar.get("active_workspace_id")?.value || null;
+  if (!fromCookie) return null;
+
+  const session = await getServerSession();
+  if (!session?.user) return null;
+  if (session.user.isSuperAdmin) {
+    const exists = await prisma.workspace.findUnique({ where: { id: fromCookie }, select: { id: true } });
+    return exists ? fromCookie : null;
+  }
+  const member = await prisma.workspaceMember.findFirst({
+    where: { workspaceId: fromCookie, userId: session.user.id },
+    select: { id: true },
+  });
+  return member ? fromCookie : null;
 }
 
 export async function setActiveWorkspace(workspaceId: string) {

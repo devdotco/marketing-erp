@@ -1,11 +1,20 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import { decryptCredentials } from "@/lib/crypto";
+import { resolveProfile } from "@/lib/content/editorial";
+import { bareDomain, fetchAhrefsBacklinks, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
+import {
+  filterProspectsForOutreach,
+  generateOutreachSequence,
+  stageProspectorInstantlyCampaign,
+  coerceSendDay,
+  resolveSendWindow,
+} from "./prospector-outreach";
 
 export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -14,6 +23,23 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
+  const sendViaInstantly = config.sendViaInstantly === true;
+
+  // Refuse before spending a single token if the run is configured to stage a campaign it can't
+  // actually reach — same pattern as Email Marketing's platform check (email-marketing.ts).
+  let instantlyIntegration: Awaited<ReturnType<typeof prisma.integration.findUnique>> = null;
+  if (sendViaInstantly) {
+    instantlyIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
+    });
+    if (!instantlyIntegration) {
+      throw new AgentInputError(
+        "Outreach via Instantly is turned on, but Instantly isn't connected for this workspace.",
+        "Connect it under Settings → Integrations → Instantly, or turn off Outreach via Instantly before running Prospector. See the Instantly setup guide for what's needed.",
+        "instantly_not_connected",
+      );
+    }
+  }
   const targetTopics = String(config.targetTopics ?? "");
   const domainRatingMin = Number(config.domainRatingMin ?? 30);
   const trafficMin = Number(config.trafficMin ?? 1000);
@@ -39,62 +65,32 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
   // --- Live API: Ahrefs → Semrush ---
   // Use competitor domains from business profile as backlink targets to surface real prospects
   let liveDataSection = "";
-  let source: "live" | "simulation" = "simulation";
-
   const competitorTargets = businessProfile?.competitors ?? [];
+  const competitorDomains = competitorTargets.slice(0, 2).map(bareDomain).filter(Boolean);
 
-  const ahrefsIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
-  });
-
-  if (ahrefsIntegration?.encryptedCredentials && competitorTargets.length > 0) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
-      const results: Record<string, unknown>[] = [];
-      for (const competitor of competitorTargets.slice(0, 2)) {
-        const domain = competitor.replace(/^https?:\/\//, "").replace(/\/$/, "");
-        const url = `https://apiv2.ahrefs.com/v3/site-explorer/backlinks?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
-        const res = await fetch(url, { headers: { "Accept": "application/json" } });
-        if (res.ok) {
-          const data = await res.json() as unknown;
-          results.push({ competitor: domain, backlinks: data });
-        }
-      }
-      if (results.length > 0) {
-        liveDataSection = `\n\nLIVE AHREFS BACKLINK DATA for competitor domains:\n${JSON.stringify(results, null, 2)}\n\nThe domains linking to our competitors are prime link prospects. Include the highest-DR, most topically relevant referring domains from this data as your top prospects. Use the real DR values and domains from this data wherever possible.`;
-        source = "live";
-      }
-    } catch {
-      // fall through to Semrush
-    }
-  }
-
-  if (source === "simulation") {
-    const semrushIntegration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
-    });
-    if (semrushIntegration?.encryptedCredentials && competitorTargets.length > 0) {
-      try {
-        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
-        const results: { domain: string; data: string }[] = [];
-        for (const competitor of competitorTargets.slice(0, 2)) {
-          const domain = competitor.replace(/^https?:\/\//, "").replace(/\/$/, "");
-          const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(domain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
-          const res = await fetch(url);
-          if (res.ok) {
-            const text = await res.text();
-            results.push({ domain, data: text });
-          }
-        }
-        if (results.length > 0) {
-          liveDataSection = `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(results, null, 2)}\n\nUse this data to identify topically relevant domains and realistic traffic/DR estimates for link prospects in this niche.`;
-          source = "live";
-        }
-      } catch {
-        // fall through to simulation
-      }
-    }
-  }
+  const liveResult = competitorDomains.length === 0
+    ? ({ source: "simulation" } as const)
+    : await resolveSeoLiveData(
+        run.agentConfig.workspaceId,
+        (data, provider) =>
+          provider === "AHREFS"
+            ? `\n\nLIVE AHREFS BACKLINK DATA for competitor domains:\n${JSON.stringify(data, null, 2)}\n\nThe domains linking to our competitors are prime link prospects. Include the highest-DR, most topically relevant referring domains from this data as your top prospects. Use the real DR values and domains from this data wherever possible.`
+            : `\n\nLIVE SEMRUSH COMPETITOR ORGANIC DATA (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${JSON.stringify(data, null, 2)}\n\nUse this data to identify topically relevant domains and realistic traffic/DR estimates for link prospects in this niche.`,
+        {
+          ahrefs: async (apiKey) =>
+            Promise.all(competitorDomains.map(async (domain) => ({
+              competitor: domain,
+              backlinks: await fetchAhrefsBacklinks(apiKey, domain),
+            }))),
+          semrush: async (apiKey) =>
+            Promise.all(competitorDomains.map(async (domain) => ({
+              domain,
+              data: await fetchSemrushDomainOrganic(apiKey, domain),
+            }))).then((r) => JSON.stringify(r)),
+        },
+      );
+  const source = liveResult.source;
+  if (liveResult.source === "live") liveDataSection = liveResult.section;
   // --- End live API ---
 
   const systemPrompt = [
@@ -166,10 +162,78 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
     delete output.simulationNote;
   }
   // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
+  let costUsd = estimateCostUsd(MODELS.fast, message.usage);
+
+  // --- Outreach via Instantly: stage a Draft campaign with this run's prospects. Nothing sends —
+  // see lib/agent-handlers/prospector-outreach.ts for why — until a human approves the run
+  // (lib/agent-handlers/on-approve.ts activates it). A staging failure is recorded on
+  // `channelDelivery`, NOT thrown: the prospect list above is genuine either way, and an uncaught
+  // throw here would replace this run's whole output with just the error.
+  if (sendViaInstantly && instantlyIntegration) {
+    try {
+      const editorialProfile = await prisma.editorialProfile.findUnique({
+        where: { workspaceId: run.agentConfig.workspaceId },
+      });
+      const profile = resolveProfile(editorialProfile?.preset, editorialProfile?.overrides);
+
+      const sequenceSteps = Math.min(4, Math.max(1, Math.round(Number(config.sequenceSteps ?? 3)) || 3));
+      const stepDelayDays = Math.max(1, Math.round(Number(config.stepDelayDays ?? 3)) || 3);
+      const outreachAngle = String(config.outreachAngle ?? "").trim();
+      const offer = String(config.offer ?? "").trim();
+      const senderName = String(config.senderName ?? "").trim();
+      const senderSignature = String(config.senderSignature ?? "").trim();
+      const sendingAccounts = [
+        ...new Set(
+          String(config.sendingAccounts ?? "")
+            .split(/[\n,]+/)
+            .map((e) => e.trim().toLowerCase())
+            .filter(Boolean),
+        ),
+      ];
+      const campaignNameInput = String(config.instantlyCampaignName ?? "").trim();
+      const campaignName = campaignNameInput || `Prospector Outreach – ${new Date().toISOString().slice(0, 10)}`;
+
+      const { leads, skipped } = filterProspectsForOutreach(output.prospects, 100);
+
+      const { steps, costUsd: sequenceCostUsd } = await generateOutreachSequence(client, {
+        steps: sequenceSteps,
+        outreachAngle,
+        offer,
+        senderName,
+        senderSignature,
+        profile,
+      });
+      costUsd += sequenceCostUsd;
+
+      const creds = await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials);
+      const channel = await stageProspectorInstantlyCampaign(creds.apiKey, {
+        campaignName,
+        steps,
+        stepDelayDays,
+        leads,
+        skipped,
+        sendingAccounts,
+        sendDayOfWeek: coerceSendDay(config.sendDayOfWeek),
+        timing: resolveSendWindow(config.sendWindow),
+        timezone: String(config.timezone ?? "").trim() || undefined,
+      });
+      output.channelDelivery = { platform: "INSTANTLY", status: "staged", instantly: channel };
+    } catch (err) {
+      const isInputError = err instanceof AgentInputError;
+      output.channelDelivery = {
+        platform: "INSTANTLY",
+        status: "error",
+        error: {
+          message: isInputError ? err.message : err instanceof Error ? err.message : String(err),
+          hint: isInputError ? err.hint : undefined,
+          code: isInputError ? err.code : "channel_stage_failed",
+        },
+      };
+    }
+  }
 
   const requireApproval = config.requireApproval !== false;
-  if (requireApproval) {
+  if (requireApproval || sendViaInstantly) {
     await updateStatus("AWAITING_APPROVAL", output);
   }
 

@@ -6,6 +6,19 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import type { OutboundRevenueDelivery } from "./outbound-revenue-delivery";
+
+// Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
+// implementation lives in outbound-revenue-delivery.ts, which imports neither Prisma nor
+// Anthropic, so it can be pulled into the test bundle on its own. See that file for why the
+// stage/activate split exists.
+export {
+  activateOutboundRevenueDelivery,
+  buildGhlContactBody,
+  buildGhlOpportunityBody,
+  type OutboundRevenueDelivery,
+} from "./outbound-revenue-delivery";
 
 type RevenueEvent = "email_reply" | "linkedin_reply" | "interested" | "meeting_booked";
 
@@ -15,6 +28,93 @@ const GHL_STAGE_MAP: Record<RevenueEvent, string> = {
   interested: "Qualified Lead",
   meeting_booked: "Meeting Set",
 };
+
+const GHL_BASE = "https://services.leadconnectorhq.com";
+// GHL's v2 API is gated by a date-versioned header, not a version in the URL —
+// this is the value documented across the current API, independent of when a
+// given endpoint shipped.
+const GHL_VERSION = "2021-07-28";
+const GHL_TIMEOUT_MS = 15_000;
+
+type GhlPipelineStage = { id: string; name: string };
+type GhlPipeline = { id: string; name: string; stages: GhlPipelineStage[] };
+
+/** Per-run memo — several events in a batch can share one locationId's pipeline lookup. */
+const pipelineCache = new Map<string, { at: number; pipelines: GhlPipeline[] }>();
+const PIPELINE_CACHE_TTL_MS = 5 * 60_000;
+
+/**
+ * Pipeline and stage ids are workspace-specific (assigned when the sub-account
+ * sets up its pipeline in the GHL UI) — resolve them by name: prefer a pipeline
+ * named "Outbound" (this integration's own convention), falling back to the
+ * sub-account's first pipeline, then find a stage whose name matches the
+ * target stage, falling back to that pipeline's first stage.
+ *
+ * This is a read-only lookup — safe to run while staging, before approval.
+ */
+async function resolveGhlPipelineStage(
+  authHeaders: Record<string, string>,
+  locationId: string,
+  targetStageName: string,
+): Promise<{ pipelineId: string; pipelineStageId: string; pipelineName: string; stageName: string }> {
+  const cached = pipelineCache.get(locationId);
+  const pipelines =
+    cached && Date.now() - cached.at < PIPELINE_CACHE_TTL_MS
+      ? cached.pipelines
+      : await (async () => {
+          let res: Response;
+          try {
+            res = await fetch(`${GHL_BASE}/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`, {
+              headers: authHeaders,
+              signal: AbortSignal.timeout(GHL_TIMEOUT_MS),
+            });
+          } catch (err) {
+            throw new AgentInputError(
+              "Couldn't reach GoHighLevel to look up the sales pipeline.",
+              "This is usually a transient network problem — try running Outbound Revenue again.",
+              "ghl_unreachable",
+            );
+          }
+          if (!res.ok) {
+            throw new AgentInputError(
+              `GoHighLevel rejected the pipeline lookup (HTTP ${res.status}).`,
+              res.status === 401 || res.status === 403
+                ? "The GoHighLevel private integration token in Settings → Integrations → GoHighLevel is invalid, revoked, or not authorised for this location ID — reconnect it there."
+                : "Check the GoHighLevel location and token in Settings → Integrations, then try again.",
+              "ghl_pipeline_lookup_failed",
+            );
+          }
+          const body = (await res.json()) as { pipelines?: GhlPipeline[] };
+          const fetched = body.pipelines ?? [];
+          pipelineCache.set(locationId, { at: Date.now(), pipelines: fetched });
+          return fetched;
+        })();
+
+  if (pipelines.length === 0) {
+    throw new AgentInputError(
+      "This GoHighLevel sub-account has no sales pipeline set up.",
+      "Create a pipeline (ideally named \"Outbound\") with stages for Lead, Qualified Lead, and Meeting Set in GoHighLevel, then try again.",
+      "ghl_no_pipeline",
+    );
+  }
+
+  const pipeline =
+    pipelines.find((p) => p.name.toLowerCase().includes("outbound")) ?? pipelines[0];
+  const stage =
+    pipeline.stages.find((s) => s.name.toLowerCase() === targetStageName.toLowerCase()) ??
+    pipeline.stages.find((s) => s.name.toLowerCase().includes(targetStageName.toLowerCase())) ??
+    pipeline.stages[0];
+
+  if (!stage) {
+    throw new AgentInputError(
+      `The "${pipeline.name}" pipeline in GoHighLevel has no stages.`,
+      "Add at least one stage to the pipeline in GoHighLevel, then try again.",
+      "ghl_no_stage",
+    );
+  }
+
+  return { pipelineId: pipeline.id, pipelineStageId: stage.id, pipelineName: pipeline.name, stageName: stage.name };
+}
 
 export const outboundRevenueHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -126,139 +226,97 @@ Return exactly this JSON structure:
     ghlData = {};
   }
 
-  // Attempt real GHL API calls when integration is configured, otherwise simulate
-  let finalContactId: string;
-  let finalOpportunityId: string | null = null;
-  let ghlError: string | undefined;
-  let outputSource: "ghl_live" | "simulation";
-
-  const contact = ghlData.contact as Record<string, unknown> | undefined;
+  const contact = (ghlData.contact ?? {}) as Record<string, unknown>;
   const opportunity = ghlData.opportunity as Record<string, unknown> | undefined;
   const wantsOpportunity = event === "interested" || event === "meeting_booked";
+  const connected = Boolean(ghlIntegration);
+
+  let locationId: string | undefined;
+  let pipelineName: string | undefined;
+  let stageName: string | undefined;
+  let pipelineId: string | undefined;
+  let pipelineStageId: string | undefined;
 
   if (ghlIntegration) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ghlIntegration.encryptedCredentials);
-      const authHeaders = {
-        Authorization: `Bearer ${creds.apiKey}`,
-        "Content-Type": "application/json",
-      };
+    // v1 (rest.gohighlevel.com) is gone; v2 needs a Version header and a
+    // locationId on every write. See lib/integrations/catalog.ts and
+    // lib/integrations/verify/outbound.ts.
+    const creds = await decryptCredentials<{ apiKey: string; locationId: string }>(ghlIntegration.encryptedCredentials);
+    locationId = creds.locationId;
 
-      // Create contact
-      const contactBody = {
-        firstName: contact?.firstName,
-        lastName: contact?.lastName,
-        email: contact?.email,
-        companyName: contact?.companyName,
-        website: (contact?.website as string | null | undefined) ?? undefined,
-        tags: contact?.tags,
-      };
-      const contactRes = await fetch("https://rest.gohighlevel.com/v1/contacts/", {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify(contactBody),
-      });
-      if (!contactRes.ok) {
-        throw new Error(`GHL create contact failed: ${contactRes.status} ${contactRes.statusText}`);
-      }
-      const contactJson = (await contactRes.json()) as { contact: { id: string } };
-      finalContactId = contactJson.contact.id;
-
-      // Create opportunity for interested/meeting_booked events
-      if (wantsOpportunity) {
-        const oppBody = {
-          pipelineId: "outbound",
-          title: opportunity?.name,
-          status: "open",
-          stageId: event === "meeting_booked" ? "meeting-set" : "qualified-lead",
-          contactId: finalContactId,
-          monetaryValue: 0,
-          source: opportunity?.source,
-        };
-        const oppRes = await fetch("https://rest.gohighlevel.com/v1/pipelines/opportunities", {
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify(oppBody),
-        });
-        if (!oppRes.ok) {
-          throw new Error(`GHL create opportunity failed: ${oppRes.status} ${oppRes.statusText}`);
-        }
-        const oppJson = (await oppRes.json()) as { opportunity: { id: string } };
-        finalOpportunityId = oppJson.opportunity.id;
-      }
-
-      outputSource = "ghl_live";
-    } catch (err) {
-      ghlError = err instanceof Error ? err.message : String(err);
-      // Fall back to simulation IDs on error
-      finalContactId = prospect.ghlContactId ?? `ghl_contact_${prospect.id.slice(-8)}`;
-      if (wantsOpportunity) {
-        finalOpportunityId = `ghl_opp_${prospect.id.slice(-8)}_${Date.now()}`;
-      } else {
-        finalOpportunityId = prospect.ghlOpportunityId ?? null;
-      }
-      outputSource = "simulation";
+    if (wantsOpportunity && !prospect.ghlOpportunityId) {
+      const authHeaders = { Authorization: `Bearer ${creds.apiKey}`, Version: GHL_VERSION, "Content-Type": "application/json" };
+      // Read-only lookup — safe to run before approval.
+      const resolved = await resolveGhlPipelineStage(authHeaders, creds.locationId, GHL_STAGE_MAP[event]);
+      pipelineId = resolved.pipelineId;
+      pipelineStageId = resolved.pipelineStageId;
+      pipelineName = resolved.pipelineName;
+      stageName = resolved.stageName;
     }
-  } else {
-    // Simulation
-    finalContactId = prospect.ghlContactId ?? `ghl_contact_${prospect.id.slice(-8)}`;
-    if (wantsOpportunity) {
-      finalOpportunityId = `ghl_opp_${prospect.id.slice(-8)}_${Date.now()}`;
-    } else {
-      finalOpportunityId = prospect.ghlOpportunityId ?? null;
-    }
-    outputSource = "simulation";
   }
 
-  // Update prospect record
-  const updateData: {
-    ghlContactId: string;
-    ghlOpportunityId?: string | null;
+  // This records that the prospect engaged (the webhook/run input already told us that much) —
+  // not that anything was sent. It's local pipeline bookkeeping, not an outbound side effect, so
+  // unlike the GHL contact/opportunity writes below it doesn't need to wait for approval: the
+  // status badge should reflect the reply the moment it happens, even before an admin approves
+  // writing it to the CRM.
+  const statusUpdate: {
     emailRepliedAt?: Date;
     linkedInRepliedAt?: Date;
     interestedAt?: Date;
     meetingBookedAt?: Date;
     status?: "REPLIED" | "INTERESTED" | "MEETING_BOOKED";
-  } = { ghlContactId: finalContactId };
-
-  if (finalOpportunityId) updateData.ghlOpportunityId = finalOpportunityId;
-  if (event === "email_reply") updateData.emailRepliedAt = new Date();
-  if (event === "linkedin_reply") updateData.linkedInRepliedAt = new Date();
+  } = {};
+  if (event === "email_reply") statusUpdate.emailRepliedAt = new Date();
+  if (event === "linkedin_reply") statusUpdate.linkedInRepliedAt = new Date();
   if (event === "interested") {
-    updateData.interestedAt = new Date();
-    updateData.status = "INTERESTED";
+    statusUpdate.interestedAt = new Date();
+    statusUpdate.status = "INTERESTED";
   }
   if (event === "meeting_booked") {
-    updateData.meetingBookedAt = new Date();
-    updateData.status = "MEETING_BOOKED";
+    statusUpdate.meetingBookedAt = new Date();
+    statusUpdate.status = "MEETING_BOOKED";
   }
-  if (event === "email_reply" || event === "linkedin_reply") updateData.status = "REPLIED";
+  if (event === "email_reply" || event === "linkedin_reply") statusUpdate.status = "REPLIED";
+  await prisma.outboundProspect.update({ where: { id: prospectId }, data: statusUpdate });
 
-  await prisma.outboundProspect.update({ where: { id: prospectId }, data: updateData });
+  const delivery: OutboundRevenueDelivery = {
+    status: "staged",
+    prospectId,
+    event,
+    connected,
+    locationId,
+    contact,
+    wantsOpportunity,
+    opportunity,
+    pipelineName,
+    stageName,
+    pipelineId,
+    pipelineStageId,
+    ghlOpportunityId: prospect.ghlOpportunityId ?? null,
+  };
 
   const output: Record<string, unknown> = {
     prospectId,
     event,
-    ghlContactId: finalContactId,
-    ghlOpportunityId: finalOpportunityId,
+    contact,
+    opportunity,
+    wantsOpportunity,
+    pipeline: wantsOpportunity ? (pipelineName ?? (prospect.ghlOpportunityId ? "existing opportunity — reused, not recreated" : "Outbound")) : undefined,
     stage: GHL_STAGE_MAP[event],
-    contact: ghlData.contact,
-    opportunity: ghlData.opportunity,
     timelineNote: ghlData.timeline_note,
     action: ghlData.action,
-    source: outputSource,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
+    delivery,
+    approvalRequired: true,
+    approvalNote: connected
+      ? `Writing ${prospect.email}'s contact record${wantsOpportunity ? " and a sales opportunity" : ""} to GoHighLevel requires workspace admin approval — including when this run was triggered automatically by an Instantly/Aimfox reply webhook. Nothing has been written to GoHighLevel yet.`
+      : `No GoHighLevel integration is connected — approving this run will record a simulated contact/opportunity instead of a live one.`,
   };
-
-  if (outputSource === "simulation") {
-    output.simulationNote = "Connect GoHighLevel integration in Settings to create real CRM records via GHL API";
-  }
-  if (ghlError) {
-    output.ghlError = ghlError;
-  }
 
   const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
+  await updateStatus("AWAITING_APPROVAL", output);
   return { output, costUsd };
 };

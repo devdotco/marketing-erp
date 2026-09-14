@@ -1,11 +1,12 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { googleCredentials } from "@/lib/integrations/google";
+import { microsoftCredentials } from "@/lib/integrations/microsoft";
 
 // Encode RFC 2822 email string as base64url for Gmail API
 function toBase64Url(str: string): string {
@@ -74,67 +75,74 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
       })
     : null;
 
+  // Only "not connected" falls back to simulation. Once an integration row
+  // exists, a failed call is a real failure and must surface as one — it used
+  // to be swallowed here and silently relabelled "simulation", which reads to
+  // a user as "nothing is connected" when the truth is closer to "your Gmail
+  // grant was revoked". googleCredentials()/microsoftCredentials() already
+  // throw a legible, non-retryable message for an expired refresh token or a
+  // revoked grant; API-call failures below throw the same way.
   if (gmailIntegration) {
-    try {
-      const creds = await decryptCredentials<{ access_token: string }>(gmailIntegration.encryptedCredentials);
-      accessToken = creds.access_token;
-      liveProvider = "GMAIL";
+    const creds = await googleCredentials(gmailIntegration);
+    accessToken = creds.access_token;
+    liveProvider = "GMAIL";
 
-      const listRes = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread&maxResults=20",
-        { headers: { Authorization: `Bearer ${accessToken}` } }
+    const listRes = await fetch(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread&maxResults=20",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!listRes.ok) {
+      throw new Error(
+        `Gmail is connected but messages.list failed (HTTP ${listRes.status}): ${(await listRes.text()).slice(0, 300)} — reconnect Gmail on the Integrations page if this persists.`
       );
-      if (listRes.ok) {
-        const listData = (await listRes.json()) as { messages?: { id: string }[] };
-        // Fetch metadata only (subject + from header) — full body never fetched for privacy
-        for (const msg of (listData.messages ?? []).slice(0, 20)) {
-          const detailRes = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          );
-          if (detailRes.ok) {
-            const detail = (await detailRes.json()) as {
-              payload?: { headers?: { name: string; value: string }[] };
-            };
-            const headers = detail.payload?.headers ?? [];
-            const subject = headers.find((h) => h.name === "Subject")?.value ?? "(no subject)";
-            const from = headers.find((h) => h.name === "From")?.value ?? "(unknown sender)";
-            liveMessages.push({ id: msg.id, subject, from });
-          }
-        }
-        emailSource = "live";
-      }
-    } catch {
-      // Fall through to simulation
     }
-  } else if (m365Integration) {
-    try {
-      const creds = await decryptCredentials<{ access_token: string }>(m365Integration.encryptedCredentials);
-      accessToken = creds.access_token;
-      liveProvider = "MICROSOFT_365";
-
-      const listRes = await fetch(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$filter=isRead eq false&$select=id,subject,from",
+    const listData = (await listRes.json()) as { messages?: { id: string }[] };
+    // Fetch metadata only (subject + from header) — full body never fetched for privacy.
+    // A single message's metadata failing to load doesn't invalidate the batch —
+    // it's skipped and processing continues with what did load.
+    for (const msg of (listData.messages ?? []).slice(0, 20)) {
+      const detailRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
-      if (listRes.ok) {
-        const listData = (await listRes.json()) as {
-          value?: {
-            id: string;
-            subject: string;
-            from: { emailAddress: { name: string; address: string } };
-          }[];
+      if (detailRes.ok) {
+        const detail = (await detailRes.json()) as {
+          payload?: { headers?: { name: string; value: string }[] };
         };
-        liveMessages = (listData.value ?? []).map((m) => ({
-          id: m.id,
-          subject: m.subject,
-          from: `${m.from.emailAddress.name} <${m.from.emailAddress.address}>`,
-        }));
-        emailSource = "live";
+        const headers = detail.payload?.headers ?? [];
+        const subject = headers.find((h) => h.name === "Subject")?.value ?? "(no subject)";
+        const from = headers.find((h) => h.name === "From")?.value ?? "(unknown sender)";
+        liveMessages.push({ id: msg.id, subject, from });
       }
-    } catch {
-      // Fall through to simulation
     }
+    emailSource = "live";
+  } else if (m365Integration) {
+    const creds = await microsoftCredentials(m365Integration);
+    accessToken = creds.access_token;
+    liveProvider = "MICROSOFT_365";
+
+    const listRes = await fetch(
+      "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$filter=isRead eq false&$select=id,subject,from",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!listRes.ok) {
+      throw new Error(
+        `Microsoft 365 is connected but listing inbox messages failed (Graph HTTP ${listRes.status}): ${(await listRes.text()).slice(0, 300)} — reconnect Microsoft 365 on the Integrations page if this persists.`
+      );
+    }
+    const listData = (await listRes.json()) as {
+      value?: {
+        id: string;
+        subject: string;
+        from: { emailAddress: { name: string; address: string } };
+      }[];
+    };
+    liveMessages = (listData.value ?? []).map((m) => ({
+      id: m.id,
+      subject: m.subject,
+      from: `${m.from.emailAddress.name} <${m.from.emailAddress.address}>`,
+    }));
+    emailSource = "live";
   }
 
   // --- Claude: triage or simulate ---
@@ -290,6 +298,11 @@ Return a JSON object with this exact structure:
     }>) ?? [];
 
     let draftsCreated = 0;
+    // A draft that fails to create doesn't invalidate the (already real)
+    // triage above — but it must show up as a failure, not vanish. The old
+    // code just dropped it: draftsCreated stayed accurate but silent, so a
+    // 0-for-3 batch looked identical to "nothing needed a reply".
+    const draftErrors: Array<{ messageId?: string; subject: string; error: string }> = [];
     for (const inquiry of genuineInquiries) {
       if (!inquiry.draftReply) continue;
 
@@ -306,7 +319,15 @@ Return a JSON object with this exact structure:
           },
           body: JSON.stringify({ message: { raw } }),
         });
-        if (draftRes.ok) draftsCreated++;
+        if (draftRes.ok) {
+          draftsCreated++;
+        } else {
+          draftErrors.push({
+            messageId: inquiry.messageId,
+            subject: inquiry.subject,
+            error: `Gmail drafts.create HTTP ${draftRes.status}: ${(await draftRes.text()).slice(0, 200)}`,
+          });
+        }
       } else if (liveProvider === "MICROSOFT_365") {
         const draftRes = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
           method: "POST",
@@ -320,12 +341,23 @@ Return a JSON object with this exact structure:
             toRecipients: [{ emailAddress: { address: replyToAddress } }],
           }),
         });
-        if (draftRes.ok) draftsCreated++;
+        if (draftRes.ok) {
+          draftsCreated++;
+        } else {
+          draftErrors.push({
+            messageId: inquiry.messageId,
+            subject: inquiry.subject,
+            error: `Graph messages.create HTTP ${draftRes.status}: ${(await draftRes.text()).slice(0, 200)}`,
+          });
+        }
       }
     }
 
     if (draftsCreated > 0) {
       output.draftsCreated = draftsCreated;
+    }
+    if (draftErrors.length > 0) {
+      output.draftErrors = draftErrors;
     }
   }
 

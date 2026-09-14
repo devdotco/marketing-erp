@@ -1,11 +1,12 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { googleCredentials } from "@/lib/integrations/google";
+import { microsoftCredentials } from "@/lib/integrations/microsoft";
 
 // Encode RFC 2822 email string as base64url for Gmail API
 function toBase64Url(str: string): string {
@@ -72,61 +73,66 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
       })
     : null;
 
+  // Only "not connected" falls back to simulation — once an integration row
+  // exists, a failed call is a real failure and must surface as one rather
+  // than being swallowed and relabelled "simulation" (see inbox-responder.ts,
+  // which had the same bug). googleCredentials()/microsoftCredentials()
+  // already throw a legible, non-retryable message for a revoked grant.
   if (gmailIntegration) {
-    try {
-      const creds = await decryptCredentials<{ access_token: string }>(gmailIntegration.encryptedCredentials);
-      accessToken = creds.access_token;
-      liveProvider = "GMAIL";
+    const creds = await googleCredentials(gmailIntegration);
+    accessToken = creds.access_token;
+    liveProvider = "GMAIL";
 
-      // Fetch recent sent emails for bounce/reply pattern context
-      const sentRes = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=in:sent&maxResults=20",
+    // Fetch recent sent emails for bounce/reply pattern context
+    const sentRes = await fetch(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=in:sent&maxResults=20",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!sentRes.ok) {
+      throw new Error(
+        `Gmail is connected but messages.list (in:sent) failed (HTTP ${sentRes.status}): ${(await sentRes.text()).slice(0, 300)} — reconnect Gmail on the Integrations page if this persists.`
+      );
+    }
+    const sentData = (await sentRes.json()) as { messages?: { id: string }[] };
+    const snippets: string[] = [];
+    // A single message's metadata failing to load doesn't invalidate the
+    // batch — it's skipped, same as inbox-responder.ts.
+    for (const msg of (sentData.messages ?? []).slice(0, 5)) {
+      const detailRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
-      if (sentRes.ok) {
-        const sentData = (await sentRes.json()) as { messages?: { id: string }[] };
-        const snippets: string[] = [];
-        for (const msg of (sentData.messages ?? []).slice(0, 5)) {
-          const detailRes = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          );
-          if (detailRes.ok) {
-            const detail = (await detailRes.json()) as {
-              snippet?: string;
-              payload?: { headers?: { name: string; value: string }[] };
-            };
-            const subject = detail.payload?.headers?.find((h) => h.name === "Subject")?.value ?? "(no subject)";
-            snippets.push(`Subject: "${subject}" — ${(detail.snippet ?? "").slice(0, 80)}`);
-          }
-        }
-        emailContextSummary = `Recent sent emails (${sentData.messages?.length ?? 0} total):\n${snippets.join("\n")}`;
-        emailSource = "live";
+      if (detailRes.ok) {
+        const detail = (await detailRes.json()) as {
+          snippet?: string;
+          payload?: { headers?: { name: string; value: string }[] };
+        };
+        const subject = detail.payload?.headers?.find((h) => h.name === "Subject")?.value ?? "(no subject)";
+        snippets.push(`Subject: "${subject}" — ${(detail.snippet ?? "").slice(0, 80)}`);
       }
-    } catch {
-      // Fall through to simulation
     }
+    emailContextSummary = `Recent sent emails (${sentData.messages?.length ?? 0} total):\n${snippets.join("\n")}`;
+    emailSource = "live";
   } else if (m365Integration) {
-    try {
-      const creds = await decryptCredentials<{ access_token: string }>(m365Integration.encryptedCredentials);
-      accessToken = creds.access_token;
-      liveProvider = "MICROSOFT_365";
+    const creds = await microsoftCredentials(m365Integration);
+    accessToken = creds.access_token;
+    liveProvider = "MICROSOFT_365";
 
-      const sentRes = await fetch(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=20&$select=subject,bodyPreview",
-        { headers: { Authorization: `Bearer ${accessToken}` } }
+    const sentRes = await fetch(
+      "https://graph.microsoft.com/v1.0/me/mailFolders/SentItems/messages?$top=20&$select=subject,bodyPreview",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!sentRes.ok) {
+      throw new Error(
+        `Microsoft 365 is connected but listing sent mail failed (Graph HTTP ${sentRes.status}): ${(await sentRes.text()).slice(0, 300)} — reconnect Microsoft 365 on the Integrations page if this persists.`
       );
-      if (sentRes.ok) {
-        const sentData = (await sentRes.json()) as { value?: { subject: string; bodyPreview: string }[] };
-        const snippets = (sentData.value ?? []).slice(0, 5).map(
-          (m) => `Subject: "${m.subject}" — ${(m.bodyPreview ?? "").slice(0, 80)}`
-        );
-        emailContextSummary = `Recent sent emails (${sentData.value?.length ?? 0} fetched):\n${snippets.join("\n")}`;
-        emailSource = "live";
-      }
-    } catch {
-      // Fall through to simulation
     }
+    const sentData = (await sentRes.json()) as { value?: { subject: string; bodyPreview: string }[] };
+    const snippets = (sentData.value ?? []).slice(0, 5).map(
+      (m) => `Subject: "${m.subject}" — ${(m.bodyPreview ?? "").slice(0, 80)}`
+    );
+    emailContextSummary = `Recent sent emails (${sentData.value?.length ?? 0} fetched):\n${snippets.join("\n")}`;
+    emailSource = "live";
   }
 
   // --- Claude: generate outreach sequences ---
@@ -203,6 +209,8 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
     body: string;
     provider: string;
     draftId?: string;
+    /** Set when the create call failed — the sequence itself is still real, just not drafted yet. */
+    draftError?: string;
     sequenceStep: number;
     prospectDomain: string;
   }
@@ -222,6 +230,7 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
 
       const toAddress = seq.prospectEmail ?? `contact@${seq.prospectDomain}`;
       let draftId: string | undefined;
+      let draftError: string | undefined;
 
       if (liveProvider === "GMAIL") {
         const raw = toBase64Url(buildRfc2822(toAddress, firstEmail.subject, firstEmail.body));
@@ -236,6 +245,8 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
         if (draftRes.ok) {
           const draftData = (await draftRes.json()) as { id: string };
           draftId = draftData.id;
+        } else {
+          draftError = `Gmail drafts.create HTTP ${draftRes.status}: ${(await draftRes.text()).slice(0, 200)}`;
         }
       } else if (liveProvider === "MICROSOFT_365") {
         const draftRes = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
@@ -253,6 +264,8 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
         if (draftRes.ok) {
           const draftData = (await draftRes.json()) as { id: string };
           draftId = draftData.id;
+        } else {
+          draftError = `Graph messages.create HTTP ${draftRes.status}: ${(await draftRes.text()).slice(0, 200)}`;
         }
       }
 
@@ -262,6 +275,7 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
         body: firstEmail.body,
         provider: liveProvider,
         draftId,
+        draftError,
         sequenceStep: firstEmail.sequenceStep,
         prospectDomain: seq.prospectDomain,
       });

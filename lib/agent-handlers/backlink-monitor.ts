@@ -1,11 +1,10 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { bareDomain, fetchAhrefsBacklinks, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
 
 export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -14,10 +13,14 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const monitoredDomain = String(config.monitoredDomain ?? "");
+  const targetDomain = String(config.targetDomain ?? "");
   const alertOnLost = config.alertOnLost !== false;
-  const toxicThreshold = String(config.toxicThreshold ?? "Standard");
-  const disavowAutoUpdate = config.disavowAutoUpdate === true;
+  const toxicityThreshold = Number(config.toxicityThreshold ?? 70);
+  const minimumDaAlert = Number(config.minimumDaAlert ?? 30);
+  // Only ever produces a disavow.txt draft for a human to review and upload
+  // themselves — this handler has no Search Console write scope and never
+  // calls Google's disavow endpoint.
+  const autoDisavow = config.autoDisavow === true;
   const competitorDomains = String(config.competitorDomains ?? "");
 
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -33,92 +36,59 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
       ].filter(Boolean).join("\n")
     : "";
 
-  const toxicThresholdGuidance: Record<string, string> = {
-    Strict:
-      "Flag any link with spam score above 20%, from sites with thin content, or from sites in unrelated mass niches.",
-    Standard:
-      "Flag links with spam score above 40%, clear PBN patterns, or link farms. Ignore minor issues.",
-    Permissive:
-      "Only flag links with very high spam scores (70%+) or from sites that are clearly penalised or deindexed.",
-  };
-  const toxicGuidance = toxicThresholdGuidance[toxicThreshold] ?? toxicThresholdGuidance.Standard;
-
-  const systemPrompt = [
-    "You are a link profile analyst specialising in backlink monitoring and toxic link identification.",
-    "Distinguish between link loss due to page removal (permanent) vs noindex/no-crawl (potentially recoverable) vs the referring page being removed (not your problem).",
-    "Toxic link identification should use multiple signals — not just spam score alone. Consider: site relevance, link velocity, anchor text distribution, site-wide links, footer links, and patterns suggesting paid link schemes.",
-    `Toxicity threshold: ${toxicGuidance}`,
-    "Return ONLY valid JSON — no markdown fences, no preamble.",
-    brandContext ? `\nClient context:\n${brandContext}` : "",
-  ].filter(Boolean).join("\n");
-
   const competitorList = competitorDomains
     .split(/[\n,]/)
     .map((d) => d.trim())
     .filter(Boolean);
 
   const reportDate = new Date().toISOString().split("T")[0];
-  const effectiveDomain = monitoredDomain || businessProfile?.websiteUrl?.replace(/^https?:\/\//, "").replace(/\/$/, "") || "yourdomain.com";
+  const effectiveDomain = bareDomain(targetDomain || businessProfile?.websiteUrl || "yourdomain.com");
+
+  const systemPrompt = [
+    "You are a link profile analyst specialising in backlink monitoring and toxic link identification.",
+    "Distinguish between link loss due to page removal (permanent) vs noindex/no-crawl (potentially recoverable) vs the referring page being removed (not your problem).",
+    "Toxic link identification should use multiple signals — not just spam score alone. Consider: site relevance, link velocity, anchor text distribution, site-wide links, footer links, and patterns suggesting paid link schemes.",
+    `Flag a referring domain as toxic when its toxicityScore (0-100) is at or above ${toxicityThreshold}.`,
+    `Only surface a lost link as a headline alert when the referring domain's DA/DR is at or above ${minimumDaAlert}; still list lower-DA losses, just don't lead with them.`,
+    "Return ONLY valid JSON — no markdown fences, no preamble.",
+    brandContext ? `\nClient context:\n${brandContext}` : "",
+  ].filter(Boolean).join("\n");
 
   // --- Live API: Ahrefs → Semrush ---
   let liveDataSection = "";
-  let source: "live" | "simulation" = "simulation";
-
-  const ahrefsIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
-  });
-
-  if (ahrefsIntegration?.encryptedCredentials) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
-      const url = `https://apiv2.ahrefs.com/v3/site-explorer/backlinks?target=${encodeURIComponent(effectiveDomain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
-      const res = await fetch(url, { headers: { "Accept": "application/json" } });
-      if (res.ok) {
-        const data = await res.json() as unknown;
-        liveDataSection = `\n\nLIVE AHREFS BACKLINK DATA for "${effectiveDomain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real backlink data to populate newLinks, lostLinks, and toxicLinks. Base totalBacklinks, DR trend, and other summary metrics on this actual data rather than simulating them.`;
-        source = "live";
-      }
-    } catch {
-      // fall through to Semrush
-    }
-  }
-
-  if (source === "simulation") {
-    const semrushIntegration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
-    });
-    if (semrushIntegration?.encryptedCredentials) {
-      try {
-        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
-        const url = `https://api.semrush.com/?type=domain_organic&domain=${encodeURIComponent(effectiveDomain)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp&database=us`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const text = await res.text();
-          liveDataSection = `\n\nLIVE SEMRUSH DOMAIN DATA for "${effectiveDomain}" (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${text}\n\nUse this organic performance data to add context to the backlink report (traffic impact of links, anchor text relevance to ranking keywords).`;
-          source = "live";
-        }
-      } catch {
-        // fall through to simulation
-      }
-    }
-  }
+  const liveResult = await resolveSeoLiveData(
+    run.agentConfig.workspaceId,
+    (data, provider) =>
+      provider === "AHREFS"
+        ? `\n\nLIVE AHREFS BACKLINK DATA for "${effectiveDomain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real backlink data to populate newLinks, lostLinks, and toxicLinks. Base totalBacklinks, DR trend, and other summary metrics on this actual data rather than simulating them.`
+        : `\n\nLIVE SEMRUSH DOMAIN DATA for "${effectiveDomain}" (columns: Ph=keyword, Po=position, Nq=monthly searches, Cp=CPC):\n${data}\n\nUse this organic performance data to add context to the backlink report (traffic impact of links, anchor text relevance to ranking keywords).`,
+    {
+      ahrefs: (apiKey) => fetchAhrefsBacklinks(apiKey, effectiveDomain),
+      semrush: (apiKey) => fetchSemrushDomainOrganic(apiKey, effectiveDomain),
+    },
+  );
+  const source = liveResult.source;
+  const liveProvider = liveResult.source === "live" ? liveResult.provider : null;
+  if (liveResult.source === "live") liveDataSection = liveResult.section;
   // --- End live API ---
 
   const userPrompt = [
     `Generate a backlink monitoring report for: ${effectiveDomain}`,
     `Report date: ${reportDate}`,
+    `Check frequency: ${String(config.checkFrequency ?? "Daily")}`,
     liveDataSection,
-    `Alert on lost links: ${alertOnLost}`,
-    `Toxic link threshold: ${toxicThreshold}`,
-    `Auto-update disavow file: ${disavowAutoUpdate}`,
+    `Emphasise lost links in the report: ${alertOnLost}`,
+    `Toxicity score threshold: ${toxicityThreshold} (flag toxicLinks with toxicityScore >= this value)`,
+    `Minimum DA for headline lost-link alerts: ${minimumDaAlert}`,
+    `Draft a disavow file: ${autoDisavow}`,
     competitorList.length > 0 ? `Competitor domains to compare: ${competitorList.join(", ")}` : "",
     "",
     "Simulate a realistic monitoring report with plausible backlink data for this domain and industry.",
     "Include a mix of new links (editorially earned, some paid-looking), lost links with varied reasons, and a small number of toxic links.",
-    "For lostLinks, diagnose each loss reason specifically: '404 on referring page', 'link removed from existing page', 'page moved to noindex', 'domain expired', etc.",
-    disavowAutoUpdate
-      ? "Since disavowAutoUpdate is enabled, include a disavowFile field with a formatted Google disavow file content for the toxic domains."
-      : "Set disavowFile to null (disavow auto-update is off).",
+    "For lostLinks, diagnose each loss reason specifically: '404 on referring page', 'link removed from existing page', 'page moved to noindex', 'domain expired', etc. Set headlineAlert: true only for losses from a domain with DA/DR >= the minimum above.",
+    autoDisavow
+      ? "Since a disavow draft was requested, include a disavowFile field with correctly formatted Google disavow file content (domain: lines) for every toxicLinks entry. This is a draft for the human to review and upload themselves — never state or imply it was submitted to Google."
+      : "Set disavowFile to null (disavow draft not requested).",
     competitorList.length > 0
       ? `Include a competitorComparison entry for each of: ${competitorList.join(", ")}`
       : "Set competitorComparison to an empty array.",
@@ -148,9 +118,11 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
         {
           source: "referring-domain.com",
           targetPage: `https://${effectiveDomain}/page`,
+          dr: 0,
           lastSeen: reportDate,
           lossReason: "Specific reason for link loss",
           recoverable: false,
+          headlineAlert: false,
         },
       ],
       toxicLinks: [
@@ -161,8 +133,8 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
           recommendation: "disavow",
         },
       ],
-      disavowFile: disavowAutoUpdate
-        ? "# Disavow file generated by marketing-erp\n# Date: " + reportDate + "\ndomain:spammy-domain.com"
+      disavowFile: autoDisavow
+        ? "# Disavow file generated by marketing-erp\n# Date: " + reportDate + "\n# Review before uploading — this was never submitted automatically.\ndomain:spammy-domain.com"
         : null,
       competitorComparison:
         competitorList.length > 0
@@ -174,7 +146,7 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
             }))
           : [],
       simulationNote:
-        "Connect Ahrefs in Settings to monitor your real backlink profile. This report is AI-generated based on your domain profile.",
+        "Connect Ahrefs or Semrush in Settings to monitor your real backlink profile. This report is AI-generated based on your domain profile.",
     }),
   ].filter(Boolean).join("\n");
 
@@ -196,7 +168,7 @@ export const backlinkMonitorHandler: AgentHandler = async (run, updateStatus) =>
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
-  output.source = source;
+  output.source = source === "live" ? `live (${liveProvider})` : "simulation";
   if (source === "live") {
     delete output.simulationNote;
   }

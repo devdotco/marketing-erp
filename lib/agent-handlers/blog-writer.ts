@@ -18,6 +18,13 @@ import {
   renderMarkdown,
   type Article,
 } from "@/lib/content/article";
+import {
+  listPublishedPosts,
+  payloadHeaders,
+  rankInternalLinkCandidates,
+  type PayloadCredentials,
+} from "@/lib/integrations/payload";
+import { assertPublicUrl } from "@/lib/integrations/public-url";
 
 /**
  * The Blog Writer.
@@ -71,7 +78,7 @@ export const blogWriterHandler: AgentHandler = async (run, updateStatus) => {
     ? resolveProfile(editorial?.preset, editorial?.overrides)
     : resolveProfile(presetKeyFromLabel(presetOverride), null);
 
-  const brief = buildBrief(
+  const baseBrief = buildBrief(
     inputs,
     businessProfile,
     profile,
@@ -92,6 +99,15 @@ export const blogWriterHandler: AgentHandler = async (run, updateStatus) => {
       // Progress is a convenience, not the result.
     }
   };
+
+  // Augment — never replace — the internal links the person typed in with a
+  // few candidates picked from the workspace's own Payload posts, so the
+  // writer has somewhere real to link besides whatever was typed by hand.
+  // Every entry added here becomes a QC-enforced link target (lib/content/qc.ts
+  // treats brief.internalLinks as required), so this stays small and is best
+  // effort: a Payload connection that fails to list posts must not take the
+  // whole run down over what is, for Blog Writer, a nice-to-have.
+  const brief = await augmentInternalLinksFromPayload(workspaceId, baseBrief, report);
 
   const result = await writeArticle(client, brief, report);
   const { article, qc, research, externalLinkBudget, stages, costUsd, repairRounds } = result;
@@ -183,6 +199,50 @@ function presetKeyFromLabel(label: string): string {
 }
 
 /**
+ * When Payload CMS is connected for this workspace, pick a few of its
+ * published posts that overlap the brief's topic and add them to
+ * brief.internalLinks — additive only, never dropping what the person typed
+ * into Internal Links to Include. See lib/integrations/payload.ts for the
+ * ranking and lib/content/qc.ts for why every link added here must actually
+ * make it into the article.
+ */
+async function augmentInternalLinksFromPayload(
+  workspaceId: string,
+  brief: ContentBrief,
+  report: (stage: string, detail: string) => Promise<void>,
+): Promise<ContentBrief> {
+  const integration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId, provider: "PAYLOAD" } },
+  });
+  if (!integration) return brief;
+
+  try {
+    const creds = await decryptCredentials<PayloadCredentials>(integration.encryptedCredentials);
+    const posts = await listPublishedPosts(creds, 150);
+    const candidates = rankInternalLinkCandidates(
+      {
+        targetKeyword: brief.targetKeyword,
+        secondaryKeywords: brief.secondaryKeywords,
+        topicBrief: brief.topicBrief,
+        workingTitle: brief.workingTitle,
+      },
+      posts,
+      brief.internalLinks.map((l) => l.url),
+      3,
+    );
+    if (candidates.length === 0) return brief;
+    await report("internal-links", `Added ${candidates.length} internal link candidate(s) from the connected Payload CMS.`);
+    return { ...brief, internalLinks: [...brief.internalLinks, ...candidates.map((c) => ({ url: c.url }))] };
+  } catch (err) {
+    // Best effort: the brief's own typed internal links still work. This is
+    // an augmentation, not the run's purpose — a Payload hiccup should not
+    // fail a blog post that has nothing else wrong with it.
+    await report("internal-links", `Could not read posts from Payload: ${err instanceof Error ? err.message : String(err)}. Continuing with the internal links typed into the brief.`);
+    return brief;
+  }
+}
+
+/**
  * The JSON-LD a CMS should emit for this piece. Built from the article that was
  * actually written, never from the brief — a schema block that describes an FAQ
  * the page does not have is a structured-data error, not a bonus.
@@ -253,6 +313,8 @@ async function publishToCms(
         return await publishStoryblok(integration.encryptedCredentials, article, html);
       case "Webflow":
         return await publishWebflow(integration.encryptedCredentials, article, html);
+      case "Payload":
+        return await publishPayload(integration.encryptedCredentials, article, html);
       default:
         return { source: "skipped", cmsTarget, reason: `Unknown CMS target "${cmsTarget}".` };
     }
@@ -368,6 +430,45 @@ async function publishWebflow(encrypted: string, article: Article, html: string)
     publishStatus: "draft",
     postId: result.id,
     liveUrl: `https://webflow.com/design/${creds.siteId}`,
+    publishedAt: new Date().toISOString(),
+  };
+}
+
+async function publishPayload(encrypted: string, article: Article, html: string) {
+  const creds = await decryptCredentials<PayloadCredentials>(encrypted);
+
+  // Lexical body fields aren't supported — there is no HTML→Lexical converter
+  // here. Fail loudly rather than write a body that silently doesn't render.
+  if (creds.bodyFormat === "lexical") {
+    throw new Error(
+      "this connection's Body format is set to Lexical — automatic HTML→Lexical conversion isn't implemented, so nothing was sent. Switch Body format to html under Settings → Integrations → Payload CMS, or publish manually.",
+    );
+  }
+
+  await assertPublicUrl(creds.baseUrl);
+  const resp = await fetch(`${creds.baseUrl}/api/${creds.postsCollection}`, {
+    method: "POST",
+    redirect: "error",
+    headers: { ...payloadHeaders(creds), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: article.title,
+      slug: article.slug,
+      [creds.bodyField]: html,
+      excerpt: article.metaDescription,
+      _status: "draft",
+      ...(creds.tenantId ? { tenant: creds.tenantId } : {}),
+    }),
+  });
+  if (!resp.ok) throw new Error(`Payload API ${resp.status}: ${await resp.text()}`);
+
+  const result = (await resp.json()) as { doc?: { id: string | number }; id?: string | number };
+  const id = result.doc?.id ?? result.id;
+  return {
+    source: "live",
+    cmsTarget: "Payload",
+    publishStatus: "draft",
+    postId: id != null ? String(id) : "unknown",
+    liveUrl: `${creds.baseUrl}/admin/collections/${creds.postsCollection}`,
     publishedAt: new Date().toISOString(),
   };
 }

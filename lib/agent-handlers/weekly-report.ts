@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -52,24 +54,34 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
   let liveAdsBlock: string | null = null;
   let source = "simulation";
 
-  try {
-    const ga4Integration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "GOOGLE_ANALYTICS_4",
-        },
+  const ga4Integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_ANALYTICS_4",
       },
-    });
+    },
+  });
 
-    if (ga4Integration?.encryptedCredentials) {
-      const ga4Creds = await decryptCredentials<{
-        access_token: string;
-        property_id: string;
-      }>(ga4Integration.encryptedCredentials);
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated numbers as "live".
+  if (ga4Integration) {
+    try {
+      const ga4Creds = await googleCredentials(ga4Integration);
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const ga4PropertyId = await resolvePropertyOverride("GOOGLE_ANALYTICS_4", ga4Creds, ga4Property);
+      if (!ga4PropertyId) {
+        throw new AgentInputError(
+          "Google Analytics 4 is connected, but no property has been selected.",
+          "Open Integrations → Google Analytics 4 and choose a property.",
+          "integration_not_configured",
+        );
+      }
 
       const ga4Res = await fetch(
-        `https://analyticsdata.googleapis.com/v1beta/properties/${ga4Creds.property_id}:runReport`,
+        `https://analyticsdata.googleapis.com/v1beta/properties/${ga4PropertyId}:runReport`,
         {
           method: "POST",
           headers: {
@@ -83,82 +95,90 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
           }),
         }
       );
-
-      if (ga4Res.ok) {
-        const ga4Data = (await ga4Res.json()) as Ga4Response;
-        const channelRows = (ga4Data.rows ?? []).map((row) => ({
-          channel: row.dimensionValues[0]?.value ?? "Unknown",
-          sessions: Number(row.metricValues[0]?.value ?? 0),
-          conversions: Number(row.metricValues[1]?.value ?? 0),
-        }));
-        liveGa4Block = `Live GA4 Channel Performance (Last 7 Days):\n${JSON.stringify(channelRows, null, 2)}`;
-        source = "live";
+      if (!ga4Res.ok) {
+        throw new Error(`GA4 Data API ${ga4Res.status}: ${(await ga4Res.text()).slice(0, 300)}`);
       }
+
+      const ga4Data = (await ga4Res.json()) as Ga4Response;
+      const channelRows = (ga4Data.rows ?? []).map((row) => ({
+        channel: row.dimensionValues[0]?.value ?? "Unknown",
+        sessions: Number(row.metricValues[0]?.value ?? 0),
+        conversions: Number(row.metricValues[1]?.value ?? 0),
+      }));
+      liveGa4Block = `Live GA4 Channel Performance (Last 7 Days):\n${JSON.stringify(channelRows, null, 2)}`;
+      source = "live";
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Analytics 4", err instanceof Error ? err.message : String(err));
     }
-  } catch {
-    // fall through to simulation
   }
 
-  try {
-    const adsIntegration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "GOOGLE_ADS",
-        },
+  const adsIntegration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_ADS",
       },
-    });
+    },
+  });
 
-    if (adsIntegration?.encryptedCredentials) {
-      const adsCreds = await decryptCredentials<{
-        access_token: string;
-        customer_id: string;
-      }>(adsIntegration.encryptedCredentials);
+  if (adsIntegration) {
+    try {
+      const adsCreds = await googleCredentials(adsIntegration);
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const adsCustomerId = await resolvePropertyOverride("GOOGLE_ADS", adsCreds, adsAccount.replace(/-/g, ""));
+      if (!adsCustomerId) {
+        throw new AgentInputError(
+          "Google Ads is connected, but no account has been selected.",
+          "Open Integrations → Google Ads and choose an account.",
+          "integration_not_configured",
+        );
+      }
 
-      const customerId = adsCreds.customer_id.replace(/-/g, "");
       const adsRes = await fetch(
-        `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${adsCustomerId}/googleAds:searchStream`,
         {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${adsCreds.access_token}`,
-            "Content-Type": "application/json",
-          },
+          headers: googleAdsHeaders(adsCreds.access_token),
           body: JSON.stringify({
             query:
               "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
           }),
         }
       );
-
-      if (adsRes.ok) {
-        const chunks = (await adsRes.json()) as AdsStreamChunk[];
-        const campaigns: Array<{
-          name: string;
-          costUsd: number;
-          clicks: number;
-          impressions: number;
-          conversions: number;
-        }> = [];
-
-        for (const chunk of chunks) {
-          for (const row of chunk.results ?? []) {
-            campaigns.push({
-              name: row.campaign.name,
-              costUsd: Number(row.metrics.costMicros) / 1_000_000,
-              clicks: Number(row.metrics.clicks),
-              impressions: Number(row.metrics.impressions),
-              conversions: Number(row.metrics.conversions),
-            });
-          }
-        }
-
-        liveAdsBlock = `Live Google Ads Campaign Performance (Last 30 Days):\n${JSON.stringify(campaigns, null, 2)}`;
-        source = "live";
+      if (!adsRes.ok) {
+        throw new Error(`Google Ads API ${adsRes.status}: ${(await adsRes.text()).slice(0, 300)}`);
       }
+
+      const chunks = (await adsRes.json()) as AdsStreamChunk[];
+      const campaigns: Array<{
+        name: string;
+        costUsd: number;
+        clicks: number;
+        impressions: number;
+        conversions: number;
+      }> = [];
+
+      for (const chunk of chunks) {
+        for (const row of chunk.results ?? []) {
+          campaigns.push({
+            name: row.campaign.name,
+            costUsd: Number(row.metrics.costMicros) / 1_000_000,
+            clicks: Number(row.metrics.clicks),
+            impressions: Number(row.metrics.impressions),
+            conversions: Number(row.metrics.conversions),
+          });
+        }
+      }
+
+      liveAdsBlock = `Live Google Ads Campaign Performance (Last 30 Days):\n${JSON.stringify(campaigns, null, 2)}`;
+      source = "live";
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Ads", err instanceof Error ? err.message : String(err));
     }
-  } catch {
-    // fall through to simulation
   }
 
   const liveDataSection =

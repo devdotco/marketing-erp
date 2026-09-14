@@ -1,39 +1,39 @@
-import { getServerSession } from "@/lib/session";
-import { resolveWorkspaceId } from "@/lib/actions/workspace";
 import { prisma } from "@/lib/prisma";
 import { encryptCredentials } from "@/lib/crypto";
 import { forgetAnthropicKey, verifyAnthropicKey } from "@/lib/ai/client";
+import { CONNECT_METHODS, normaliseKeyCredentials } from "@/lib/integrations/catalog";
+import { revokeGoogleGrant } from "@/lib/integrations/google";
+import { integrationAdmin } from "@/lib/integrations/route-auth";
+import { KEY_VERIFIERS } from "@/lib/integrations/verify";
 import { IntegrationProvider } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const who = await integrationAdmin();
+  if (!who.ok) return NextResponse.json({ error: who.error }, { status: who.status });
+  const { workspaceId } = who;
 
-  const workspaceId = await resolveWorkspaceId();
-  if (!workspaceId) {
-    return NextResponse.json({ error: "No workspace found" }, { status: 400 });
-  }
-
-  let body: { provider?: string; apiKey?: string };
+  let body: { provider?: string; apiKey?: string; credentials?: Record<string, unknown> };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { provider, apiKey } = body;
-  if (!provider || !apiKey) {
-    return NextResponse.json({ error: "provider and apiKey are required" }, { status: 400 });
-  }
-
-  if (!Object.values(IntegrationProvider).includes(provider as IntegrationProvider)) {
+  const { provider } = body;
+  if (!provider || !Object.values(IntegrationProvider).includes(provider as IntegrationProvider)) {
     return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });
   }
+  if (CONNECT_METHODS[provider]?.method.kind !== "key") {
+    return NextResponse.json({ error: "This provider isn't connected with a key" }, { status: 400 });
+  }
+
+  // `apiKey` at the top level is the older single-field form; still accepted.
+  const normalised = normaliseKeyCredentials(provider, body.credentials ?? { apiKey: body.apiKey });
+  if (!normalised.ok) return NextResponse.json({ error: normalised.error }, { status: 400 });
+  const { credentials } = normalised;
 
   const typedProvider = provider as IntegrationProvider;
 
@@ -41,13 +41,19 @@ export async function POST(req: NextRequest) {
   // stale model id at run time — except by then someone has queued work and is
   // waiting on it. One cheap call here turns that into a form error.
   if (typedProvider === "ANTHROPIC") {
-    const verdict = await verifyAnthropicKey(apiKey);
+    const verdict = await verifyAnthropicKey(credentials.apiKey);
     if (!verdict.ok) {
       return NextResponse.json({ error: verdict.reason }, { status: 400 });
     }
   }
 
-  const encrypted = await encryptCredentials({ apiKey });
+  const verify = KEY_VERIFIERS[typedProvider];
+  if (verify) {
+    const verdict = await verify(credentials).catch((err: Error) => ({ ok: false as const, reason: `Couldn't reach ${typedProvider}: ${err.message}` }));
+    if (!verdict.ok) return NextResponse.json({ error: verdict.reason }, { status: 400 });
+  }
+
+  const encrypted = await encryptCredentials(credentials);
 
   await prisma.integration.upsert({
     where: { workspaceId_provider: { workspaceId, provider: typedProvider } },
@@ -66,6 +72,29 @@ export async function POST(req: NextRequest) {
 
   // The resolver memoises clients for a minute; a rotated key must take effect now.
   if (typedProvider === "ANTHROPIC") forgetAnthropicKey(workspaceId);
+
+  return NextResponse.json({ success: true });
+}
+
+/** Disconnect: delete the stored credentials (and end Google's side of an OAuth grant). */
+export async function DELETE(req: NextRequest) {
+  const who = await integrationAdmin();
+  if (!who.ok) return NextResponse.json({ error: who.error }, { status: who.status });
+
+  const provider = req.nextUrl.searchParams.get("provider") ?? "";
+  if (!Object.values(IntegrationProvider).includes(provider as IntegrationProvider)) {
+    return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });
+  }
+  const typedProvider = provider as IntegrationProvider;
+
+  const integration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: who.workspaceId, provider: typedProvider } },
+  });
+  if (!integration) return NextResponse.json({ success: true });
+
+  if (CONNECT_METHODS[provider]?.method.kind === "google") await revokeGoogleGrant(integration);
+  await prisma.integration.delete({ where: { id: integration.id } });
+  if (typedProvider === "ANTHROPIC") forgetAnthropicKey(who.workspaceId);
 
   return NextResponse.json({ success: true });
 }

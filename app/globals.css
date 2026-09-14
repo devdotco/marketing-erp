@@ -233,6 +233,26 @@ code, pre, .mono {
 }
 .input-hint.error { color: var(--danger); }
 
+/* ─── Setup guide layout (connect page) ────────────────────────────────── */
+/* Form column first in the DOM so it's what renders first; side-by-side once
+   both columns fit, wrapping to a form-on-top / guide-below stack on narrow
+   screens rather than needing a separate mobile layout. */
+.setup-guide-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+.connect-form-col {
+  flex: 1 1 380px;
+  min-width: 300px;
+}
+.connect-guide-col {
+  flex: 1 1 380px;
+  min-width: 300px;
+  max-width: 480px;
+}
+
 /* ─── Divider ───────────────────────────────────────────────────────────── */
 .divider {
   height: 1px;

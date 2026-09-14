@@ -1,100 +1,20 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import { createKlaviyoDraft, createMailchimpDraft, resolveEspLiveData } from "./esp-providers";
+import { emailSequenceToSteps, parseAudienceEmails, stageInstantlyCampaign, stageApolloSequence, stageCrmSequence } from "./email-marketing-channels";
+import { DEFAULT_CRM_URL } from "@/lib/integrations/crm-erp-io";
+import type { CreateInstantlyCampaignInput } from "@/lib/integrations/instantly";
 
-// --- Mailchimp helpers ---
-function mailchimpAuthHeader(apiKey: string): string {
-  return "Basic " + Buffer.from(`anystring:${apiKey}`).toString("base64");
-}
-
-async function fetchMailchimpCampaigns(apiKey: string, server: string): Promise<unknown[]> {
-  const res = await fetch(
-    `https://${server}.api.mailchimp.com/3.0/campaigns?count=10&status=sent`,
-    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
-  );
-  if (!res.ok) throw new Error(`Mailchimp campaigns error: ${res.status}`);
-  const data = (await res.json()) as { campaigns?: unknown[] };
-  return data.campaigns ?? [];
-}
-
-async function fetchMailchimpAudiences(apiKey: string, server: string): Promise<unknown[]> {
-  const res = await fetch(
-    `https://${server}.api.mailchimp.com/3.0/lists`,
-    { headers: { Authorization: mailchimpAuthHeader(apiKey) } }
-  );
-  if (!res.ok) throw new Error(`Mailchimp lists error: ${res.status}`);
-  const data = (await res.json()) as { lists?: unknown[] };
-  return data.lists ?? [];
-}
-
-async function createMailchimpDraft(
-  apiKey: string,
-  server: string,
-  listId: string,
-  subjectLine: string,
-  title: string,
-  fromName: string,
-  replyTo: string
-): Promise<string> {
-  const res = await fetch(`https://${server}.api.mailchimp.com/3.0/campaigns`, {
-    method: "POST",
-    headers: {
-      Authorization: mailchimpAuthHeader(apiKey),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      type: "regular",
-      recipients: { list_id: listId },
-      settings: { subject_line: subjectLine, title, from_name: fromName, reply_to: replyTo },
-    }),
-  });
-  if (!res.ok) throw new Error(`Mailchimp create draft error: ${res.status}`);
-  const data = (await res.json()) as { id?: string };
-  return data.id ?? "";
-}
-
-// --- Klaviyo helpers ---
-function klaviyoHeaders(apiKey: string): Record<string, string> {
-  return {
-    Authorization: `Klaviyo-API-Key ${apiKey}`,
-    revision: "2024-10-15",
-    "Content-Type": "application/json",
-  };
-}
-
-async function fetchKlaviyoCampaigns(apiKey: string): Promise<unknown[]> {
-  const res = await fetch(
-    `https://a.klaviyo.com/api/campaigns/?filter=equals(messages.channel,'email')`,
-    { headers: klaviyoHeaders(apiKey) }
-  );
-  if (!res.ok) throw new Error(`Klaviyo campaigns error: ${res.status}`);
-  const data = (await res.json()) as { data?: unknown[] };
-  return data.data ?? [];
-}
-
-async function createKlaviyoDraft(apiKey: string, name: string): Promise<string> {
-  const res = await fetch(`https://a.klaviyo.com/api/campaigns/`, {
-    method: "POST",
-    headers: klaviyoHeaders(apiKey),
-    body: JSON.stringify({
-      data: {
-        type: "campaign",
-        attributes: {
-          name,
-          audiences: { included: [] },
-          send_strategy: { method: "static" },
-        },
-      },
-    }),
-  });
-  if (!res.ok) throw new Error(`Klaviyo create draft error: ${res.status}`);
-  const data = (await res.json()) as { data?: { id?: string } };
-  return data.data?.id ?? "";
+type InstantlySendDay = NonNullable<CreateInstantlyCampaignInput["sendDayOfWeek"]>;
+const INSTANTLY_SEND_DAYS: readonly InstantlySendDay[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+function coerceInstantlySendDay(value: unknown): InstantlySendDay | undefined {
+  return INSTANTLY_SEND_DAYS.find((day) => day === value);
 }
 
 export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => {
@@ -107,7 +27,22 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
   const campaignType = (config.campaignType as string) ?? "Broadcast";
   const segmentCondition = (config.segmentCondition as string) ?? "";
   const numberOfEmails = (config.numberOfEmails as number) ?? 5;
-  const espTarget = (config.espTarget as string) ?? "Draft";
+  // The metadata field is "platform" (required: Mailchimp, Klaviyo, Instantly, Apollo, or erp.io
+  // CRM) — this handler used to read a field named "espTarget" that doesn't exist on this agent's
+  // config schema at all, so it silently always fell back to its "Draft" default and never
+  // actually pinned which platform to use.
+  const platform = (config.platform as string) ?? "";
+  const platformUpper = platform.toUpperCase().replace(/[^A-Z]/g, "_");
+  const preferredProvider =
+    platformUpper === "KLAVIYO" ? "KLAVIYO" as const
+    : platformUpper === "MAILCHIMP" ? "MAILCHIMP" as const
+    : platformUpper === "INSTANTLY" ? "INSTANTLY" as const
+    : platformUpper === "APOLLO" || platformUpper === "APOLLO_IO" ? "APOLLO" as const
+    : platformUpper.includes("CRM") ? "CRM_ERP_IO" as const
+    : undefined;
+  const espTarget = platform || "Draft";
+  const configuredAudienceId = (config.audienceId as string) ?? "";
+  const senderAccountId = (config.senderAccountId as string) ?? "";
   const ctaUrl = (config.ctaUrl as string) ?? "";
   const rewriteUnderperformers = (config.rewriteUnderperformers as boolean) ?? false;
 
@@ -115,74 +50,38 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
-  // --- Live ESP data ---
-  let liveContext = "";
-  let source = "simulation";
-  let espProvider: "MAILCHIMP" | "KLAVIYO" | null = null;
-  let mailchimpCreds: { apiKey: string; server: string } | null = null;
-  let klaviyoCreds: { apiKey: string } | null = null;
-  let mailchimpAudienceId = "";
-
-  try {
-    const mailchimpIntegration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "MAILCHIMP",
-        },
-      },
+  let preferredIntegration: Awaited<ReturnType<typeof prisma.integration.findUnique>> = null;
+  if (preferredProvider) {
+    preferredIntegration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: preferredProvider } },
     });
-
-    if (mailchimpIntegration?.encryptedCredentials) {
-      mailchimpCreds = await decryptCredentials<{ apiKey: string; server: string }>(
-        mailchimpIntegration.encryptedCredentials
+    if (!preferredIntegration) {
+      throw new AgentInputError(
+        `${platform} is selected as the Email Platform, but it isn't connected for this workspace.`,
+        `Connect ${platform} under Settings → Integrations, or change the Email Platform field.`,
+        "esp_not_connected",
       );
-      const [campaigns, audiences] = await Promise.all([
-        fetchMailchimpCampaigns(mailchimpCreds.apiKey, mailchimpCreds.server),
-        fetchMailchimpAudiences(mailchimpCreds.apiKey, mailchimpCreds.server),
-      ]);
-      if (audiences.length > 0) {
-        mailchimpAudienceId = ((audiences[0] as Record<string, unknown>).id as string) ?? "";
-      }
-      liveContext = `\nMailchimp Account Data:\nAudience lists: ${JSON.stringify(
-        audiences.slice(0, 5),
-        null,
-        2
-      )}\nRecent sent campaigns (with performance stats): ${JSON.stringify(
-        campaigns.slice(0, 5),
-        null,
-        2
-      )}`;
-      source = "live";
-      espProvider = "MAILCHIMP";
-    } else {
-      const klaviyoIntegration = await prisma.integration.findUnique({
-        where: {
-          workspaceId_provider: {
-            workspaceId: run.agentConfig.workspaceId,
-            provider: "KLAVIYO",
-          },
-        },
-      });
-
-      if (klaviyoIntegration?.encryptedCredentials) {
-        klaviyoCreds = await decryptCredentials<{ apiKey: string }>(
-          klaviyoIntegration.encryptedCredentials
-        );
-        const campaigns = await fetchKlaviyoCampaigns(klaviyoCreds.apiKey);
-        liveContext = `\nKlaviyo Account Data:\nRecent email campaigns: ${JSON.stringify(
-          campaigns.slice(0, 5),
-          null,
-          2
-        )}`;
-        source = "live";
-        espProvider = "KLAVIYO";
-      }
     }
-  } catch {
-    liveContext = "";
-    source = "simulation";
   }
+
+  // --- Live ESP data. Only Mailchimp/Klaviyo have a "recent campaign performance" concept to
+  // ground the prompt in — Instantly/Apollo/erp.io CRM are staged from scratch below instead. A
+  // connected-but-broken ESP doesn't silently look identical to no ESP — see esp-providers.ts.
+  const isNewerChannel = preferredProvider === "INSTANTLY" || preferredProvider === "APOLLO" || preferredProvider === "CRM_ERP_IO";
+  const espPreferredProvider = preferredProvider === "MAILCHIMP" || preferredProvider === "KLAVIYO" ? preferredProvider : undefined;
+  const espResult = isNewerChannel
+    ? ({ source: "simulation", error: undefined } as const)
+    : await resolveEspLiveData(run.agentConfig.workspaceId, 5, espPreferredProvider);
+  const liveContext = espResult.source === "live" ? espResult.liveContext : "";
+  const source = espResult.source;
+  const espProvider = espResult.source === "live" ? espResult.provider : null;
+  const mailchimpCreds = espResult.source === "live" && espResult.provider === "MAILCHIMP" ? espResult.mailchimpCreds : null;
+  const klaviyoCreds = espResult.source === "live" && espResult.provider === "KLAVIYO" ? espResult.klaviyoCreds : null;
+  // Prefer the Audience/List ID the customer configured; fall back to the
+  // account's first list only when they didn't set one.
+  const mailchimpAudienceId = configuredAudienceId ||
+    (espResult.source === "live" && espResult.provider === "MAILCHIMP" ? espResult.mailchimpAudienceId : "");
+  const espReadError = espResult.source === "simulation" ? espResult.error : undefined;
 
   const systemPrompt = `You are an expert email marketing strategist specialising in behavioural segmentation, ESP automation, and revenue-driven copy. You craft multi-email sequences for B2B SaaS companies that balance personalisation with deliverability. You produce detailed, production-ready campaign blueprints. Always respond with valid JSON only — no markdown fences, no commentary outside the JSON object.`;
 
@@ -327,22 +226,94 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
       );
       output.espDraftId = draftId;
       output.espDraftProvider = "MAILCHIMP";
-    } catch {
-      // Non-fatal — keep generated content
+    } catch (err) {
+      // Non-fatal — the campaign copy above is genuine either way, but don't
+      // pretend a draft exists in Mailchimp when the create call failed.
+      output.espDraftError = `Mailchimp: ${err instanceof Error ? err.message : String(err)}`;
     }
   } else if (espProvider === "KLAVIYO" && klaviyoCreds) {
     try {
       const campaignName =
         typeof output.campaignName === "string" ? output.campaignName : "AI Campaign";
-      const draftId = await createKlaviyoDraft(klaviyoCreds.apiKey, campaignName);
+      const draftId = await createKlaviyoDraft(klaviyoCreds.apiKey, campaignName, configuredAudienceId || undefined);
       output.espDraftId = draftId;
       output.espDraftProvider = "KLAVIYO";
-    } catch {
-      // Non-fatal — keep generated content
+      if (!configuredAudienceId) {
+        output.espDraftWarning = "Created with no audience attached — set Audience or List ID, or assign one in Klaviyo before sending.";
+      }
+    } catch (err) {
+      output.espDraftError = `Klaviyo: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  } else if (preferredProvider === "INSTANTLY" || preferredProvider === "APOLLO" || preferredProvider === "CRM_ERP_IO") {
+    // --- Instantly / Apollo / erp.io CRM: stage a paused campaign/sequence now; a human
+    // approving this run (app/api/runs/[runId]/approve/route.ts, via
+    // lib/agent-handlers/on-approve.ts) is what adds the audience and makes it live. A staging
+    // failure is recorded on `channelDelivery`, NOT thrown: the campaign copy above is genuine
+    // either way, and an uncaught throw here would have the worker replace this run's whole
+    // `output` with just the error (see workers/agent-worker.ts), discarding it.
+    const campaignName = typeof output.campaignName === "string" ? output.campaignName : "AI Campaign";
+    const steps = emailSequenceToSteps(output.emailSequence);
+    const fromName = businessProfile?.businessName ?? "Marketing";
+    const hostname = businessProfile?.websiteUrl
+      ? (() => {
+          try {
+            return new URL(businessProfile.websiteUrl).hostname;
+          } catch {
+            return "example.com";
+          }
+        })()
+      : "example.com";
+    const fromAddress = `hello@${hostname}`;
+    // Guaranteed non-null: the check above (lines defining `preferredIntegration`) already threw
+    // AgentInputError if this platform was selected but not connected.
+    const integration = preferredIntegration!;
+
+    try {
+      if (preferredProvider === "INSTANTLY") {
+        const creds = await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials);
+        const channel = await stageInstantlyCampaign(creds.apiKey, {
+          campaignName,
+          steps,
+          listId: configuredAudienceId,
+          sendDayOfWeek: coerceInstantlySendDay(config.sendDayOfWeek),
+        });
+        output.channelDelivery = { platform: "INSTANTLY", status: "staged", instantly: channel };
+      } else if (preferredProvider === "APOLLO") {
+        const creds = await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials);
+        const channel = await stageApolloSequence(creds.apiKey, {
+          sequenceName: campaignName,
+          steps: steps.map((s) => ({ subject: s.subject, bodyHtml: s.body, waitDays: s.delayDays })),
+          audienceEmails: parseAudienceEmails(configuredAudienceId),
+          senderAccountId,
+        });
+        output.channelDelivery = { platform: "APOLLO", status: "staged", apollo: channel };
+      } else {
+        const creds = await decryptCredentials<{ apiKey: string; crmUrl?: string }>(integration.encryptedCredentials);
+        const channel = await stageCrmSequence(creds.crmUrl || DEFAULT_CRM_URL, creds.apiKey, {
+          name: campaignName,
+          fromAddress,
+          fromName,
+          steps,
+          segmentId: configuredAudienceId,
+        });
+        output.channelDelivery = { platform: "CRM_ERP_IO", status: "staged", crm: channel };
+      }
+    } catch (err) {
+      const isInputError = err instanceof AgentInputError;
+      output.channelDelivery = {
+        platform: preferredProvider,
+        status: "error",
+        error: {
+          message: isInputError ? err.message : err instanceof Error ? err.message : String(err),
+          hint: isInputError ? err.hint : undefined,
+          code: isInputError ? err.code : "channel_stage_failed",
+        },
+      };
     }
   }
 
   output.source = source;
+  if (espReadError) output.espReadError = espReadError;
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
 

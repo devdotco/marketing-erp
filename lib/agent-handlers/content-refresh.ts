@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -18,7 +20,11 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const siteUrl = typeof config.siteUrl === "string" ? config.siteUrl : "https://example.com";
+  // "" rather than a placeholder domain: resolvePropertyOverride below treats
+  // a non-empty value as a real dropdown choice to verify against the
+  // connected grant, so a fake fallback here would fail every run that
+  // didn't explicitly pick something (a scheduled run, in particular).
+  const siteUrl = typeof config.siteUrl === "string" ? config.siteUrl : "";
   const maxPagesPerRun = typeof config.maxPagesPerRun === "number" ? config.maxPagesPerRun : 10;
   const decayThresholdDays = typeof config.decayThresholdDays === "number" ? config.decayThresholdDays : 180;
   const refreshDepth = typeof config.refreshDepth === "string" ? config.refreshDepth : "Medium";
@@ -39,14 +45,24 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
     },
   });
 
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated data as "live".
   if (integration) {
     try {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        property_url: string;
-      }>(integration.encryptedCredentials);
+      // Refreshes the hour-long access token first.
+      const creds = await googleCredentials(integration);
 
-      const propertyUrl = creds.property_url || siteUrl;
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const propertyUrl = await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, siteUrl);
+      if (!propertyUrl) {
+        throw new AgentInputError(
+          "Google Search Console is connected, but no property has been selected.",
+          "Open Integrations → Google Search Console and choose a property.",
+          "integration_not_configured",
+        );
+      }
       const encodedUrl = encodeURIComponent(propertyUrl);
       const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
       const headers: Record<string, string> = {
@@ -99,54 +115,57 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
           }),
         }),
       ]);
+      if (!recentRes.ok || !olderRes.ok) {
+        const bad = !recentRes.ok ? recentRes : olderRes;
+        throw new Error(`Search Console API ${bad.status}: ${(await bad.text()).slice(0, 300)}`);
+      }
 
-      if (recentRes.ok && olderRes.ok) {
-        const recentData = (await recentRes.json()) as GscResponse;
-        const olderData = (await olderRes.json()) as GscResponse;
+      const recentData = (await recentRes.json()) as GscResponse;
+      const olderData = (await olderRes.json()) as GscResponse;
 
-        const recentRows = recentData.rows ?? [];
-        const olderRows = olderData.rows ?? [];
+      const recentRows = recentData.rows ?? [];
+      const olderRows = olderData.rows ?? [];
 
-        // Build lookup for older period
-        const olderMap = new Map<string, { clicks: number; impressions: number; position: number }>();
-        for (const row of olderRows) {
-          olderMap.set(row.keys[0], {
-            clicks: row.clicks,
-            impressions: row.impressions,
-            position: row.position,
-          });
-        }
+      // Build lookup for older period
+      const olderMap = new Map<string, { clicks: number; impressions: number; position: number }>();
+      for (const row of olderRows) {
+        olderMap.set(row.keys[0], {
+          clicks: row.clicks,
+          impressions: row.impressions,
+          position: row.position,
+        });
+      }
 
-        // Calculate decay: pages where recent clicks < older clicks
-        const decayingPages = recentRows
-          .map((r) => {
-            const older = olderMap.get(r.keys[0]);
-            const olderClicks = older?.clicks ?? 0;
-            const decayPct =
-              olderClicks > 0 ? ((r.clicks - olderClicks) / olderClicks) * 100 : 0;
-            return {
-              url: r.keys[0],
-              recentClicks: r.clicks,
-              olderClicks,
-              decayPercent: Math.round(decayPct * 10) / 10,
-              recentImpressions: r.impressions,
-              recentPosition: r.position,
-              olderPosition: older?.position ?? null,
-            };
-          })
-          .filter((p) => p.decayPercent < -10 || p.recentClicks === 0) // Pages losing >10% traffic or completely dead
-          .sort((a, b) => a.decayPercent - b.decayPercent) // Worst decay first
-          .slice(0, maxPagesPerRun * 3); // Extra buffer so Claude can pick the best candidates
+      // Calculate decay: pages where recent clicks < older clicks
+      const decayingPages = recentRows
+        .map((r) => {
+          const older = olderMap.get(r.keys[0]);
+          const olderClicks = older?.clicks ?? 0;
+          const decayPct =
+            olderClicks > 0 ? ((r.clicks - olderClicks) / olderClicks) * 100 : 0;
+          return {
+            url: r.keys[0],
+            recentClicks: r.clicks,
+            olderClicks,
+            decayPercent: Math.round(decayPct * 10) / 10,
+            recentImpressions: r.impressions,
+            recentPosition: r.position,
+            olderPosition: older?.position ?? null,
+          };
+        })
+        .filter((p) => p.decayPercent < -10 || p.recentClicks === 0) // Pages losing >10% traffic or completely dead
+        .sort((a, b) => a.decayPercent - b.decayPercent) // Worst decay first
+        .slice(0, maxPagesPerRun * 3); // Extra buffer so Claude can pick the best candidates
 
-        // Pages not seen in recent but present in older (disappeared from index)
-        const recentUrls = new Set(recentRows.map((r) => r.keys[0]));
-        const vanishedPages = olderRows
-          .filter((r) => !recentUrls.has(r.keys[0]) && r.clicks > 5)
-          .sort((a, b) => b.clicks - a.clicks)
-          .slice(0, 20)
-          .map((r) => ({ url: r.keys[0], previousClicks: r.clicks, previousPosition: r.position }));
+      // Pages not seen in recent but present in older (disappeared from index)
+      const recentUrls = new Set(recentRows.map((r) => r.keys[0]));
+      const vanishedPages = olderRows
+        .filter((r) => !recentUrls.has(r.keys[0]) && r.clicks > 5)
+        .sort((a, b) => b.clicks - a.clicks)
+        .slice(0, 20)
+        .map((r) => ({ url: r.keys[0], previousClicks: r.clicks, previousPosition: r.position }));
 
-        gscPageContext = `REAL GSC PAGE PERFORMANCE DATA:
+      gscPageContext = `REAL GSC PAGE PERFORMANCE DATA:
 Property: ${propertyUrl}
 Recent period: ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)} (last 90 days)
 Comparison period: ${formatDate(oneEightyDaysAgo)} to ${formatDate(ninetyOneeDaysAgo)} (90-180 days ago)
@@ -160,10 +179,10 @@ ${JSON.stringify(decayingPages, null, 2)}
 Pages that vanished from recent results (had traffic 90-180 days ago, none recently):
 ${JSON.stringify(vanishedPages, null, 2)}`;
 
-        isLive = true;
-      }
-    } catch {
-      // Fall through to simulation
+      isLive = true;
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Search Console", err instanceof Error ? err.message : String(err));
     }
   }
 

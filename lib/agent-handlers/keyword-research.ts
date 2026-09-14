@@ -1,11 +1,10 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushPhraseThis, resolveSeoLiveData } from "./seo-data-providers";
 
 export const keywordResearchHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -25,58 +24,38 @@ export const keywordResearchHandler: AgentHandler = async (run, updateStatus) =>
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
-  // --- Live API: Ahrefs → Semrush ---
+  // --- Live API: Ahrefs → Semrush → SearchAtlas. Throws (not caught here) if
+  // a connected provider fails — see resolveSeoLiveData for why that's not a
+  // silent fallback to simulation anymore.
   let liveDataSection = "";
-  let source: "live" | "simulation" = "simulation";
+  const domain =
+    businessProfile?.websiteUrl ? bareDomain(businessProfile.websiteUrl) : bareDomain(seedKeywords.split(/[\s,]+/)[0] ?? "");
+  const firstKeyword = seedKeywords.split(/[\n,]+/)[0]?.trim() ?? "";
+  const database = targetCountry.toLowerCase() === "us" ? "us" : targetCountry.toLowerCase();
+  const competitorDomains = String(config.competitorDomains ?? "")
+    .split(/[\n,]+/)
+    .map(bareDomain)
+    .filter(Boolean)
+    .slice(0, 4);
 
-  const ahrefsIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AHREFS" } },
-  });
-
-  if (ahrefsIntegration?.encryptedCredentials) {
-    try {
-      const creds = await decryptCredentials<{ apiKey: string }>(ahrefsIntegration.encryptedCredentials);
-      const domain =
-        businessProfile?.websiteUrl?.replace(/^https?:\/\//, "").replace(/\/$/, "") ??
-        seedKeywords.split(/[\s,]+/)[0] ??
-        "";
-      if (domain) {
-        const url = `https://apiv2.ahrefs.com/v3/site-explorer/keywords?target=${encodeURIComponent(domain)}&token=${encodeURIComponent(creds.apiKey)}&limit=100`;
-        const res = await fetch(url, { headers: { "Accept": "application/json" } });
-        if (res.ok) {
-          const data = await res.json() as unknown;
-          liveDataSection = `\n\nLIVE AHREFS DATA for "${domain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real keyword data (volume, difficulty, CPC) where available. Supplement with your own expertise for keywords not yet covered.`;
-          source = "live";
-        }
-      }
-    } catch {
-      // fall through to Semrush
-    }
-  }
-
-  if (source === "simulation") {
-    const semrushIntegration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "SEMRUSH" } },
-    });
-    if (semrushIntegration?.encryptedCredentials) {
-      try {
-        const creds = await decryptCredentials<{ apiKey: string }>(semrushIntegration.encryptedCredentials);
-        const firstKeyword = seedKeywords.split(/[\n,]+/)[0]?.trim() ?? "";
-        if (firstKeyword) {
-          const database = targetCountry.toLowerCase() === "us" ? "us" : targetCountry.toLowerCase();
-          const url = `https://api.semrush.com/?type=phrase_this&phrase=${encodeURIComponent(firstKeyword)}&key=${encodeURIComponent(creds.apiKey)}&export_columns=Ph,Po,Nq,Cp,Co&database=${database}`;
-          const res = await fetch(url);
-          if (res.ok) {
-            const text = await res.text();
-            liveDataSection = `\n\nLIVE SEMRUSH DATA for "${firstKeyword}" (columns: Ph=keyword phrase, Po=position, Nq=monthly searches, Cp=CPC, Co=competition):\n${text}\n\nUse this real data to anchor keyword metrics (volume, CPC, competition). Extend from these seeds to build the full cluster set.`;
-            source = "live";
-          }
-        }
-      } catch {
-        // fall through to simulation
-      }
-    }
-  }
+  const liveResult = await resolveSeoLiveData(
+    run.agentConfig.workspaceId,
+    (data, provider) =>
+      provider === "AHREFS"
+        ? `\n\nLIVE AHREFS DATA for "${domain}":\n${JSON.stringify(data, null, 2)}\n\nUse this real keyword data (volume, difficulty, CPC) where available. Supplement with your own expertise for keywords not yet covered.`
+        : provider === "SEMRUSH"
+          ? `\n\nLIVE SEMRUSH DATA for "${firstKeyword}" (columns: Ph=keyword phrase, Nq=monthly searches, Cp=CPC, Co=competition):\n${data}\n\nUse this real data to anchor keyword metrics (volume, CPC, competition). Extend from these seeds to build the full cluster set.`
+          : `\n\nLIVE SEARCHATLAS CONTENT GAP DATA — keywords ${competitorDomains.join(", ")} rank for that "${domain}" does not:\n${JSON.stringify(data, null, 2)}\n\nFold these directly into the keyword clusters as content-gap opportunities — they are real gaps, not estimates.`,
+    {
+      ahrefs: domain ? (apiKey) => fetchAhrefsOrganicKeywords(apiKey, domain) : undefined,
+      semrush: firstKeyword ? (apiKey) => fetchSemrushPhraseThis(apiKey, firstKeyword, database) : undefined,
+      searchAtlas: domain && competitorDomains.length > 0
+        ? (apiKey) => fetchSearchAtlasKeywordGap(apiKey, domain, competitorDomains, database)
+        : undefined,
+    },
+  );
+  const source = liveResult.source;
+  if (liveResult.source === "live") liveDataSection = liveResult.section;
   // --- End live API ---
 
   const systemPrompt = `You are an expert SEO strategist and keyword researcher with 15+ years of experience. Your task is to expand seed keywords into comprehensive keyword clusters with article briefs.
@@ -166,7 +145,7 @@ Aim for at least 4 distinct clusters covering different buyer journey stages.`;
     delete output.simulationNote;
   } else {
     output.simulationNote =
-      "Connect Ahrefs, Semrush, or Google Keyword Planner in Settings to enable live search volume, keyword difficulty, and CPC data";
+      "Connect Ahrefs, Semrush, or SearchAtlas in Settings to enable live search volume, keyword difficulty, and CPC data. Add competitor domains to also pull real content-gap keywords via SearchAtlas.";
   }
 
   const requireApproval = config.requireApproval !== false;

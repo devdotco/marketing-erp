@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -31,6 +33,7 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
   const numHeadlines = (config.numHeadlines as number) ?? 15;
   const numDescriptions = (config.numDescriptions as number) ?? 4;
   const negativesReview = (config.negativesReview as boolean) ?? true;
+  const accountId = ((config.accountId as string) ?? "").replace(/-/g, "");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -40,40 +43,45 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
   let liveAdsData: string | null = null;
   let source = "simulation";
 
-  try {
-    const adsIntegration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "GOOGLE_ADS",
-        },
+  const adsIntegration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_ADS",
       },
-    });
+    },
+  });
 
-    if (adsIntegration?.encryptedCredentials) {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        customer_id: string;
-      }>(adsIntegration.encryptedCredentials);
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated numbers as "live".
+  if (adsIntegration) {
+    try {
+      const creds = await googleCredentials(adsIntegration);
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const customerId = await resolvePropertyOverride("GOOGLE_ADS", creds, accountId);
+      if (!customerId) {
+        throw new AgentInputError(
+          "Google Ads is connected, but no account has been selected.",
+          "Open Integrations → Google Ads and choose an account.",
+          "integration_not_configured",
+        );
+      }
 
-      const customerId = creds.customer_id.replace(/-/g, "");
       const adsRes = await fetch(
-        `https://googleads.googleapis.com/v17/customers/${customerId}/googleAds:searchStream`,
+        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${customerId}/googleAds:searchStream`,
         {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${creds.access_token}`,
-            "Content-Type": "application/json",
-          },
+          headers: googleAdsHeaders(creds.access_token),
           body: JSON.stringify({
             query:
               "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
           }),
         }
       );
-
       if (!adsRes.ok) {
-        throw new Error(`Google Ads API error: ${adsRes.status}`);
+        throw new Error(`Google Ads API ${adsRes.status}: ${(await adsRes.text()).slice(0, 300)}`);
       }
 
       const chunks = (await adsRes.json()) as AdsStreamChunk[];
@@ -100,9 +108,10 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
 
       liveAdsData = JSON.stringify(campaigns, null, 2);
       source = "live";
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Ads", err instanceof Error ? err.message : String(err));
     }
-  } catch {
-    // fall through to simulation
   }
 
   const systemPrompt = `You are an expert Google Ads copywriter and search marketing strategist. You write RSA (Responsive Search Ad) headlines and descriptions that maximize Quality Score and CTR. You analyze search terms to identify high-value keywords and irrelevant negatives. You understand match types, intent signals, conversion-focused messaging, and spend anomaly detection.

@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -67,24 +69,34 @@ export const attributionHandler: AgentHandler = async (run, updateStatus) => {
   let liveChannelBlock: string | null = null;
   let source = "simulation";
 
-  try {
-    const ga4Integration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "GOOGLE_ANALYTICS_4",
-        },
+  const ga4Integration = await prisma.integration.findUnique({
+    where: {
+      workspaceId_provider: {
+        workspaceId: run.agentConfig.workspaceId,
+        provider: "GOOGLE_ANALYTICS_4",
       },
-    });
+    },
+  });
 
-    if (ga4Integration?.encryptedCredentials) {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        property_id: string;
-      }>(ga4Integration.encryptedCredentials);
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated numbers as "live".
+  if (ga4Integration) {
+    try {
+      const creds = await googleCredentials(ga4Integration);
+      // A submitted dropdown choice wins over the integration's saved
+      // default — but it's still just a client string, so it's checked
+      // against what this grant can actually reach first.
+      const ga4PropertyId = await resolvePropertyOverride("GOOGLE_ANALYTICS_4", creds, ga4Property);
+      if (!ga4PropertyId) {
+        throw new AgentInputError(
+          "Google Analytics 4 is connected, but no property has been selected.",
+          "Open Integrations → Google Analytics 4 and choose a property.",
+          "integration_not_configured",
+        );
+      }
 
       const ga4Res = await fetch(
-        `https://analyticsdata.googleapis.com/v1beta/properties/${creds.property_id}:runReport`,
+        `https://analyticsdata.googleapis.com/v1beta/properties/${ga4PropertyId}:runReport`,
         {
           method: "POST",
           headers: {
@@ -98,30 +110,32 @@ export const attributionHandler: AgentHandler = async (run, updateStatus) => {
           }),
         }
       );
-
-      if (ga4Res.ok) {
-        const ga4Data = (await ga4Res.json()) as Ga4Response;
-        const channelRows = (ga4Data.rows ?? []).map((row) => ({
-          channel: row.dimensionValues[0]?.value ?? "Unknown",
-          sessions: Number(row.metricValues[0]?.value ?? 0),
-          conversions: Number(row.metricValues[1]?.value ?? 0),
-        }));
-
-        const totalSessions = channelRows.reduce((s, r) => s + r.sessions, 0);
-        const totalConversions = channelRows.reduce((s, r) => s + r.conversions, 0);
-
-        const enriched = channelRows.map((r) => ({
-          ...r,
-          sessionPct: totalSessions > 0 ? Math.round((r.sessions / totalSessions) * 1000) / 10 : 0,
-          conversionPct: totalConversions > 0 ? Math.round((r.conversions / totalConversions) * 1000) / 10 : 0,
-        }));
-
-        liveChannelBlock = `Live GA4 Session & Conversion Data by Channel (Last ${windowDays} days, property: ${creds.property_id}):\n${JSON.stringify(enriched, null, 2)}\n\nTotal sessions: ${totalSessions} | Total conversions: ${totalConversions}`;
-        source = "live";
+      if (!ga4Res.ok) {
+        throw new Error(`GA4 Data API ${ga4Res.status}: ${(await ga4Res.text()).slice(0, 300)}`);
       }
+
+      const ga4Data = (await ga4Res.json()) as Ga4Response;
+      const channelRows = (ga4Data.rows ?? []).map((row) => ({
+        channel: row.dimensionValues[0]?.value ?? "Unknown",
+        sessions: Number(row.metricValues[0]?.value ?? 0),
+        conversions: Number(row.metricValues[1]?.value ?? 0),
+      }));
+
+      const totalSessions = channelRows.reduce((s, r) => s + r.sessions, 0);
+      const totalConversions = channelRows.reduce((s, r) => s + r.conversions, 0);
+
+      const enriched = channelRows.map((r) => ({
+        ...r,
+        sessionPct: totalSessions > 0 ? Math.round((r.sessions / totalSessions) * 1000) / 10 : 0,
+        conversionPct: totalConversions > 0 ? Math.round((r.conversions / totalConversions) * 1000) / 10 : 0,
+      }));
+
+      liveChannelBlock = `Live GA4 Session & Conversion Data by Channel (Last ${windowDays} days, property: ${ga4PropertyId}):\n${JSON.stringify(enriched, null, 2)}\n\nTotal sessions: ${totalSessions} | Total conversions: ${totalConversions}`;
+      source = "live";
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Analytics 4", err instanceof Error ? err.message : String(err));
     }
-  } catch {
-    // fall through to simulation
   }
 
   const liveDataSection = liveChannelBlock

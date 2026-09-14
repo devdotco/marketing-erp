@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { saveAgentConfig } from "@/lib/actions/agents";
 import type { AgentInput } from "@/lib/agent-metadata";
+import { ResourceSelect } from "@/components/ui/ResourceSelect";
 import Link from "next/link";
 
 interface ConfigureFormProps {
@@ -106,6 +107,23 @@ export function ConfigureForm({
                     <option key={opt} value={opt}>{opt}</option>
                   ))}
                 </select>
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            ) : field.type === "integration_resource" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <ResourceSelect
+                  id={field.key}
+                  optionsUrl={`/api/integrations/google/resource/options?provider=${field.provider}`}
+                  value={String(values[field.key] ?? "")}
+                  onChange={(v) => handleChange(field.key, v)}
+                  className="input"
+                />
                 {field.hint && (
                   <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
                 )}

@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -58,14 +60,24 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
     },
   });
 
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated data as "live".
   if (integration) {
     try {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        property_url: string;
-      }>(integration.encryptedCredentials);
+      // Refreshes the hour-long access token first.
+      const creds = await googleCredentials(integration);
 
-      const propertyUrl = creds.property_url || resolvedSiteUrl;
+      // Only the explicit "siteUrl" dropdown value is validated against the
+      // grant here — resolvedSiteUrl's Business Profile fallback is not
+      // something the user chose, so it's used only if nothing else resolves.
+      const propertyUrl = (await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, siteUrl)) || resolvedSiteUrl;
+      if (!propertyUrl) {
+        throw new AgentInputError(
+          "Google Search Console is connected, but no property has been selected.",
+          "Open Integrations → Google Search Console and choose a property.",
+          "integration_not_configured",
+        );
+      }
       const encodedUrl = encodeURIComponent(propertyUrl);
       const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
       const headers: Record<string, string> = {
@@ -92,56 +104,58 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
           rowLimit: 25000,
         }),
       });
+      if (!res.ok) {
+        throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      }
 
-      if (res.ok) {
-        const data = (await res.json()) as GscResponse;
-        const rows = data.rows ?? [];
+      const data = (await res.json()) as GscResponse;
+      const rows = data.rows ?? [];
 
-        // Build brand name tokens for matching (business name + domain parts)
-        const brandTokens: string[] = [];
-        if (businessProfile?.businessName) {
-          // Break the name into words, filter short words
-          brandTokens.push(
-            ...businessProfile.businessName
-              .toLowerCase()
-              .split(/\s+/)
-              .filter((w) => w.length > 3)
-          );
-        }
-        if (resolvedSiteUrl) {
-          // Extract domain without TLD
-          const domainMatch = resolvedSiteUrl.match(/(?:https?:\/\/)?(?:www\.)?([^./]+)/);
-          if (domainMatch?.[1]) brandTokens.push(domainMatch[1].toLowerCase());
-        }
+      // Build brand name tokens for matching (business name + domain parts)
+      const brandTokens: string[] = [];
+      if (businessProfile?.businessName) {
+        // Break the name into words, filter short words
+        brandTokens.push(
+          ...businessProfile.businessName
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w) => w.length > 3)
+        );
+      }
+      if (resolvedSiteUrl) {
+        // Extract domain without TLD
+        const domainMatch = resolvedSiteUrl.match(/(?:https?:\/\/)?(?:www\.)?([^./]+)/);
+        if (domainMatch?.[1]) brandTokens.push(domainMatch[1].toLowerCase());
+      }
 
-        // Separate branded vs non-branded queries
-        const isBranded = (query: string): boolean => {
-          if (brandTokens.length === 0) return false;
-          const q = query.toLowerCase();
-          return brandTokens.some((t) => q.includes(t));
-        };
+      // Separate branded vs non-branded queries
+      const isBranded = (query: string): boolean => {
+        if (brandTokens.length === 0) return false;
+        const q = query.toLowerCase();
+        return brandTokens.some((t) => q.includes(t));
+      };
 
-        const brandedRows = rows
-          .filter((r) => isBranded(r.keys[0]))
-          .sort((a, b) => b.impressions - a.impressions)
-          .slice(0, 200);
+      const brandedRows = rows
+        .filter((r) => isBranded(r.keys[0]))
+        .sort((a, b) => b.impressions - a.impressions)
+        .slice(0, 200);
 
-        const nonBrandedHighImpression = rows
-          .filter((r) => !isBranded(r.keys[0]))
-          .sort((a, b) => b.impressions - a.impressions)
-          .slice(0, 100);
+      const nonBrandedHighImpression = rows
+        .filter((r) => !isBranded(r.keys[0]))
+        .sort((a, b) => b.impressions - a.impressions)
+        .slice(0, 100);
 
-        const totalBrandedImpressions = brandedRows.reduce((s, r) => s + r.impressions, 0);
-        const totalBrandedClicks = brandedRows.reduce((s, r) => s + r.clicks, 0);
-        const avgBrandedPosition =
-          brandedRows.length > 0
-            ? brandedRows.reduce((s, r) => s + r.position, 0) / brandedRows.length
-            : 0;
+      const totalBrandedImpressions = brandedRows.reduce((s, r) => s + r.impressions, 0);
+      const totalBrandedClicks = brandedRows.reduce((s, r) => s + r.clicks, 0);
+      const avgBrandedPosition =
+        brandedRows.length > 0
+          ? brandedRows.reduce((s, r) => s + r.position, 0) / brandedRows.length
+          : 0;
 
-        const totalNonBrandedImpressions = nonBrandedHighImpression.reduce((s, r) => s + r.impressions, 0);
-        const totalNonBrandedClicks = nonBrandedHighImpression.reduce((s, r) => s + r.clicks, 0);
+      const totalNonBrandedImpressions = nonBrandedHighImpression.reduce((s, r) => s + r.impressions, 0);
+      const totalNonBrandedClicks = nonBrandedHighImpression.reduce((s, r) => s + r.clicks, 0);
 
-        gscBrandedContext = `REAL GSC BRANDED + QUERY DATA (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
+      gscBrandedContext = `REAL GSC BRANDED + QUERY DATA (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
 Property: ${propertyUrl}
 Total queries with data: ${rows.length}
 Brand tokens used for matching: ${brandTokens.join(", ") || "none (no business name configured)"}
@@ -159,10 +173,10 @@ TOP NON-BRANDED HIGH-IMPRESSION QUERIES (relevant for AI citation gap analysis):
 Top queries:
 ${JSON.stringify(nonBrandedHighImpression.map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, ctr: r.ctr, position: r.position })), null, 2)}`;
 
-        isLive = true;
-      }
-    } catch {
-      // Fall through to simulation
+      isLive = true;
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Search Console", err instanceof Error ? err.message : String(err));
     }
   }
 

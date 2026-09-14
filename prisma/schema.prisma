@@ -199,10 +199,12 @@ enum IntegrationProvider {
   WORDPRESS
   STORYBLOK
   WEBFLOW
+  PAYLOAD
   MAILCHIMP
   KLAVIYO
   AHREFS
   SEMRUSH
+  SEARCH_ATLAS
   CARTESIA
   TRANSISTOR
   GMAIL
@@ -213,6 +215,10 @@ enum IntegrationProvider {
   APOLLO
   GO_HIGH_LEVEL
   ANTHROPIC
+  /// erp.io CRM (app.erp.io/crm) — per-tenant API key created in that CRM.
+  /// Lets Email Marketing stage sequences/enrollments there in addition to
+  /// Mailchimp/Klaviyo/Instantly/Apollo. See lib/integrations/crm-erp-io.ts.
+  CRM_ERP_IO
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────
@@ -353,6 +359,11 @@ model OutboundProspect {
   channel           OutboundChannel @default(EMAIL_ONLY)
   status            OutboundStatus  @default(PENDING)
   intelligence      Json?
+  /// Apollo.io organization/person/job-postings enrichment the Strategist fetched for this
+  /// prospect, each keyed section carrying its own `fetchedAt` so a freshness window (default 30
+  /// days) decides whether a later run re-spends a credit or reuses this. Never contains a
+  /// personal email or phone reveal — see lib/agent-handlers/outbound-strategist.ts.
+  apolloEnrichment  Json?
   instantlyLeadId   String?
   aimfoxLeadId      String?
   ghlContactId      String?

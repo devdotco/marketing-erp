@@ -1,7 +1,9 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
@@ -12,12 +14,6 @@ interface GbpLocalPost {
   summary?: string;
   topicType?: string;
   createTime?: string;
-}
-
-interface GbpQuestion {
-  name?: string;
-  text?: string;
-  upvoteCount?: number;
 }
 
 export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
@@ -67,52 +63,50 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
   let gbpCreds: { access_token: string; account_id: string; location_id: string } | null = null;
   let isLive = false;
   let liveContext = "";
-  let existingQuestions: GbpQuestion[] = [];
 
+  // Not connected → simulating below is fine. Connected but the call fails →
+  // fail the run rather than quietly ship simulated content as "live".
   if (integration) {
     try {
-      gbpCreds = await decryptCredentials<{
-        access_token: string;
-        account_id: string;
-        location_id: string;
-      }>(integration.encryptedCredentials);
+      const creds = await googleCredentials(integration);
+      // A submitted dropdown choice ("accountId/locationId") wins over the
+      // integration's saved default — but it's still just a client string,
+      // so it's checked against what this grant can actually reach first.
+      const resolvedLocation = await resolvePropertyOverride("GOOGLE_BUSINESS_PROFILE", creds, gbpLocation);
+      const [resolvedAccountId, resolvedLocationId] = resolvedLocation
+        ? resolvedLocation.split("/")
+        : [creds.account_id, creds.location_id];
+      if (!resolvedAccountId || !resolvedLocationId) {
+        throw new AgentInputError(
+          "Google Business Profile is connected, but no location has been selected.",
+          "Open Integrations → Google Business Profile and choose a location.",
+          "integration_not_configured",
+        );
+      }
+      gbpCreds = { access_token: creds.access_token, account_id: resolvedAccountId, location_id: resolvedLocationId };
 
+      // Local Posts is still live on the legacy v4 host. Its sibling Q&A API
+      // was discontinued 2025-11-03 — do not add a /questions call back here.
       const baseUrl = `https://mybusiness.googleapis.com/v4/accounts/${gbpCreds.account_id}/locations/${gbpCreds.location_id}`;
-      const authHeaders = { Authorization: `Bearer ${gbpCreds.access_token}` };
-
-      const [postsRes, questionsRes] = await Promise.all([
-        fetch(`${baseUrl}/localPosts?pageSize=5`, { headers: authHeaders }),
-        fetch(`${baseUrl}/questions?pageSize=10`, { headers: authHeaders }),
-      ]);
-
-      if (postsRes.ok) {
-        const postsData = (await postsRes.json()) as { localPosts?: GbpLocalPost[] };
-        const recentPosts = postsData.localPosts ?? [];
-        if (recentPosts.length > 0) {
-          liveContext += "\nRecent GBP posts (last 5 — avoid repeating these topics):\n";
-          for (const p of recentPosts) {
-            liveContext += `- [${p.topicType ?? "POST"}] ${p.summary ?? "(no summary)"} (${p.createTime ?? ""})\n`;
-          }
-        }
-        isLive = true;
+      const postsRes = await fetch(`${baseUrl}/localPosts?pageSize=5`, {
+        headers: { Authorization: `Bearer ${gbpCreds.access_token}` },
+      });
+      if (!postsRes.ok) {
+        throw new Error(`Business Profile Local Posts API ${postsRes.status}: ${(await postsRes.text()).slice(0, 300)}`);
       }
 
-      if (questionsRes.ok) {
-        const questionsData = (await questionsRes.json()) as { questions?: GbpQuestion[] };
-        existingQuestions = questionsData.questions ?? [];
-        if (existingQuestions.length > 0) {
-          liveContext += "\nExisting Q&A already on the GBP listing (do not duplicate):\n";
-          for (const q of existingQuestions.slice(0, 5)) {
-            liveContext += `- ${q.text ?? "(no text)"}\n`;
-          }
+      const postsData = (await postsRes.json()) as { localPosts?: GbpLocalPost[] };
+      const recentPosts = postsData.localPosts ?? [];
+      if (recentPosts.length > 0) {
+        liveContext += "\nRecent GBP posts (last 5 — avoid repeating these topics):\n";
+        for (const p of recentPosts) {
+          liveContext += `- [${p.topicType ?? "POST"}] ${p.summary ?? "(no summary)"} (${p.createTime ?? ""})\n`;
         }
-        isLive = true;
       }
-    } catch {
-      // decryption or network error — fall back to simulation
-      gbpCreds = null;
-      isLive = false;
-      liveContext = "";
+      isLive = true;
+    } catch (err) {
+      if (err instanceof AgentInputError) throw err;
+      throw liveCallFailed("Google Business Profile", err instanceof Error ? err.message : String(err));
     }
   }
   // --- end live GBP setup ---
