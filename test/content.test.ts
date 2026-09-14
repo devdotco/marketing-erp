@@ -12,7 +12,7 @@ import { buildResearchAsk } from "@/lib/content/research";
 import { domainList } from "@/lib/content/domains";
 import { getPreset, resolveProfile, NEUTRAL_PROFILE } from "@/lib/content/editorial";
 import { isDesignatedForPlatformKey, platformKeyEligibility } from "@/lib/ai/client";
-import { normaliseArticle, renderHtml } from "@/lib/content/article";
+import { normaliseArticle, renderHtml, SUBMIT_ARTICLE_TOOL, submittedFields } from "@/lib/content/article";
 
 let failures = 0;
 const check = (name: string, cond: boolean, got?: unknown) => {
@@ -239,6 +239,25 @@ check("every filter entry is a plain hostname", [...prose.preferredSources, ...p
 check("a domain named inside prose is NOT blocked (vdr.ai is the client)", !prose.blockedDomains.includes("vdr.ai"), prose.blockedDomains);
 check("the prose blocked entry reaches the research ask", buildResearchAsk(prose).includes("other competitors of vdr.ai"));
 check("domainList dedupes and drops junk", JSON.stringify(domainList(["a.com", "https://www.a.com/x", "not a domain", "*.b.com"])) === '["a.com"]', domainList(["a.com", "https://www.a.com/x", "not a domain", "*.b.com"]));
+
+// 9b. The article schema must not admit an empty article. Strict mode enforces
+// minItems 0/1 and nothing else, so the body nodes carry minItems 1.
+{
+  const schema = SUBMIT_ARTICLE_TOOL.input_schema as unknown as {
+    properties: { intro_blocks: { minItems?: number }; sections: { minItems?: number; items: { properties: { blocks: { minItems?: number } } } } };
+    definitions: { paragraph: { minItems?: number }; block: { properties: { items: { minItems?: number } } } };
+  };
+  check("sections requires at least one", schema.properties.sections.minItems === 1);
+  check("a section requires at least one block", schema.properties.sections.items.properties.blocks.minItems === 1);
+  check("intro requires at least one block", schema.properties.intro_blocks.minItems === 1);
+  check("a paragraph requires at least one run", schema.definitions.paragraph.minItems === 1);
+  check("a list requires at least one item", schema.definitions.block.properties.items.minItems === 1);
+  const walkBad = (n: unknown): boolean =>
+    Array.isArray(n) ? n.some(walkBad) : !!n && typeof n === "object" &&
+      (("minItems" in (n as object) && ![0, 1].includes((n as { minItems: number }).minItems)) || ["maxItems", "minLength", "maxLength", "minimum", "maximum"].some((k) => k in (n as object)) || Object.values(n as object).some(walkBad));
+  check("no constraint strict mode rejects", !walkBad(SUBMIT_ARTICLE_TOOL.input_schema));
+  check("empty-submission diagnostics show block counts", submittedFields({ title: "x", sections: [{ heading: "h", blocks: [] }] }).includes("blocks per section: 0 item(s)"));
+}
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

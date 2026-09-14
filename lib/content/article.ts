@@ -138,11 +138,17 @@ export const SUBMIT_ARTICLE_TOOL = {
         type: "array",
         description:
           "Lead content before the first subheading — 1-2 paragraphs. Never empty: an article that opens straight into a subheading is a defect.",
+        minItems: 1,
         items: { $ref: "#/definitions/block" },
       },
       sections: {
         type: "array",
         description: "The article body, broken into subheaded sections.",
+        // minItems 0 or 1 is the only array constraint strict mode enforces, and
+        // 1 is the one that matters: without it a schema-valid submission could
+        // carry every field and no article. A live run (cmu1jd4uz…) did exactly
+        // that on both the first and the corrective round.
+        minItems: 1,
         items: {
           type: "object",
           required: ["heading", "blocks"],
@@ -156,6 +162,7 @@ export const SUBMIT_ARTICLE_TOOL = {
               type: "array",
               description:
                 "The section content, in order. Each block is either a prose paragraph or a list. Use a list whenever you present a set of discrete, parallel items.",
+              minItems: 1,
               items: { $ref: "#/definitions/block" },
             },
           },
@@ -227,6 +234,7 @@ export const SUBMIT_ARTICLE_TOOL = {
       paragraph: {
         type: "array",
         description: "A sequence of text runs — one prose paragraph, or one list item.",
+        minItems: 1,
         items: {
           type: "object",
           required: ["text"],
@@ -263,6 +271,7 @@ export const SUBMIT_ARTICLE_TOOL = {
           items: {
             type: "array",
             description: 'For type="list" ONLY: each entry is one list item, itself a sequence of runs.',
+            minItems: 1,
             items: { $ref: "#/definitions/paragraph" },
           },
         },
@@ -289,10 +298,22 @@ export function hasArticleBody(submitted: SubmittedArticle | undefined): boolean
   );
 }
 
-/** Field names present on a submission, for diagnosing an empty one. */
+/**
+ * What a submission actually held, for diagnosing an empty one. Field names
+ * alone were not enough: a failed run listed "sections" as present, which hid
+ * whether it was an empty list, a string, or sections with no blocks.
+ */
 export function submittedFields(submitted: unknown): string {
   if (typeof submitted !== "object" || submitted === null) return `(input was ${typeof submitted})`;
-  return Object.keys(submitted).join(", ") || "(no fields)";
+  const input = submitted as Record<string, unknown>;
+  const names = Object.keys(input).join(", ") || "(no fields)";
+  const shape = (value: unknown) =>
+    Array.isArray(value) ? `${value.length} item(s)` : value === undefined ? "missing" : typeof value;
+  const sections = input.sections;
+  const perSection = Array.isArray(sections)
+    ? ` [blocks per section: ${sections.map((s) => (s && typeof s === "object" ? shape((s as Record<string, unknown>).blocks) : typeof s)).join(", ") || "none"}]`
+    : "";
+  return `${names}; intro_blocks ${shape(input.intro_blocks)}, sections ${shape(sections)}${perSection}`;
 }
 
 export function normaliseArticle(
