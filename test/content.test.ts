@@ -8,6 +8,8 @@ import { resolveInputs, missingRequiredInputs } from "@/lib/agents/inputs";
 import { textFrom, jsonFrom } from "@/lib/ai/extract";
 import { runQc } from "@/lib/content/qc";
 import { buildBrief } from "@/lib/content/brief";
+import { buildResearchAsk } from "@/lib/content/research";
+import { domainList } from "@/lib/content/domains";
 import { getPreset, resolveProfile, NEUTRAL_PROFILE } from "@/lib/content/editorial";
 import { isDesignatedForPlatformKey, platformKeyEligibility } from "@/lib/ai/client";
 import { normaliseArticle, renderHtml } from "@/lib/content/article";
@@ -215,6 +217,28 @@ check(
   "an empty allowlist grants nobody, whatever the flag says",
   !platformKeyEligibility(ws("ours", true)).eligible,
 );
+
+// 9. Free text in the domain fields must never reach web_search's filters.
+// Production run cmu1ilt6r000bqhc2gae1232d died in 1s on exactly these inputs:
+// the API 400s the whole request on one non-hostname entry.
+const prose = buildBrief(
+  {
+    topicBrief: "AI virtual data rooms",
+    preferredSources: "High authority sites like hbr.org etc. ",
+    blockedDomains: "intralinks.com, https://www.DealNexus.com/about, other competitors of vdr.ai ",
+  },
+  null,
+  NEUTRAL_PROFILE,
+  "seed",
+);
+const hostOnly = (d: string) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d);
+check("a sentence in preferred sources is not an allowlist", prose.preferredSources.length === 0, prose.preferredSources);
+check("…it is kept as guidance instead", prose.preferredSourceNotes[0] === "High authority sites like hbr.org etc.", prose.preferredSourceNotes);
+check("real blocked domains are normalised to bare hosts", ["intralinks.com", "dealnexus.com"].every((d) => prose.blockedDomains.includes(d)), prose.blockedDomains);
+check("every filter entry is a plain hostname", [...prose.preferredSources, ...prose.blockedDomains].every(hostOnly), prose.blockedDomains);
+check("a domain named inside prose is NOT blocked (vdr.ai is the client)", !prose.blockedDomains.includes("vdr.ai"), prose.blockedDomains);
+check("the prose blocked entry reaches the research ask", buildResearchAsk(prose).includes("other competitors of vdr.ai"));
+check("domainList dedupes and drops junk", JSON.stringify(domainList(["a.com", "https://www.a.com/x", "not a domain", "*.b.com"])) === '["a.com"]', domainList(["a.com", "https://www.a.com/x", "not a domain", "*.b.com"]));
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

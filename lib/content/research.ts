@@ -4,6 +4,7 @@ import { createMessage } from "@/lib/ai/messages";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { asArray, strictSchema } from "./article";
 import type { ContentBrief } from "./brief";
+import { domainList } from "./domains";
 
 export interface VettedSource {
   url: string;
@@ -111,19 +112,6 @@ function webSearchTool(brief: ContentBrief): Anthropic.WebSearchTool20250305 {
   return tool;
 }
 
-/** Bare, deduped hosts. Both search filters reject a list with a repeat in it. */
-export function domainList(values: string[]): string[] {
-  return [...new Set(values.map(bareDomain).filter(Boolean))];
-}
-
-function bareDomain(value: string): string {
-  return value
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/^www\./i, "")
-    .split("/")[0]!;
-}
-
 /** The research instruction. Exported so it can be exercised without a full run. */
 export function buildResearchAsk(brief: ContentBrief): string {
   return [
@@ -146,6 +134,12 @@ export function buildResearchAsk(brief: ContentBrief): string {
       ? `RECENCY: prefer sources published within the last ${brief.sourceRecencyYears} year${brief.sourceRecencyYears === 1 ? "" : "s"}. An older source is acceptable only when it is the primary or definitive one (an originating study, a standard, a statute) — say so in its "supports" line when you keep one.`
       : "",
     brief.blockedDomains.length > 0 ? `Never return these domains: ${brief.blockedDomains.join(", ")}` : "",
+    brief.preferredSourceNotes.length > 0
+      ? `Source preferences from the brief (guidance, not a hard filter):\n- ${brief.preferredSourceNotes.join("\n- ")}`
+      : "",
+    brief.blockedSourceNotes.length > 0
+      ? `Sources the brief rules out — judge each result against these and leave out anything that matches:\n- ${brief.blockedSourceNotes.join("\n- ")}`
+      : "",
     "",
     "Then call submit_research. Copy every URL verbatim from a search result — never reconstruct one from memory, and never include a page you did not actually see returned.",
   ]

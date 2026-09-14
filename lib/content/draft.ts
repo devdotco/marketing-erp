@@ -13,7 +13,8 @@ import {
   type SubmittedArticle,
 } from "./article";
 import { buildSystemPrompt, renderLengthInstruction, type ContentBrief } from "./brief";
-import { domainList, renderResearch, type ResearchResult } from "./research";
+import { renderResearch, type ResearchResult } from "./research";
+import { domainList } from "./domains";
 
 export interface DraftResult {
   article: Article;

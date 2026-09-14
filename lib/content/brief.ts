@@ -1,4 +1,5 @@
 import { bool, lines, num, str } from "@/lib/agents/inputs";
+import { splitDomainEntries } from "./domains";
 import {
   renderSourcingRules,
   renderStructureRules,
@@ -62,8 +63,14 @@ export interface ContentBrief {
   webResearch: boolean;
   includeStatistics: boolean;
   sourceRecencyYears: number;
+  /** Bare hostnames only — these become web_search's allowed_domains. */
   preferredSources: string[];
+  /** Bare hostnames only — web_search's blocked_domains, and QC's link check. */
   blockedDomains: string[];
+  /** What was typed into Preferred sources that is not a hostname ("high authority sites like…"). */
+  preferredSourceNotes: string[];
+  /** What was typed into Never link that is not a hostname ("other competitors of…"). */
+  blockedSourceNotes: string[];
   competitorUrls: string[];
   proofPoints: string[];
 
@@ -147,6 +154,11 @@ export function buildBrief(
     .filter(Boolean)
     .join("\n");
 
+  // Free text in, filter-safe hosts out. See lib/content/domains.ts for the
+  // run this killed.
+  const preferred = splitDomainEntries(lines(inputs, "preferredSources", 12));
+  const blocked = splitDomainEntries([...lines(inputs, "blockedDomains", 20), ...profile.bannedSourceDomains]);
+
   return {
     contentType: str(inputs, "contentType", "Blog post"),
     workingTitle: str(inputs, "workingTitle"),
@@ -169,10 +181,10 @@ export function buildBrief(
     webResearch: bool(inputs, "webResearch", true),
     includeStatistics: bool(inputs, "includeStatistics", true),
     sourceRecencyYears: num(inputs, "sourceRecencyYears", 3, { min: 0, max: 20 }),
-    preferredSources: lines(inputs, "preferredSources", 12),
-    blockedDomains: [
-      ...new Set([...lines(inputs, "blockedDomains", 20), ...profile.bannedSourceDomains]),
-    ],
+    preferredSources: preferred.domains,
+    blockedDomains: blocked.domains,
+    preferredSourceNotes: preferred.notes,
+    blockedSourceNotes: blocked.notes,
     competitorUrls: lines(inputs, "competitorUrls", 5),
     proofPoints: lines(inputs, "proofPoints", 10),
 
