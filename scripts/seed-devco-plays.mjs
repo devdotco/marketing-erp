@@ -27,7 +27,8 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-const DEVCO_WORKSPACE_SLUG = "dev-co";
+// Production's slug is "devco"; "dev-co" kept in case it is ever recreated with a hyphen.
+const DEVCO_WORKSPACE_SLUGS = ["devco", "dev-co"];
 const DEVCO_WORKSPACE_NAME = "dev.co";
 
 const PLAYS = [
@@ -113,11 +114,11 @@ const PLAYS = [
 
 async function main() {
   const workspace =
-    (await prisma.workspace.findUnique({ where: { slug: DEVCO_WORKSPACE_SLUG } })) ??
-    (await prisma.workspace.findFirst({ where: { name: DEVCO_WORKSPACE_NAME } }));
+    (await prisma.workspace.findFirst({ where: { slug: { in: DEVCO_WORKSPACE_SLUGS } } })) ??
+    (await prisma.workspace.findFirst({ where: { name: { equals: DEVCO_WORKSPACE_NAME, mode: "insensitive" } } }));
 
   if (!workspace) {
-    console.log(`No workspace found (slug "${DEVCO_WORKSPACE_SLUG}" or name "${DEVCO_WORKSPACE_NAME}") — nothing to seed.`);
+    console.log(`No workspace found (slug ${DEVCO_WORKSPACE_SLUGS.join("/")} or name "${DEVCO_WORKSPACE_NAME}") — nothing to seed.`);
     return;
   }
 
