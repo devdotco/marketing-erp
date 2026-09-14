@@ -16,64 +16,67 @@ export const outboundCroHandler: AgentHandler = async (run, updateStatus) => {
 
   const lookbackDays = typeof config.lookbackDays === "number" ? config.lookbackDays : 7;
   const externalMetrics = input.weeklyMetrics as Record<string, unknown> | undefined;
+  const workspaceId = run.agentConfig.workspaceId;
 
   // Query DB for prospect metrics from the past lookbackDays
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
 
-  const [allProspects, repliedProspects, interestedProspects, meetingProspects] = await Promise.all([
+  const [plays, addedByPlay, repliedProspects, interestedProspects, meetingProspects] = await Promise.all([
+    prisma.outboundPlay.findMany({ where: { workspaceId }, orderBy: { createdAt: "asc" } }),
+    // Grouped by playId (not just status, unlike this query before the Outbound Engine rebuild —
+    // that version summed EVERY play's prospect count into each row instead of that play's own).
     prisma.outboundProspect.groupBy({
-      by: ["status"],
-      where: { workspaceId: run.agentConfig.workspaceId, createdAt: { gte: since } },
+      by: ["playId"],
+      where: { workspaceId, createdAt: { gte: since } },
       _count: { id: true },
     }),
     prisma.outboundProspect.findMany({
-      where: {
-        workspaceId: run.agentConfig.workspaceId,
-        status: "REPLIED",
-        updatedAt: { gte: since },
-      },
-      include: { play: true },
+      where: { workspaceId, status: "REPLIED", updatedAt: { gte: since } },
+      select: { playId: true },
     }),
     prisma.outboundProspect.findMany({
-      where: {
-        workspaceId: run.agentConfig.workspaceId,
-        status: "INTERESTED",
-        interestedAt: { gte: since },
-      },
-      include: { play: true },
+      where: { workspaceId, status: "INTERESTED", interestedAt: { gte: since } },
+      select: { playId: true },
     }),
     prisma.outboundProspect.findMany({
-      where: {
-        workspaceId: run.agentConfig.workspaceId,
-        status: "MEETING_BOOKED",
-        meetingBookedAt: { gte: since },
-      },
-      include: { play: true },
+      where: { workspaceId, status: "MEETING_BOOKED", meetingBookedAt: { gte: since } },
+      select: { playId: true },
     }),
   ]);
 
-  // Build metrics per play
-  const playSlugs = ["DEV-01", "DEV-02", "DEV-03"];
-  const metrics = playSlugs.map((slug) => {
-    const replied = repliedProspects.filter((p) => p.play.slug === slug).length;
-    const interested = interestedProspects.filter((p) => p.play.slug === slug).length;
-    const meetings = meetingProspects.filter((p) => p.play.slug === slug).length;
-    const total = allProspects
-      .filter(() => true) // grouped by status, not play — approximate
-      .reduce((acc, g) => acc + g._count.id, 0);
-
-    return { playSlug: slug, prospectsAdded: total, replied, interested, meetings };
-  });
+  // Build metrics per play — every OutboundPlay this workspace actually has, not a fixed
+  // three-slug list. A workspace with no plays yet gets an empty analysis, not a report about
+  // plays it never created.
+  const metrics = plays.map((play) => ({
+    playSlug: play.slug,
+    playName: play.name,
+    prospectsAdded: addedByPlay.find((g) => g.playId === play.id)?._count.id ?? 0,
+    replied: repliedProspects.filter((p) => p.playId === play.id).length,
+    interested: interestedProspects.filter((p) => p.playId === play.id).length,
+    meetings: meetingProspects.filter((p) => p.playId === play.id).length,
+  }));
 
   const dbMetricsSummary = JSON.stringify(metrics, null, 2);
   const externalSummary = externalMetrics ? JSON.stringify(externalMetrics, null, 2) : null;
 
-  const systemPrompt = `You are an outbound CRO specialist for Dev.co. Every Friday you review outbound performance metrics per ICP play and make data-driven recommendations.
+  if (plays.length === 0) {
+    const output: Record<string, unknown> = {
+      dbMetrics: metrics,
+      executiveSummary: "No outbound plays exist for this workspace yet — nothing to analyse. Create a play on the Outbound Engine page (/outbound) and run Scout at least once first.",
+      generatedAt: new Date().toISOString(),
+      workspaceId,
+    };
+    const requireApproval = config.requireApproval !== false;
+    if (requireApproval) await updateStatus("AWAITING_APPROVAL", output);
+    return { output, costUsd: 0 };
+  }
+
+  const systemPrompt = `You are an outbound CRO specialist. Every Friday you review outbound performance metrics per ICP play and make data-driven recommendations.
 
 Your job:
 1. Identify which plays are performing above/below expectations
 2. Surface winning signals, personas, and messaging angles
-3. Recommend next week's volume allocation across the 3 plays
+3. Recommend next week's volume allocation across this workspace's plays
 4. Flag any copy or sequence changes worth testing
 
 Benchmark expectations:
@@ -84,16 +87,18 @@ Benchmark expectations:
 
 Always respond with valid JSON only — no markdown, no commentary.`;
 
-  const userPrompt = `Generate the weekly CRO analysis and recommendations for this Dev.co outbound engine.
+  const userPrompt = `Generate the weekly CRO analysis and recommendations for this workspace's outbound engine.
 
 Period: past ${lookbackDays} days
+
+Plays in this workspace: ${plays.map((p) => `${p.slug} (${p.name})`).join(", ")}
 
 DB Metrics (from outbound_prospect table):
 ${dbMetricsSummary}
 
 ${externalSummary ? `External metrics provided:\n${externalSummary}` : "Note: No external metrics provided. Base analysis on DB data only."}
 
-Return exactly this JSON structure:
+Return exactly this JSON structure — one playAnalysis entry and one nextWeekAllocation key per play listed above, using each play's own slug:
 {
   "period": {
     "days": ${lookbackDays},
@@ -101,8 +106,8 @@ Return exactly this JSON structure:
   },
   "playAnalysis": [
     {
-      "playSlug": "DEV-01",
-      "playName": "SaaS Engineering Capacity",
+      "playSlug": "string — one of the play slugs listed above",
+      "playName": "string",
       "metrics": {
         "prospectsAdded": 0,
         "replied": 0,
@@ -117,10 +122,8 @@ Return exactly this JSON structure:
     }
   ],
   "nextWeekAllocation": {
-    "DEV-01": 0,
-    "DEV-02": 0,
-    "DEV-03": 0,
     "totalDaily": 0,
+    "byPlay": { "playSlug": 0 },
     "allocationNote": "string"
   },
   "winningSignals": ["string"],
@@ -154,7 +157,7 @@ Return exactly this JSON structure:
 
   output.dbMetrics = metrics;
   output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
+  output.workspaceId = workspaceId;
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

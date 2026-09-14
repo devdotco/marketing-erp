@@ -391,7 +391,11 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
                   </div>
                 ))}
               </div>
-              <Link href="/integrations" className="btn btn-ghost btn-sm" style={{ marginTop: 12, paddingLeft: 0 }}>
+              <Link
+                href={agent.integrations.every((int) => int.includes("Social accounts")) ? "/social/accounts" : "/integrations"}
+                className="btn btn-ghost btn-sm"
+                style={{ marginTop: 12, paddingLeft: 0 }}
+              >
                 Manage integrations →
               </Link>
             </div>

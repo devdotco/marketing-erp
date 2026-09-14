@@ -1,5 +1,10 @@
 import {
   actualLinks,
+  allCalloutBlocks,
+  allChartBlocks,
+  allImageBlocks,
+  allStatBlocks,
+  allTableBlocks,
   articleText,
   blockText,
   countWords,
@@ -8,6 +13,7 @@ import {
   type Block,
 } from "./article";
 import type { ContentBrief } from "./brief";
+import type { ResearchResult } from "./research";
 
 export interface QcResult {
   /** Must be fixed. These are handed back to the writer as a repair round. */
@@ -22,6 +28,10 @@ export interface QcResult {
     internalLinks: number;
     fillerHits: number;
     longestParagraphSentences: number;
+    charts: number;
+    tables: number;
+    callouts: number;
+    images: number;
   };
 }
 
@@ -37,8 +47,14 @@ export interface QcResult {
  * Every word list and every threshold comes from the workspace's editorial
  * profile, never from a constant in this file. A tenant that allows em-dashes
  * and six-sentence paragraphs is not failing QC for it.
+ *
+ * `research` is optional so every existing pure caller (and every existing
+ * test in test/content.test.ts) keeps working unchanged; pass it to get the
+ * visual-data honesty checks (a chart or stat whose numbers don't trace to a
+ * verified research claim). Without it those checks are skipped rather than
+ * failing closed — the pipeline always has research in hand and passes it.
  */
-export function runQc(article: Article, brief: ContentBrief): QcResult {
+export function runQc(article: Article, brief: ContentBrief, research?: ResearchResult): QcResult {
   const defects: string[] = [];
   const warnings: string[] = [];
   const { profile } = brief;
@@ -72,8 +88,14 @@ export function runQc(article: Article, brief: ContentBrief): QcResult {
   // ── Length ─────────────────────────────────────────────────────────────────
   const words = article.wordCount;
   if (words < brief.length.min) {
+    // The brief's word count is a FLOOR, not a midpoint (owner decision,
+    // 2026-09-14, after a live run at 1299/1500 words passed QC). The exact
+    // deficit is the instruction, not the diagnosis — "add substance" alone
+    // got a draft that was forty words closer and still short; see
+    // draft.ts's overLength() for the identical lesson on the trim side.
+    const deficit = brief.length.min - words;
     defects.push(
-      `Word count ${words} is below the ${brief.length.label}-word band. Add substance, not padding: deepen the thinnest sections rather than adding a new one.`,
+      `Word count ${words} is below the ${brief.length.min}-word floor (band: ${brief.length.label}). Expand to at least ${brief.length.min} words: add ~${deficit} words, prioritising the key questions and must-cover items with the thinnest coverage. Deepen existing sections with real substance — more evidence, more specific detail — never padding, hedge-stacking, or restating a point already made.`,
     );
   } else if (words > brief.length.max) {
     defects.push(
@@ -199,8 +221,14 @@ export function runQc(article: Article, brief: ContentBrief): QcResult {
 
   // ── Links ──────────────────────────────────────────────────────────────────
   const links = actualLinks(article);
+  // brief.ctaUrl used to be missing here, which is exactly the false positive
+  // a live run hit: the brief's own app.vdr.ai sign-up CTA was on the client's
+  // site but counted as an EXTERNAL link because only siteUrl and the typed
+  // internalLinkTargets were treated as internal. A link to the brief's own
+  // call-to-action is definitionally internal, the same as a link to the
+  // site's own homepage or an internal-linking target.
   const internalHosts = new Set(
-    [brief.siteUrl, ...brief.internalLinks.map((l) => l.url)].map(hostOf).filter(Boolean) as string[],
+    [brief.siteUrl, brief.ctaUrl, ...brief.internalLinks.map((l) => l.url)].map(hostOf).filter(Boolean) as string[],
   );
   const external = links.filter((link) => !internalHosts.has(hostOf(link.url) ?? ""));
   const internal = links.filter((link) => internalHosts.has(hostOf(link.url) ?? ""));
@@ -389,6 +417,50 @@ export function runQc(article: Article, brief: ContentBrief): QcResult {
     }
   }
 
+  // ── Visuals ────────────────────────────────────────────────────────────────
+  const charts = allChartBlocks(article);
+  const tables = allTableBlocks(article);
+  const callouts = allCalloutBlocks(article);
+  const images = allImageBlocks(article);
+
+  // A block type present when the brief never asked for that visual type is a
+  // defect, not a warning: the writer used something outside what it was told
+  // it could use, the same as it would be for an FAQ nobody requested.
+  if (charts.length > 0 && !brief.visualTypes.charts) {
+    defects.push(`The brief did not ask for charts, but the article has ${charts.length}. Remove them, or convert the data to prose.`);
+  }
+  if (tables.length > 0 && !brief.visualTypes.tables) {
+    defects.push(`The brief did not ask for tables, but the article has ${tables.length}. Remove them, or convert to a list.`);
+  }
+  if (callouts.length > 0 && !brief.visualTypes.callouts) {
+    defects.push(`The brief did not ask for callout boxes, but the article has ${callouts.length}. Fold that content into ordinary prose.`);
+  }
+  if (images.length > 0 && !brief.visualTypes.images) {
+    defects.push(`The brief did not ask for AI images, but the article has ${images.length} image block(s). Remove them.`);
+  }
+
+  if (charts.length > brief.maxCharts) {
+    defects.push(`The article has ${charts.length} chart(s); the brief allows at most ${brief.maxCharts}. Remove the least essential ${charts.length - brief.maxCharts}.`);
+  }
+  if (tables.length > brief.maxTables) {
+    defects.push(`The article has ${tables.length} table(s); the brief allows at most ${brief.maxTables}. Remove the least essential ${tables.length - brief.maxTables}.`);
+  }
+  if (images.length > brief.maxImages) {
+    defects.push(`The article proposes ${images.length} image block(s); the brief allows at most ${brief.maxImages}. Cut to the ${brief.maxImages} that matter most — the hero first.`);
+  }
+  if (images.filter((i) => i.slot === "hero").length > 1) {
+    defects.push(`More than one image is marked slot="hero". An article has exactly one hero image; mark the rest "inline".`);
+  }
+
+  // Honesty: every chart and stat value, and every figure in a comparison
+  // table, must trace to a verified research claim. See findUntracedVisualData
+  // for the matching rule and the module doc comment on why a stat/chart's
+  // sourceUrl is a real, visible link in the rendered HTML but is NOT counted
+  // against externalLinkCount above — it cites the visual's data, not an
+  // editorial link placement, and is capped by maxCharts/maxTables/maxImages
+  // instead.
+  for (const finding of findUntracedVisualData(article, research)) defects.push(finding);
+
   return {
     defects,
     warnings,
@@ -400,6 +472,10 @@ export function runQc(article: Article, brief: ContentBrief): QcResult {
       internalLinks: internal.length,
       fillerHits,
       longestParagraphSentences: longestParagraph,
+      charts: charts.length,
+      tables: tables.length,
+      callouts: callouts.length,
+      images: images.length,
     },
   };
 }
@@ -538,6 +614,10 @@ function findUncitedFigures(article: Article): string[] {
   const blocks = [...article.introBlocks, ...article.sections.flatMap((s) => s.blocks)];
 
   for (const block of blocks) {
+    // Only prose and callouts carry runs. Table/stat/chart figures have their
+    // own dedicated honesty checks below (findUntracedVisualData) — this scan
+    // would crash on them (no .runs) if it didn't skip them here.
+    if (block.type !== "list" && block.type !== "paragraph" && block.type !== "callout") continue;
     const runs = block.type === "list" ? block.items.flat() : block.runs;
     const hasLink = runs.some((run) => run.link);
     if (hasLink) continue;
@@ -571,6 +651,7 @@ function findUnlinkedAttributions(article: Article): string[] {
     /\b(according to|a study by|research from|a report by|data from|a survey by|as reported by)\s+([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,3})/g;
 
   for (const block of blocks) {
+    if (block.type !== "list" && block.type !== "paragraph" && block.type !== "callout") continue;
     const runs = block.type === "list" ? block.items.flat() : block.runs;
     const linked = runs.some((run) => run.link);
     if (linked) continue;
@@ -581,6 +662,97 @@ function findUnlinkedAttributions(article: Article): string[] {
     }
   }
   return findings.slice(0, 5);
+}
+
+/**
+ * The honesty rule for visual data: every chart and stat value must come from
+ * a research claim bound to a verified source, and carry that source's exact
+ * URL — no invented data. A chart or stat that fails this is dropped or fixed
+ * in the repair round, the same as an uncited figure in prose.
+ *
+ * Matching is numeric: a value "traces" when every number it contains also
+ * appears in the text of a claim that is itself bound to the same sourceUrl.
+ * That is deliberately loose (it does not require exact phrasing) and
+ * deliberately strict (it requires the same URL, not just any claim in the
+ * whole research set) — a chart citing the wrong source for a right-looking
+ * number is exactly the failure this exists to catch.
+ *
+ * Table figures have no per-table sourceUrl field (tables are qualitative
+ * comparisons that may also carry a figure), so a table's numbers are checked
+ * against the whole claim set rather than one bound source.
+ */
+function findUntracedVisualData(article: Article, research: ResearchResult | undefined): string[] {
+  if (!research) return [];
+  const findings: string[] = [];
+  const verifiedUrls = new Set(research.sources.map((s) => s.url));
+  const claims = research.claims;
+
+  const tracesToSource = (value: string, sourceUrl: string): boolean => {
+    const valueNumbers = extractNumbers(value);
+    if (valueNumbers.length === 0) return false;
+    return claims.some(
+      (c) => c.sourceUrl === sourceUrl && valueNumbers.every((n) => extractNumbers(c.claim).includes(n)),
+    );
+  };
+
+  for (const stat of allStatBlocks(article)) {
+    if (!stat.sourceUrl || !verifiedUrls.has(stat.sourceUrl)) {
+      findings.push(
+        `The stat "${stat.label}: ${stat.value}" has no verified source URL. Every stat callout must carry the exact URL of the verified source that states it, or be removed.`,
+      );
+      continue;
+    }
+    if (!tracesToSource(stat.value, stat.sourceUrl)) {
+      findings.push(
+        `The stat "${stat.label}: ${stat.value}" does not trace to a verified research claim bound to its source URL. Bind it to a matching CLAIM EVIDENCE entry, or remove it — never invent the figure.`,
+      );
+    }
+  }
+
+  for (const chart of allChartBlocks(article)) {
+    if (!chart.sourceUrl || !verifiedUrls.has(chart.sourceUrl)) {
+      findings.push(
+        `The chart "${chart.title}" has no verified source URL. Every chart must carry the exact URL of the verified source its data comes from, or be removed.`,
+      );
+      continue;
+    }
+    const untraced = chart.series.filter((p) => !tracesToSource(String(p.value), chart.sourceUrl!));
+    if (untraced.length > 0) {
+      findings.push(
+        `The chart "${chart.title}" has ${untraced.length} data point(s) that do not trace to a verified research claim (${untraced.map((p) => `${p.label}: ${p.value}`).join(", ")}). Fix the values to match a verified claim, or remove the chart — never estimate a data point.`,
+      );
+    }
+  }
+
+  const claimNumbers = new Set(claims.flatMap((c) => extractNumbers(c.claim)));
+  for (const table of allTableBlocks(article)) {
+    for (const row of table.rows) {
+      for (const cell of row) {
+        if (!looksLikeStatisticText(cell)) continue;
+        const cellNumbers = extractNumbers(cell);
+        if (cellNumbers.every((n) => claimNumbers.has(n))) continue;
+        findings.push(
+          `The table "${table.caption || table.headers.join("/")}" has a figure (${quote(cell)}) that does not trace to a verified research claim. Every figure in a comparison table must come from a verified claim — fix it or remove the row.`,
+        );
+      }
+    }
+  }
+
+  return findings.slice(0, 8);
+}
+
+function extractNumbers(text: string): number[] {
+  return [...text.matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => parseFloat(m[0]));
+}
+
+/** Same "looks like a statistic, not an ordinary small number" heuristic findUncitedFigures uses. */
+function looksLikeStatisticText(text: string): boolean {
+  return (
+    /\d+(\.\d+)?\s?%/.test(text) ||
+    /[$£€]\s?\d/.test(text) ||
+    /\b\d+(\.\d+)?\s?(million|billion|trillion|percent)\b/i.test(text) ||
+    /\b(19|20)\d{2}\b/.test(text)
+  );
 }
 
 // ─── Small helpers ───────────────────────────────────────────────────────────

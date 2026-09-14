@@ -6,6 +6,7 @@ import { ByokPrompt } from "@/components/ui/ByokPrompt";
 import { getAgent } from "@/lib/agents";
 import Link from "next/link";
 import { RunActions } from "./RunActions";
+import { ArticleStats } from "@/components/runs/ArticleStats";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
@@ -137,7 +138,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: 20 }}>
+      <div className="run-layout">
         {/* Output */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {runError?.code === "no_api_key" && (
@@ -272,16 +273,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                     </p>
                   )}
                   <div
+                    className="article-preview"
                     style={{
-                      maxHeight: 400,
+                      maxHeight: 640,
                       overflow: "auto",
-                      fontSize: 13,
-                      lineHeight: 1.65,
-                      color: "var(--text-muted)",
                       background: "var(--surface-2)",
-                      padding: 16,
+                      padding: "16px 20px",
                       borderRadius: "var(--radius)",
-                      whiteSpace: "pre-wrap",
                     }}
                     dangerouslySetInnerHTML={{ __html: String(output["content"]) }}
                   />
@@ -329,6 +327,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
         {/* Metadata */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {hasReadableOutput && output && Boolean(output["content"]) && (
+            <ArticleStats output={output} input={run.input as Record<string, unknown> | null} />
+          )}
           <div className="card">
             <h3 style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-dim)", marginBottom: 14 }}>Run details</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

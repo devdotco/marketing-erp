@@ -132,6 +132,24 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
       fields: apiKey("Settings → API Keys → Create Private API Key, with Campaigns read/write access."),
     },
   },
+  OPENAI_IMAGES: {
+    name: "OpenAI Images",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "platform.openai.com/api-keys. Blog Writer uses this only to generate the AI images it asks for — it never touches any other OpenAI product.",
+      ),
+    },
+  },
+  GOOGLE_IMAGES: {
+    name: "Google Images (Gemini)",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "An API key from Google AI Studio (aistudio.google.com/apikey) — not a Google Cloud service account. Blog Writer uses this only to generate the AI images it asks for.",
+      ),
+    },
+  },
   WORDPRESS: {
     name: "WordPress",
     method: {
@@ -252,6 +270,13 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
           label: "Body field name",
           placeholder: "bodyHtml",
           hint: "The field on the posts collection holding the article body. Defaults to bodyHtml for HTML body format, content for Lexical.",
+          required: false,
+        },
+        {
+          key: "mediaCollection",
+          label: "Media collection slug",
+          placeholder: "media",
+          hint: "The upload-enabled collection Blog Writer uploads AI-generated images to. Defaults to media.",
           required: false,
         },
       ],
@@ -408,6 +433,7 @@ export function normaliseKeyCredentials(
     }
     credentials.bodyFormat = bodyFormat;
     credentials.bodyField = credentials.bodyField || (bodyFormat === "lexical" ? "content" : "bodyHtml");
+    credentials.mediaCollection = (credentials.mediaCollection || "media").toLowerCase();
 
     if (credentials.siteUrl) {
       try {

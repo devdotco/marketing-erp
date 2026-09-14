@@ -35,6 +35,11 @@ export interface OutboundEmailDelivery {
   personalization: Record<string, string>;
   instantlyLeadId?: string;
   source?: "instantly_live" | "simulation";
+  /** Set only on a delivery that failed to activate within a batch that had at least one other
+   * delivery succeed this same approval call — see on-approve.ts's outboundEmailOnApprove for why
+   * a batch doesn't abort on the first failure once real sends have already happened. Absent on
+   * every successfully staged/activated delivery. */
+  error?: string;
 }
 
 /** Pure — the exact body POST /leads gets. `skip_if_in_campaign` is Instantly's own dedupe

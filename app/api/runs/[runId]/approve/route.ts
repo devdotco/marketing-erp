@@ -3,7 +3,14 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { getOnApprove } from "@/lib/agent-handlers/on-approve";
+import { runOutboundChaining } from "@/lib/agent-handlers/chaining";
 import { AgentInputError } from "@/lib/ai/errors";
+
+/** Agents that need pipeline chaining evaluated right after approval, not just on completion —
+ * currently only Outbound Scout: it has no on-approve.ts hook of its own (approving it has no
+ * external side effect, only "let the Strategist see these prospects"), so nothing else in this
+ * route would otherwise run for it. See lib/agent-handlers/chaining.ts. */
+const POST_APPROVE_CHAIN = new Set(["outbound-scout"]);
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +60,14 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ ru
   }
 
   if (!onApprove) {
+    if (POST_APPROVE_CHAIN.has(run.agentConfig.agentSlug)) {
+      // Scout mutates nothing external on approval — this only enqueues the Strategist run, and
+      // is safe to attempt even if it's somehow called twice (see chaining.ts's unique-constraint
+      // idempotency). A chaining failure must not block the approval itself from having succeeded.
+      await runOutboundChaining({ ...run, status: "APPROVED" }).catch((err) =>
+        console.error(`[approve] run ${runId}: outbound chaining failed:`, err),
+      );
+    }
     return NextResponse.json(await prisma.agentRun.findUnique({ where: { id: runId } }));
   }
 

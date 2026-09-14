@@ -34,6 +34,12 @@ export interface DraftResult {
  * its trailing fields and reads downstream as a malformed article.
  *
  * Sonnet 5 accepts well over 64k here, so the ceiling is ours, not the model's.
+ *
+ * Checked 2026-09-14 against the word-count-floor fix (lengthBand in brief.ts
+ * now returns [target, target × 1.25] instead of ±15%): this is always called
+ * with brief.length.max, which grew with that change (e.g. 1500 words: 1725 →
+ * 1875), so the token budget grew with it automatically. No separate change
+ * needed here.
  */
 function maxTokensFor(words: number): number {
   return Math.min(64000, Math.max(20000, Math.round(words * 24)));
@@ -258,6 +264,21 @@ function overLength(article: Article, brief: ContentBrief): string {
 }
 
 /**
+ * The same lesson as overLength(), for the other side of the band. A live
+ * run (cmu1kgojj…) asked for 1500 words, got 1299, and "add substance" alone
+ * — with no number — was not enough of an instruction; the exact deficit is.
+ * brief.length.min is a FLOOR now (see lengthBand in brief.ts), so this fires
+ * for anything short of it. Word count here is prose-only (article.wordCount
+ * already excludes visual blocks — see article.ts) so a repair round can't
+ * satisfy this by padding the piece with charts instead of substance.
+ */
+export function underLength(article: Article, brief: ContentBrief): string {
+  const short = brief.length.min - article.wordCount;
+  if (short <= 0) return "";
+  return `This draft is ${article.wordCount} words, which is ${short} short of the ${brief.length.min}-word floor. Add AT LEAST ${short + 30} words — expand the sections covering the brief's key questions or must-cover items that currently have the thinnest treatment, with more evidence and more specific detail. Never pad: no hedge-stacking, no restating a point already made, no filler sentence that could be deleted without losing anything.`;
+}
+
+/**
  * The non-prose fields the brief asked for.
  *
  * `faq` and `image_briefs` are required fields on the tool, so the model always
@@ -379,6 +400,7 @@ export async function repairArticle(
     "",
     renderLengthInstruction(brief.length),
     overLength(article, brief),
+    underLength(article, brief),
     "",
     renderResearch(research, brief),
     "",

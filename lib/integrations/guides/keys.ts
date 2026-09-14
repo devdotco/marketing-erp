@@ -284,7 +284,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         fix: "Prospector never stages role addresses like info@ or noreply@ — check the run's skipped list for why each prospect was excluded, and widen Target Topics or lower the quality bar to surface prospects with named contacts.",
       },
     ],
-    privacy: "Both read and write, and it can send real cold email once you approve a run. Email Marketing's Instantly channel creates a campaign in Instantly's Draft status with no leads attached while staging — nothing sends while a run is awaiting approval; approving it moves the named Lead List's real leads in and activates it. Email Outbound targets an existing campaign you already run continuously (DEV-01-SAAS-V1, DEV-02-AGENCY-V1, DEV-03-PE-V1) rather than creating one, so its staging step makes no write to Instantly at all — it only looks up the campaign by name (read-only) and computes the personalised lead it would add. Only once a workspace admin approves the run does it call Instantly's lead-add API to enrol that one prospect, with skip_if_in_campaign set so a duplicate or retried approval can't enrol them a second time. Prospector's Outreach via Instantly step works like Email Marketing's channel but adds its own prospects directly: while the run is staging, it creates the campaign in Draft and adds every prospect with a real, non-generic email address — Instantly never sends from a Draft campaign, so this step alone sends nothing; approving activates the already-populated campaign. Whichever path, approving is what starts sending on Instantly's own schedule, and it cannot be undone from marketing-erp — pause the campaign directly in Instantly if you need to stop it. Rejecting Email Outbound makes no call to Instantly at all — nothing was ever written. Rejecting a Prospector run also makes no call to Instantly, so its staged campaign is left untouched, in Draft, in your Instantly account — it can still be launched by hand from inside Instantly, or deleted there, if you don't want to keep it. Disconnect any time from Settings → Integrations → Instantly → Disconnect, or revoke the key in Instantly under Settings → Integrations → API.",
+    privacy: "Both read and write, and it can send real cold email once you approve a run. Email Marketing's Instantly channel creates a campaign in Instantly's Draft status with no leads attached while staging — nothing sends while a run is awaiting approval; approving it moves the named Lead List's real leads in and activates it. Email Outbound targets an existing campaign you already run continuously — the one chosen for each outbound play on the Outbound Engine page — rather than creating one, so its staging step makes no write to Instantly at all — it only looks up the campaign (read-only, only needed if the play stored a name instead of the id the dropdown gives you) and computes the personalised lead payload for every prospect in the batch. Only once a workspace admin approves the run does it call Instantly's lead-add API to enrol each staged prospect, with skip_if_in_campaign set so a duplicate or retried approval can't enrol any of them a second time. Prospector's Outreach via Instantly step works like Email Marketing's channel but adds its own prospects directly: while the run is staging, it creates the campaign in Draft and adds every prospect with a real, non-generic email address — Instantly never sends from a Draft campaign, so this step alone sends nothing; approving activates the already-populated campaign. Whichever path, approving is what starts sending on Instantly's own schedule, and it cannot be undone from marketing-erp — pause the campaign directly in Instantly if you need to stop it. Rejecting Email Outbound makes no call to Instantly at all — nothing was ever written. Rejecting a Prospector run also makes no call to Instantly, so its staged campaign is left untouched, in Draft, in your Instantly account — it can still be launched by hand from inside Instantly, or deleted there, if you don't want to keep it. Disconnect any time from Settings → Integrations → Instantly → Disconnect, or revoke the key in Instantly under Settings → Integrations → API.",
     docs: [
       { label: "Instantly API v2 docs", url: "https://developer.instantly.ai/" },
       { label: "Instantly Help Center: API V2", url: "https://help.instantly.ai/en/articles/10432807-api-v2" },
@@ -294,12 +294,12 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
   AIMFOX: {
     provider: "AIMFOX",
     summary:
-      "Connecting Aimfox lets the Outbound Engine's LinkedIn Outbound agent add prospects to a live Aimfox campaign, sending connection requests and follow-up messages from your connected LinkedIn seat.",
+      "Connecting Aimfox lets the Outbound Engine's LinkedIn Outbound agent, and the Social suite's LinkedIn Engager agent, add prospects to a live Aimfox campaign and send direct messages — connection requests and follow-up messages go out from your connected LinkedIn seat.",
     timeMinutes: 5,
     youWillNeed: [
       "An Aimfox account with a LinkedIn account already connected as a seat.",
       "An API key with \"All\" permission — a Read-only key can look up campaigns but cannot add a lead to one, which is what this agent needs to do.",
-      "A campaign already created in Aimfox for LinkedIn Outbound to target (see troubleshooting if none is found).",
+      "A campaign already created in Aimfox for LinkedIn Outbound (and, if you use LinkedIn Engager's connection-request queue, a second campaign for it) to target — see troubleshooting if none is found.",
     ],
     steps: [
       {
@@ -341,7 +341,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         fix: "Create a campaign in Aimfox with the name the error message gives (or rename an existing one to include your play's name), then run the agent again.",
       },
     ],
-    privacy: "Both read and write, and it can send real connection requests and messages once you approve a run — same model as Email Marketing's channels. LinkedIn Outbound looks up the target campaign by name (read-only) and writes the connection note and follow-up messages while staging, but never calls Aimfox's add-to-campaign-audience endpoint itself: that only happens once a workspace admin approves the run. Approving is what adds the profile to the live Aimfox campaign, which then sends the connection request and follow-ups from your connected LinkedIn seat on its own schedule — this cannot be undone from marketing-erp; pause the campaign directly in Aimfox if you need to stop it. Rejecting the run makes no call to Aimfox at all. Aimfox does not document whether adding the same profile to a campaign twice is itself a no-op, so the only guard against a duplicate add is marketing-erp's own record of which runs have already been approved — don't approve the same run more than once. Disconnect any time from Settings → Integrations → Aimfox → Disconnect, or revoke the key in Aimfox under Workspace Settings → Integrations.",
+    privacy: "Both read and write, and it can send real connection requests and messages once you approve a run — same model as Email Marketing's channels. LinkedIn Outbound looks up the target campaign by name (read-only) and writes the connection note and follow-up messages while staging, but never calls Aimfox's add-to-campaign-audience endpoint itself: that only happens once a workspace admin approves the run. Approving is what adds the profile to the live Aimfox campaign, which then sends the connection request and follow-ups from your connected LinkedIn seat on its own schedule — this cannot be undone from marketing-erp; pause the campaign directly in Aimfox if you need to stop it. Rejecting the run makes no call to Aimfox at all. Aimfox does not document whether adding the same profile to a campaign twice is itself a no-op, so the only guard against a duplicate add is marketing-erp's own record of which runs have already been approved — don't approve the same run more than once. LinkedIn Engager uses the same key for its own connection-request and message queue: it only ever sends a connection note (via the same add-to-campaign-audience call) or a direct message, and only for the specific targets a workspace admin approved — it never reads, likes, or comments on a post, because Aimfox's API has no endpoint for any of those; a drafted comment stays a manual, paste-it-yourself action no matter what. Disconnect any time from Settings → Integrations → Aimfox → Disconnect, or revoke the key in Aimfox under Workspace Settings → Integrations.",
     docs: [{ label: "Aimfox: API integration", url: "https://help.aimfox.com/en/articles/10162205-aimfox-api-integration" }],
   },
 
@@ -667,5 +667,91 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     ],
     privacy: "Both read and write, and it can send real email — but only after you approve a run. Email Marketing's CRM channel creates a DRAFT Sequence in your CRM tenant with no one enrolled while the run is in progress — nothing sends yet. Approving the run flips it to ACTIVE and enrolls everyone in the Contact Segment you chose, which starts real sends on the CRM's own schedule; this cannot be undone from marketing-erp — pause or edit the sequence directly in the CRM if you need to stop it. The key only ever acts within your own tenant. Disconnect any time from Settings → Integrations → erp.io CRM → Disconnect; ask your CRM admin to revoke the key on their end to cut off access immediately.",
     docs: [{ label: "erp.io CRM", url: "https://app.erp.io/crm" }],
+  },
+
+  OPENAI_IMAGES: {
+    provider: "OPENAI_IMAGES",
+    summary:
+      "Connecting OpenAI Images lets the Blog Writer generate real hero and inline images for an article — a hand-drawn prompt for each image slot, rendered to an actual file and stored on the run — instead of leaving you an image brief to go commission yourself.",
+    timeMinutes: 3,
+    youWillNeed: [
+      "An OpenAI platform account (platform.openai.com) with billing set up — image generation is billed per image on your OpenAI account, separately from any ChatGPT subscription.",
+    ],
+    steps: [
+      {
+        title: "Open your API keys",
+        body: "Sign in at **platform.openai.com** and go to **API keys** (in the left sidebar, or platform.openai.com/api-keys directly).",
+      },
+      {
+        title: "Create a key",
+        body: "Click **Create new secret key**, give it a name like \"marketing-erp\", and copy the value shown. OpenAI only shows the full key once — if you lose it, create a new one.",
+      },
+      {
+        title: "Paste it into marketing-erp",
+        body: "Go to **Settings → Integrations → OpenAI Images → Connect**, paste the key into **API key**, and click **Connect**.",
+      },
+    ],
+    verify: [
+      "The connect form calls OpenAI's free models-list endpoint — it confirms the key is valid and generates no image, so it costs nothing.",
+      "A green \"Connected\" badge appears next to OpenAI Images in Settings → Integrations once it checks out.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "\"OpenAI rejected that API key — check it was copied whole and hasn't been revoked.\"",
+        fix: "Re-copy the key from platform.openai.com/api-keys — a partial paste is the most common cause. If the key was deleted or your organization rotated it, create a fresh one.",
+      },
+      {
+        symptom: "The key connects fine, but a Blog Writer run reports every image as skipped",
+        fix: "Check the run's output for the per-image skip reason — the most common cause is an OpenAI account with no payment method on file; image generation fails even with a valid key until billing is set up under Settings → Billing on platform.openai.com.",
+      },
+    ],
+    privacy: "Write-only in the sense that matters here: marketing-erp only ever calls OpenAI's image generation endpoint with a text prompt built from the article's topic, your brand/editorial style, and this run's visuals request — it never reads anything else from your OpenAI account. Every image a Blog Writer run actually generates is billed to your own OpenAI account, capped by the run's image limit. Disconnect any time from Settings → Integrations → OpenAI Images → Disconnect, or revoke the key directly on platform.openai.com — either stops access immediately.",
+    docs: [
+      { label: "OpenAI: Image generation guide", url: "https://platform.openai.com/docs/guides/image-generation" },
+      { label: "OpenAI: Images API reference", url: "https://platform.openai.com/docs/api-reference/images" },
+    ],
+  },
+
+  GOOGLE_IMAGES: {
+    provider: "GOOGLE_IMAGES",
+    summary:
+      "Connecting Google Images (Gemini) lets the Blog Writer generate real hero and inline images for an article using Google's Gemini image model, as an alternative to OpenAI Images.",
+    timeMinutes: 3,
+    youWillNeed: [
+      "A Google account with access to Google AI Studio — no separate Google Cloud project or billing account is required to get a first key, though heavy use may ask you to attach billing.",
+    ],
+    steps: [
+      {
+        title: "Open Google AI Studio",
+        body: "Go to **aistudio.google.com/apikey** and sign in with the Google account you want billed for image generation.",
+      },
+      {
+        title: "Create an API key",
+        body: "Click **Create API key**, choose a project (or let Google create one for you), and copy the key shown.",
+      },
+      {
+        title: "Paste it into marketing-erp",
+        body: "Go to **Settings → Integrations → Google Images (Gemini) → Connect**, paste the key into **API key**, and click **Connect**.",
+      },
+    ],
+    verify: [
+      "The connect form calls Gemini's free models-list endpoint — it confirms the key is valid and generates no image, so it costs nothing.",
+      "A green \"Connected\" badge appears next to Google Images in Settings → Integrations once it checks out.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "\"Google rejected that API key — check it was copied whole from Google AI Studio and hasn't been revoked.\"",
+        fix: "Re-copy the key from aistudio.google.com/apikey. If the key was deleted, create a new one — Google AI Studio keys can be revoked without warning if flagged for unusual use.",
+      },
+      {
+        symptom: "The key connects fine, but a Blog Writer run reports every image as skipped",
+        fix: "Check the run's output for the per-image skip reason. Gemini's free tier has a request-per-minute limit well below what a run with several images can hit back to back — the run reports the error rather than retrying silently; try again, or reduce this run's image count.",
+      },
+    ],
+    privacy: "Write-only in the sense that matters here: marketing-erp only ever calls Gemini's image generation endpoint with a text prompt built from the article's topic, your brand/editorial style, and this run's visuals request — it never reads anything else from your Google account. Every image a Blog Writer run actually generates is billed to your own Google account, capped by the run's image limit. Disconnect any time from Settings → Integrations → Google Images → Disconnect, or revoke the key directly in Google AI Studio — either stops access immediately.",
+    docs: [
+      { label: "Google: Gemini API image generation", url: "https://ai.google.dev/gemini-api/docs/image-generation" },
+      { label: "Google AI Studio: API keys", url: "https://ai.google.dev/gemini-api/docs/api-key" },
+    ],
   },
 };

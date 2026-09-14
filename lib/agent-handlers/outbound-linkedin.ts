@@ -1,5 +1,6 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
+import type { OutboundPlay, OutboundProspect } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
@@ -7,6 +8,8 @@ import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
+import { listAimfoxCampaigns } from "@/lib/integrations/aimfox";
+import { parsePlayConfig, planCampaignResolution, type OutboundPlayConfig } from "./outbound-play-config";
 import type { OutboundLinkedinDelivery } from "./outbound-linkedin-delivery";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
@@ -19,128 +22,87 @@ export {
   type OutboundLinkedinDelivery,
 } from "./outbound-linkedin-delivery";
 
-// A target campaign *name* to look up in the workspace's own Aimfox account —
-// Aimfox campaign ids are per-workspace and assigned when a campaign is
-// created there, so nothing here can know one in advance. See
-// resolveAimfoxCampaignId below.
-const AIMFOX_CAMPAIGN_MAP: Record<string, string> = {
-  "DEV-01": "DEV-01-LI-V1",
-  "DEV-02": "DEV-02-LI-V1",
-  "DEV-03": "DEV-03-LI-V1",
-};
-
-const AIMFOX_TIMEOUT_MS = 15_000;
-
-/** Per-run memo so a batch of leads for the same play only lists campaigns once. */
-const campaignIdCache = new Map<string, { at: number; id: string }>();
+/** Memo so a batch across several plays only lists Aimfox's campaigns once — keyed by API key,
+ * not a bare single slot, since this module is shared across every workspace's runs in the same
+ * worker process (see outbound-email.ts's identical cache for the same reason). */
+const campaignListCache = new Map<string, { at: number; campaigns: Array<{ id: string; name: string }> }>();
 const CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 
-/**
- * Aimfox has a real REST API (api.aimfox.com/api/v2, Bearer key) — it is not
- * MCP-only. The MCP server at mcp.aimfox.com exists for chat clients like
- * Claude/ChatGPT; a server-to-server integration like this one uses the REST
- * API directly, which is simpler and doesn't require holding an MCP session
- * open for one call.
- *
- * This is a read-only lookup — safe to run while staging, before approval.
- */
-async function resolveAimfoxCampaignId(
-  apiKey: string,
-  targetName: string,
-  playSlug: string,
-): Promise<string> {
-  const cacheKey = `${apiKey}:${playSlug}`;
-  const cached = campaignIdCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < CAMPAIGN_CACHE_TTL_MS) return cached.id;
-
-  let res: Response;
+async function listCampaignsCached(apiKey: string): Promise<Array<{ id: string; name: string }>> {
+  const cached = campaignListCache.get(apiKey);
+  if (cached && Date.now() - cached.at < CAMPAIGN_CACHE_TTL_MS) return cached.campaigns;
+  let campaigns: Array<{ id: string; name: string }>;
   try {
-    res = await fetch("https://api.aimfox.com/api/v2/campaigns", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(AIMFOX_TIMEOUT_MS),
-    });
+    campaigns = await listAimfoxCampaigns(apiKey);
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("unreachable:")) {
+      throw new AgentInputError(
+        "Couldn't reach Aimfox to look up the outbound LinkedIn campaign.",
+        "This is usually a transient network problem — try running Outbound LinkedIn again.",
+        "aimfox_unreachable",
+      );
+    }
+    const status = Number(message.match(/^http_(\d+)/)?.[1] ?? 0);
     throw new AgentInputError(
-      "Couldn't reach Aimfox to look up the outbound LinkedIn campaign.",
-      "This is usually a transient network problem — try running Outbound LinkedIn again.",
-      "aimfox_unreachable",
-    );
-  }
-  if (!res.ok) {
-    throw new AgentInputError(
-      `Aimfox rejected the campaign lookup (HTTP ${res.status}).`,
-      res.status === 401 || res.status === 403
+      `Aimfox rejected the campaign lookup (HTTP ${status || "unknown"}).`,
+      status === 401 || status === 403
         ? "The Aimfox API key in Settings → Integrations → Aimfox is invalid, revoked, or Read-only — reconnect it with an \"All\" permission key."
         : "Check the Aimfox account status in Settings → Integrations, then try again.",
       "aimfox_campaign_lookup_failed",
     );
   }
+  campaignListCache.set(apiKey, { at: Date.now(), campaigns });
+  return campaigns;
+}
 
-  const body = (await res.json()) as { items?: Array<{ id: string; name: string }>; data?: Array<{ id: string; name: string }> };
-  const campaigns = body.items ?? body.data ?? [];
-  const match =
-    campaigns.find((c) => c.name === targetName) ??
-    campaigns.find((c) => c.name.toLowerCase().includes(playSlug.toLowerCase()));
-
-  if (!match) {
+/** Same convention as outbound-email.ts's resolveInstantlyCampaign: a campaign chosen through the
+ * play editor's dropdown already carries a live id (playConfig.aimfoxCampaignId), so the common
+ * case needs no lookup. Only a campaign typed as plain text while Aimfox wasn't connected yet
+ * falls back to a by-name search. */
+async function resolveAimfoxCampaign(
+  apiKey: string | null,
+  playConfig: OutboundPlayConfig,
+  playName: string,
+): Promise<{ campaignId: string; campaignName: string }> {
+  const plan = planCampaignResolution(playConfig.aimfoxCampaignId, playConfig.aimfoxCampaignName);
+  if (plan.mode === "id") {
+    return { campaignId: plan.campaignId, campaignName: plan.campaignName };
+  }
+  if (plan.mode === "unconfigured") {
     throw new AgentInputError(
-      `No Aimfox campaign named "${targetName}" (or matching play ${playSlug}) exists in this workspace's Aimfox account.`,
-      `Create a campaign in Aimfox named "${targetName}", or rename an existing one to include "${playSlug}", then try again.`,
-      "aimfox_campaign_not_found",
+      `The "${playName}" play has no Aimfox campaign configured.`,
+      "Set one on the Outbound Engine page (/outbound) — pick it from the dropdown once Aimfox is connected, or type its name if it isn't yet.",
+      "outbound_play_no_campaign",
     );
   }
 
-  campaignIdCache.set(cacheKey, { at: Date.now(), id: match.id });
-  return match.id;
+  const targetName = plan.targetName;
+  if (!apiKey) {
+    return { campaignId: targetName, campaignName: targetName };
+  }
+
+  const campaigns = await listCampaignsCached(apiKey);
+  const match = campaigns.find((c) => c.name === targetName) ?? campaigns.find((c) => c.name.toLowerCase().includes(targetName.toLowerCase()));
+  if (!match) {
+    throw new AgentInputError(
+      `No Aimfox campaign named "${targetName}" exists in this workspace's Aimfox account.`,
+      `Create a campaign in Aimfox named "${targetName}", or pick the right one from the dropdown on the Outbound Engine page.`,
+      "aimfox_campaign_not_found",
+    );
+  }
+  return { campaignId: match.id, campaignName: targetName };
 }
 
-export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) => {
-  await updateStatus("RUNNING");
-
-  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
-  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
-  const config = resolveInputs(run);
-  const input = (run.input ?? {}) as Record<string, unknown>;
-
-  const prospectId = (input.prospectId ?? config.prospectId) as string | undefined;
-
-  if (!prospectId) {
-    return { output: { error: "No prospectId in run.input.prospectId" }, costUsd: 0 };
-  }
-
-  const prospect = await prisma.outboundProspect.findUnique({
-    where: { id: prospectId },
-    include: { play: true },
-  });
-
-  if (!prospect) {
-    return { output: { error: `Prospect ${prospectId} not found` }, costUsd: 0 };
-  }
-
-  if (prospect.channel !== "EMAIL_AND_LINKEDIN") {
-    return {
-      output: {
-        skipped: true,
-        reason: `Channel is ${prospect.channel} — LinkedIn reserved for 80+ score prospects`,
-        prospectId,
-        score: prospect.score,
-      },
-      costUsd: 0,
-    };
-  }
-
-  if (!prospect.linkedInUrl) {
-    return { output: { skipped: true, reason: "No LinkedIn URL on prospect record", prospectId }, costUsd: 0 };
-  }
-
-  const aimfoxIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AIMFOX" } },
-  });
-
+async function generateMessages(
+  client: Anthropic,
+  prospect: OutboundProspect,
+  play: OutboundPlay,
+): Promise<{ connectionNote: string; message1: string; message2: string; characterCounts: unknown; toneNotes: unknown; costUsd: number }> {
   const intelligence = (prospect.intelligence ?? {}) as Record<string, unknown>;
   const intel = (intelligence.intelligence ?? {}) as Record<string, unknown>;
 
-  const systemPrompt = `You are an outbound LinkedIn specialist for Dev.co. You write human, curious, non-salesy connection notes and follow-up messages for senior technical and business leaders.
+  const systemPrompt = `You write human, curious, non-salesy connection notes and follow-up messages for senior technical and business leaders.
 
 Rules:
 - Connection note: max 300 characters. Reference something observable about them. No pitch. No "I'd love to" language.
@@ -165,7 +127,7 @@ Intelligence:
 - Avoid: ${(intel.avoid as string) ?? "Nothing specific"}
 - Context: ${(intel.companyContext as string) ?? "Not available"}
 
-Play: ${prospect.play.slug} — ${prospect.play.name}
+Play: ${play.slug} — ${play.name}
 
 Return exactly:
 {
@@ -192,57 +154,119 @@ Return exactly:
     msgOutput = {};
   }
 
-  const targetCampaignName = AIMFOX_CAMPAIGN_MAP[prospect.play.slug] ?? AIMFOX_CAMPAIGN_MAP["DEV-01"];
-  let campaignId: string = targetCampaignName;
-  const connected = Boolean(aimfoxIntegration);
-
-  if (aimfoxIntegration) {
-    // Auth is a Bearer API key, not an MCP OAuth access token. See
-    // lib/integrations/catalog.ts and lib/integrations/verify/outbound.ts.
-    const creds = await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials);
-    // Read-only lookup — safe to run before approval.
-    campaignId = await resolveAimfoxCampaignId(creds.apiKey, targetCampaignName, prospect.play.slug);
-  }
-
-  const connectionNote = String(msgOutput.connectionNote ?? "");
-  const message1 = String(msgOutput.message1 ?? "");
-  const message2 = String(msgOutput.message2 ?? "");
-
-  const delivery: OutboundLinkedinDelivery = {
-    status: "staged",
-    prospectId,
-    firstName: prospect.firstName,
-    company: prospect.company,
-    linkedInUrl: prospect.linkedInUrl,
-    campaignName: targetCampaignName,
-    campaignId,
-    connected,
-    connectionNote,
-    message1,
-    message2,
-  };
-
-  const output: Record<string, unknown> = {
-    prospectId,
-    firstName: prospect.firstName,
-    company: prospect.company,
-    linkedInUrl: prospect.linkedInUrl,
-    campaignName: targetCampaignName,
-    connectionNote,
-    message1,
-    message2,
+  return {
+    connectionNote: String(msgOutput.connectionNote ?? ""),
+    message1: String(msgOutput.message1 ?? ""),
+    message2: String(msgOutput.message2 ?? ""),
     characterCounts: msgOutput.characterCounts,
     toneNotes: msgOutput.toneNotes,
+    costUsd: estimateCostUsd(MODELS.fast, message.usage),
+  };
+}
+
+export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) => {
+  await updateStatus("RUNNING");
+
+  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
+  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const config = resolveInputs(run);
+  const input = (run.input ?? {}) as Record<string, unknown>;
+
+  // Same "prospectIds" (batch) / "prospectId" (single, declared config field) split as
+  // outbound-email.ts — see that file's comment.
+  const prospectIds = Array.isArray(input.prospectIds)
+    ? (input.prospectIds as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
+  const singleId = (input.prospectId ?? config.prospectId) as string | undefined;
+  const allIds = [...new Set([...prospectIds, ...(singleId ? [singleId] : [])])];
+
+  if (allIds.length === 0) {
+    return { output: { error: "No prospectId(s) in run.input.prospectId / run.input.prospectIds" }, costUsd: 0 };
+  }
+
+  const prospects = await prisma.outboundProspect.findMany({
+    where: { id: { in: allIds }, workspaceId: run.agentConfig.workspaceId },
+    include: { play: true },
+  });
+
+  const aimfoxIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AIMFOX" } },
+  });
+  const connected = Boolean(aimfoxIntegration);
+  const apiKey = aimfoxIntegration
+    ? (await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials)).apiKey
+    : null;
+
+  const playConfigCache = new Map<string, OutboundPlayConfig>();
+  const campaignCache = new Map<string, { campaignId: string; campaignName: string }>();
+
+  const deliveries: OutboundLinkedinDelivery[] = [];
+  const skipped: Array<{ prospectId: string; reason: string }> = [];
+  let costUsd = 0;
+
+  for (const prospectId of allIds) {
+    const prospect = prospects.find((p) => p.id === prospectId);
+    if (!prospect) {
+      skipped.push({ prospectId, reason: "Prospect not found in this workspace" });
+      continue;
+    }
+    if (prospect.channel !== "EMAIL_AND_LINKEDIN") {
+      skipped.push({ prospectId, reason: `Channel is ${prospect.channel} — LinkedIn reserved for the play's top routing tier` });
+      continue;
+    }
+    if (!prospect.linkedInUrl) {
+      skipped.push({ prospectId, reason: "No LinkedIn URL on prospect record" });
+      continue;
+    }
+
+    if (!playConfigCache.has(prospect.playId)) playConfigCache.set(prospect.playId, parsePlayConfig(prospect.play.config));
+    const playConfig = playConfigCache.get(prospect.playId)!;
+
+    let campaign: { campaignId: string; campaignName: string };
+    try {
+      if (!campaignCache.has(prospect.playId)) {
+        campaignCache.set(prospect.playId, await resolveAimfoxCampaign(apiKey, playConfig, prospect.play.name));
+      }
+      campaign = campaignCache.get(prospect.playId)!;
+    } catch (err) {
+      if (err instanceof AgentInputError && allIds.length > 1) {
+        skipped.push({ prospectId, reason: err.message });
+        continue;
+      }
+      throw err;
+    }
+
+    const { connectionNote, message1, message2, costUsd: genCost } = await generateMessages(client, prospect, prospect.play);
+    costUsd += genCost;
+
+    deliveries.push({
+      status: "staged",
+      prospectId: prospect.id,
+      firstName: prospect.firstName,
+      company: prospect.company,
+      linkedInUrl: prospect.linkedInUrl,
+      campaignName: campaign.campaignName,
+      campaignId: campaign.campaignId,
+      connected,
+      connectionNote,
+      message1,
+      message2,
+    });
+  }
+
+  const output: Record<string, unknown> = {
+    deliveries,
+    // Back-compat with the pre-batch single-prospect shape — see outbound-email.ts's identical note.
+    ...(deliveries.length === 1 ? { delivery: deliveries[0] } : {}),
+    staged: deliveries.length,
+    skipped,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
-    delivery,
     approvalRequired: true,
     approvalNote: connected
-      ? `Adding ${prospect.firstName} (${prospect.linkedInUrl}) to the live Aimfox campaign "${targetCampaignName}" requires workspace admin approval. Nothing has been sent to Aimfox yet.`
-      : `No Aimfox integration is connected — approving this run will record a simulated add instead of a live one.`,
+      ? `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Aimfox campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Aimfox yet.`
+      : `No Aimfox integration is connected — approving this run will record simulated adds instead of live ones.`,
   };
-
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   await updateStatus("AWAITING_APPROVAL", output);
   return { output, costUsd };

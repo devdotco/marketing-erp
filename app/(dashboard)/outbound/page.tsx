@@ -4,11 +4,10 @@ import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/worksp
 import { prisma } from "@/lib/prisma";
 import { formatDistanceToNow } from "@/lib/utils";
 import Link from "next/link";
+import { PlaysManager } from "./PlaysManager";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Outbound Engine — marketing.erp.io" };
-
-const PLAY_SLUGS = ["DEV-01", "DEV-02", "DEV-03"];
 
 type StatusCountRow = {
   status: string;
@@ -115,7 +114,8 @@ export default async function OutboundPage() {
   const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
-  await requireWorkspaceAccess(workspaceId);
+  const { member } = await requireWorkspaceAccess(workspaceId);
+  const isAdmin = Boolean(session.user.isSuperAdmin || member?.role === "WORKSPACE_ADMIN" || member?.role === "SUPER_ADMIN");
 
   const [plays, rawStatusCounts, recentProspects] = await Promise.all([
     prisma.outboundPlay.findMany({
@@ -148,9 +148,6 @@ export default async function OutboundPage() {
   const totalInterested = getCount(statusCounts, null, "INTERESTED");
   const totalMeetings = getCount(statusCounts, null, "MEETING_BOOKED");
 
-  // Build a map from slug → play for the 3 canonical plays
-  const playBySlug = Object.fromEntries(plays.map((p) => [p.slug, p]));
-
   return (
     <div className="scrollable">
       {/* Header */}
@@ -160,7 +157,7 @@ export default async function OutboundPage() {
             Outbound Engine
           </h1>
           <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-            Dev.co autonomous pipeline: Scout → Score → Email → LinkedIn → Revenue
+            Autonomous pipeline per play: Scout → Score → Email → LinkedIn → Revenue
           </p>
         </div>
         <Link href="/agents/outbound-scout" className="btn btn-primary">
@@ -207,14 +204,30 @@ export default async function OutboundPage() {
         >
           Active Plays
         </h2>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-          {PLAY_SLUGS.map((slug) => {
-            const play = playBySlug[slug];
+        {plays.length === 0 ? (
+          <div
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "32px 20px",
+              textAlign: "center",
+            }}
+          >
+            <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>No outbound plays yet</p>
+            <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Create one below to start sourcing prospects.</p>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+            {plays.map((play) => {
+              const inSeq = getCount(statusCounts, play.id, "IN_SEQUENCE");
+              const replied = getCount(statusCounts, play.id, "REPLIED");
+              const interested = getCount(statusCounts, play.id, "INTERESTED");
+              const meetings = getCount(statusCounts, play.id, "MEETING_BOOKED");
 
-            if (!play) {
               return (
                 <div
-                  key={slug}
+                  key={play.id}
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -222,138 +235,95 @@ export default async function OutboundPage() {
                     padding: 20,
                     display: "flex",
                     flexDirection: "column",
-                    gap: 12,
+                    gap: 14,
                   }}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {/* Play header */}
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+                        {play.name}
+                      </div>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          letterSpacing: "0.06em",
+                          fontFamily: "monospace",
+                          background: "rgba(59,130,246,0.1)",
+                          color: "var(--accent)",
+                          border: "1px solid var(--accent)",
+                          padding: "2px 7px",
+                          borderRadius: 4,
+                        }}
+                      >
+                        {play.slug}
+                      </span>
+                    </div>
                     <span
                       style={{
                         fontSize: 10,
-                        fontWeight: 700,
-                        letterSpacing: "0.06em",
-                        fontFamily: "monospace",
-                        background: "var(--surface-2)",
-                        color: "var(--text-dim)",
-                        border: "1px solid var(--border)",
+                        fontWeight: 600,
+                        color: play.enabled ? "var(--success)" : "var(--text-dim)",
+                        background: play.enabled ? "var(--success-bg)" : "var(--surface-2)",
+                        border: `1px solid ${play.enabled ? "var(--success)" : "var(--border)"}`,
                         padding: "2px 7px",
                         borderRadius: 4,
                       }}
                     >
-                      {slug}
+                      {play.enabled ? "Active" : "Paused"}
                     </span>
                   </div>
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 0", gap: 8 }}>
-                    <p style={{ fontSize: 13, color: "var(--text-muted)", textAlign: "center" }}>
-                      No play configured yet
-                    </p>
-                    <Link
-                      href="/agents/outbound-scout"
-                      style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}
-                    >
-                      Run Scout to populate →
-                    </Link>
+
+                  {/* Stat tiles */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
+                    {[
+                      { label: "Total", value: play._count.prospects, color: "var(--text)" },
+                      { label: "Sequence", value: inSeq, color: "var(--accent)" },
+                      { label: "Replied", value: replied, color: "var(--warning)" },
+                      { label: "Interested", value: interested, color: "var(--success)" },
+                      { label: "Meetings", value: meetings, color: meetings > 0 ? "var(--success)" : "var(--text-dim)" },
+                    ].map((tile) => (
+                      <div
+                        key={tile.label}
+                        style={{
+                          background: "var(--bg)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 6,
+                          padding: "8px 6px",
+                          textAlign: "center",
+                        }}
+                      >
+                        <div style={{ fontSize: 15, fontWeight: 700, color: tile.color, fontVariantNumeric: "tabular-nums" }}>
+                          {tile.value}
+                        </div>
+                        <div style={{ fontSize: 9, fontWeight: 600, color: "var(--text-dim)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
+                          {tile.label}
+                        </div>
+                      </div>
+                    ))}
                   </div>
+
+                  {/* CTA */}
+                  <Link
+                    href="/agents/outbound-scout"
+                    style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}
+                  >
+                    <span>Run Scout</span>
+                    <span style={{ color: "var(--text-dim)" }}>→</span>
+                  </Link>
                 </div>
               );
-            }
-
-            const inSeq = getCount(statusCounts, play.id, "IN_SEQUENCE");
-            const replied = getCount(statusCounts, play.id, "REPLIED");
-            const interested = getCount(statusCounts, play.id, "INTERESTED");
-            const meetings = getCount(statusCounts, play.id, "MEETING_BOOKED");
-
-            return (
-              <div
-                key={slug}
-                style={{
-                  background: "var(--surface)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  padding: 20,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 14,
-                }}
-              >
-                {/* Play header */}
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
-                      {play.name}
-                    </div>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        fontWeight: 700,
-                        letterSpacing: "0.06em",
-                        fontFamily: "monospace",
-                        background: "rgba(59,130,246,0.1)",
-                        color: "var(--accent)",
-                        border: "1px solid var(--accent)",
-                        padding: "2px 7px",
-                        borderRadius: 4,
-                      }}
-                    >
-                      {play.slug}
-                    </span>
-                  </div>
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      color: play.enabled ? "var(--success)" : "var(--text-dim)",
-                      background: play.enabled ? "var(--success-bg)" : "var(--surface-2)",
-                      border: `1px solid ${play.enabled ? "var(--success)" : "var(--border)"}`,
-                      padding: "2px 7px",
-                      borderRadius: 4,
-                    }}
-                  >
-                    {play.enabled ? "Active" : "Paused"}
-                  </span>
-                </div>
-
-                {/* Stat tiles */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
-                  {[
-                    { label: "Total", value: play._count.prospects, color: "var(--text)" },
-                    { label: "Sequence", value: inSeq, color: "var(--accent)" },
-                    { label: "Replied", value: replied, color: "var(--warning)" },
-                    { label: "Interested", value: interested, color: "var(--success)" },
-                    { label: "Meetings", value: meetings, color: meetings > 0 ? "var(--success)" : "var(--text-dim)" },
-                  ].map((tile) => (
-                    <div
-                      key={tile.label}
-                      style={{
-                        background: "var(--bg)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 6,
-                        padding: "8px 6px",
-                        textAlign: "center",
-                      }}
-                    >
-                      <div style={{ fontSize: 15, fontWeight: 700, color: tile.color, fontVariantNumeric: "tabular-nums" }}>
-                        {tile.value}
-                      </div>
-                      <div style={{ fontSize: 9, fontWeight: 600, color: "var(--text-dim)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
-                        {tile.label}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* CTA */}
-                <Link
-                  href="/agents/outbound-scout"
-                  style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}
-                >
-                  <span>Run Scout</span>
-                  <span style={{ color: "var(--text-dim)" }}>→</span>
-                </Link>
-              </div>
-            );
-          })}
-        </div>
+            })}
+          </div>
+        )}
       </div>
+
+      <PlaysManager
+        workspaceId={workspaceId}
+        isAdmin={isAdmin}
+        plays={plays.map((p) => ({ id: p.id, slug: p.slug, name: p.name, enabled: p.enabled, config: p.config, prospectCount: p._count.prospects }))}
+      />
 
       {/* Prospect pipeline */}
       <div>

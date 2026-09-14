@@ -86,6 +86,7 @@ model Workspace {
   socialAccounts    SocialAccount[]
   socialPosts       SocialPost[]
   editorialProfile  EditorialProfile?
+  generatedAssets   GeneratedAsset[]
   /// Whether this workspace may fall back to the platform's own Anthropic key.
   /// Off by default: every tenant brings its own, so model spend lands on the
   /// account that asked for the work. Only a super admin turns this on, and
@@ -157,6 +158,19 @@ model AgentRun {
   startedAt       DateTime?
   completedAt     DateTime?
   createdAt       DateTime    @default(now())
+  /// The run that enqueued this one automatically — currently only the Outbound Engine's
+  /// Scout → Strategist → (Email Outbound + LinkedIn Outbound) pipeline chaining
+  /// (lib/agent-handlers/chaining.ts). Null for every run started directly (by a person, a
+  /// schedule, or a webhook) — which is every run created before this column existed.
+  parentRunId     String?
+  parentRun       AgentRun?   @relation("AgentRunChain", fields: [parentRunId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  childRuns       AgentRun[]  @relation("AgentRunChain")
+
+  /// At most one child run per agent per parent — chaining.ts relies on this to make enqueuing a
+  /// child idempotent (a unique-constraint violation on create means "already chained", not an
+  /// error) instead of a check-then-create race. Postgres treats NULL parentRunId values as
+  /// distinct, so this constrains nothing for the vast majority of runs, which have no parent.
+  @@unique([parentRunId, agentConfigId])
 }
 
 enum RunStatus {
@@ -219,6 +233,10 @@ enum IntegrationProvider {
   /// Lets Email Marketing stage sequences/enrollments there in addition to
   /// Mailchimp/Klaviyo/Instantly/Apollo. See lib/integrations/crm-erp-io.ts.
   CRM_ERP_IO
+  /// Bring-your-own-key image generation for the Blog Writer's AI-generated
+  /// image blocks. See lib/images/*.
+  OPENAI_IMAGES
+  GOOGLE_IMAGES
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────
@@ -441,4 +459,30 @@ model SocialPost {
   aiGenerated     Json?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+}
+
+// ─── Blog Writer AI images ────────────────────────────────────────────────
+
+/// An AI-generated image (lib/images/*), stored directly since this app has
+/// no S3/R2/blob storage anywhere else (checked before adding this). Served
+/// back out to the run preview by an authenticated, workspace-scoped route
+/// (app/api/assets/[id]/route.ts); a CMS publish reads `bytes` straight from
+/// this table server-side to upload as that CMS's own media (see
+/// lib/agent-handlers/blog-writer.ts).
+model GeneratedAsset {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// Which run produced this. Not a hard foreign key to AgentRun — a run
+  /// failing after images were generated should not cascade-delete the bytes
+  /// a retry could otherwise reuse.
+  runId       String?
+  mimeType    String
+  bytes       Bytes
+  alt         String
+  prompt      String
+  costUsd     Decimal?  @db.Decimal(10, 6)
+  createdAt   DateTime  @default(now())
+
+  @@index([workspaceId, runId])
 }

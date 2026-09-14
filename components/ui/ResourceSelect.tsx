@@ -37,6 +37,8 @@ interface ResourceSelectProps {
   /** Style hooks shared with the plain <select>/<input> fields around it — pass whichever this form uses. */
   fieldStyle?: React.CSSProperties;
   className?: string;
+  /** Shown in a disabled select when the source answers with an empty list. */
+  emptyLabel?: string;
 }
 
 /**
@@ -47,7 +49,7 @@ interface ResourceSelectProps {
  * already got a value (a saved config, or a person's own prior pick in this
  * same form session always wins).
  */
-export function ResourceSelect({ id, optionsUrl, value, onChange, disabled, fieldStyle, className }: ResourceSelectProps) {
+export function ResourceSelect({ id, optionsUrl, value, onChange, disabled, fieldStyle, className, emptyLabel }: ResourceSelectProps) {
   const [state, setState] = useState<FetchState>({ phase: "loading" });
 
   useEffect(() => {
@@ -125,6 +127,14 @@ export function ResourceSelect({ id, optionsUrl, value, onChange, disabled, fiel
           fall back to whatever is already selected on the integration.
         </p>
       </div>
+    );
+  }
+
+  if (state.phase === "ready" && state.options.length === 0 && emptyLabel) {
+    return (
+      <select id={id} disabled className={className} style={disabledSelectStyle}>
+        <option>{emptyLabel}</option>
+      </select>
     );
   }
 

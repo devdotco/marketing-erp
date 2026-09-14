@@ -38,6 +38,10 @@ export interface OutboundLinkedinDelivery {
   message2: string;
   aimfoxLeadId?: string;
   source?: "aimfox_live" | "simulation";
+  /** Set only on a delivery that failed to activate within a batch that had at least one other
+   * delivery succeed this same approval call — see on-approve.ts's outboundLinkedinOnApprove.
+   * Absent on every successfully staged/activated delivery. */
+  error?: string;
 }
 
 /** Pure — the exact body POST /campaigns/{id}/audience gets. */

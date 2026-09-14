@@ -96,8 +96,8 @@ const INTEGRATIONS = [
   {
     provider: "APOLLO",
     name: "Apollo.io",
-    description: "Prospect sourcing for outbound plays — DEV-01, DEV-02, DEV-03",
-    agents: ["Outbound Scout"],
+    description: "Prospect sourcing and enrichment for your workspace's outbound plays",
+    agents: ["Outbound Scout", "Outbound Strategist", "Email Outbound"],
     color: "#3B82F6",
     docsUrl: "#",
   },
@@ -213,6 +213,22 @@ const INTEGRATIONS = [
     agents: ["Email Marketing"],
     color: "#4F46E5",
     docsUrl: "#",
+  },
+  {
+    provider: "OPENAI_IMAGES",
+    name: "OpenAI Images",
+    description: "Generate real hero and inline images for an article, billed to your own OpenAI account",
+    agents: ["Blog Writer"],
+    color: "#10A37F",
+    docsUrl: "https://platform.openai.com/docs/guides/image-generation",
+  },
+  {
+    provider: "GOOGLE_IMAGES",
+    name: "Google Images (Gemini)",
+    description: "Generate real hero and inline images for an article using Google's Gemini image model",
+    agents: ["Blog Writer"],
+    color: "#4285F4",
+    docsUrl: "https://ai.google.dev/gemini-api/docs/image-generation",
   },
 ] as const;
 

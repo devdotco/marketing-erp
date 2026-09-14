@@ -33,10 +33,30 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
     // pasting its run id.
     const draftRun = await prisma.agentRun.findFirst({
       where: { id: draftId, workspaceId: run.agentConfig.workspaceId },
+      include: { agentConfig: { select: { agentSlug: true } } },
     });
-    if (draftRun?.output) {
-      draftContent = draftRun.output as Record<string, unknown>;
+    // Same rules the Draft dropdown applies (app/api/runs/drafts): an approved
+    // Blog Writer / Content Refresh run with a body. Checked here too, because a
+    // saved config or an API caller can send any id, and a missing draft used
+    // to fall through and publish "Untitled Post" with no content.
+    const draftOutput = draftRun?.output as Record<string, unknown> | null | undefined;
+    if (
+      !draftRun ||
+      !["blog-writer", "content-refresh"].includes(draftRun.agentConfig.agentSlug) ||
+      !["APPROVED", "COMPLETED"].includes(draftRun.status) ||
+      !draftOutput ||
+      typeof draftOutput.content !== "string" ||
+      !draftOutput.content
+    ) {
+      throw new AgentInputError(
+        "That draft can't be published: it isn't an approved Blog Writer or Content Refresh draft in this workspace.",
+        draftRun && draftRun.status === "AWAITING_APPROVAL"
+          ? "Approve the draft's run first, then pick it again."
+          : "Pick an approved draft from the Draft dropdown.",
+        "draft_not_publishable",
+      );
     }
+    draftContent = draftOutput;
   }
 
   const postTitle = String(draftContent.title ?? "Untitled Post");

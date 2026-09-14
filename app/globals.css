@@ -691,3 +691,43 @@ code, pre, .mono {
   .app-rail { display: none; }
   .theme-toggle { top: 11px; right: 12px; }
 }
+
+/* ─── Article preview + stats (run page) ─────────────────────────────────── */
+/* The draft preview used to inherit plain body styling with pre-wrap, so links
+   were indistinguishable from text and every block gained blank lines. */
+.article-preview { font-size: 14px; line-height: 1.7; color: var(--text); }
+.article-preview > * + * { margin-top: 0.9em; }
+.article-preview h2 { font-size: 17px; font-weight: 700; margin-top: 1.6em; letter-spacing: -0.01em; }
+.article-preview h3 { font-size: 15px; font-weight: 600; margin-top: 1.3em; }
+.article-preview ul, .article-preview ol { padding-left: 1.4em; }
+.article-preview li + li { margin-top: 0.3em; }
+.article-preview a { color: var(--info); text-decoration: underline; text-underline-offset: 2px; }
+.article-preview a:hover { opacity: 0.8; }
+.article-preview img { max-width: 100%; height: auto; border-radius: var(--radius); }
+.article-preview table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.article-preview th, .article-preview td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.article-preview figure { margin: 1.2em 0; }
+.article-preview figcaption { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+.article-preview aside { border-left: 3px solid var(--info); background: var(--surface); padding: 10px 14px; border-radius: 4px; }
+
+.article-stats__title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 12px; }
+.article-stats__section + .article-stats__section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.article-stats__label { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
+.article-stats__row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 2px 0; }
+.article-stats__row > span:first-child { color: var(--text-muted); }
+.article-stats__value { font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
+.article-stats__value.is-ok { color: var(--success); }
+.article-stats__value.is-warn { color: var(--warning); }
+.article-stats__value.is-bad { color: var(--danger); }
+.article-stats__note { color: var(--text-dim); }
+.article-stats__warn { font-size: 11px; color: var(--danger); margin: 2px 0 4px; }
+.article-stats__details { margin-top: 8px; font-size: 12px; }
+.article-stats__details summary { cursor: pointer; color: var(--text-muted); }
+.article-stats__details ul, .article-stats__details ol { margin: 6px 0 0; padding-left: 16px; display: flex; flex-direction: column; gap: 4px; }
+.article-stats__details ul { list-style: none; padding-left: 0; }
+.article-stats__details a { color: var(--info); word-break: break-word; }
+.article-stats__url { color: var(--text-dim); font-size: 11px; margin-left: 4px; }
+.article-stats__tag { display: inline-block; font-size: 10px; text-transform: uppercase; padding: 0 4px; margin-right: 6px; border-radius: 3px; background: var(--surface-2); color: var(--text-muted); }
+.article-stats__tag.is-internal { background: var(--success-bg); color: var(--success); }
+.run-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; }
+@media (max-width: 900px) { .run-layout { grid-template-columns: 1fr; } }

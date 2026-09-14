@@ -1,239 +1,152 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { createMessage } from "@/lib/ai/messages";
+import { resolveInputs, str, num, bool } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
-import { META_GRAPH_VERSION, type MetaCredentials } from "@/lib/integrations/meta";
+import { AgentInputError } from "@/lib/ai/errors";
+import { strictSchema, asArray } from "@/lib/content/article";
+import type { MetaStagedPost } from "./meta-poster-delivery";
+
+/**
+ * Drafts a batch of Facebook/Instagram posts and stages them — nothing is published during this
+ * run. Meta (unlike LinkedIn/X) has no SocialPlatform enum value (prisma/schema.prisma only has
+ * LINKEDIN and TWITTER_X), so this agent keeps using the workspace's connected META `Integration` —
+ * a real connect method (lib/integrations/catalog.ts's CONNECT_METHODS.META), unlike the missing
+ * LINKEDIN/TWITTER_X entries linkedin-poster.ts and x-poster.ts used to (wrongly) depend on.
+ * Publishing happens from the approval hook (lib/agent-handlers/on-approve.ts's metaPosterOnApprove),
+ * not here, and not during the run.
+ *
+ * Meta's Graph API endpoints this integration calls (POST /{page}/feed, the Instagram container +
+ * publish pair) publish immediately — there is no native scheduling for either, unlike LinkedIn/X
+ * Poster which schedule through SocialPost + app/api/cron/social-publish. So approving this run
+ * publishes every staged post in the batch right away, not spread across the days a cadence would
+ * imply; the copy here and in lib/agent-metadata.ts says so rather than promising a schedule this
+ * integration cannot keep.
+ */
+
+const SUBMIT_BATCH_TOOL_NAME = "submit_meta_batch";
+
+export const SUBMIT_BATCH_TOOL: Anthropic.Tool = {
+  name: SUBMIT_BATCH_TOOL_NAME,
+  strict: true,
+  description: "Submit the drafted batch of Facebook/Instagram posts.",
+  input_schema: strictSchema({
+    type: "object",
+    required: ["posts", "strategyNotes"],
+    properties: {
+      posts: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          required: ["platform", "caption", "hashtags", "callToAction"],
+          properties: {
+            platform: { type: "string", enum: ["Facebook", "Instagram"] },
+            caption: { type: "string", description: "Full caption text, platform-adapted." },
+            hashtags: { type: "array", minItems: 0, items: { type: "string" } },
+            callToAction: { type: "string", description: "e.g. Link in bio / Comment below / DM us." },
+          },
+        },
+      },
+      strategyNotes: { type: "string", description: "2-3 sentences on the strategic intent across the batch." },
+    },
+  }),
+};
 
 export const metaPosterHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
-  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
-  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const workspaceId = run.agentConfig.workspaceId;
   const config = resolveInputs(run);
 
-  const platforms = (config.platforms as string) ?? "Both";
-  const postingFrequency = (config.postingFrequency as string) ?? "3x week";
-  const contentStyle = (config.contentStyle as string) ?? "Mixed";
-  const hashtagStrategy = (config.hashtagStrategy as string) ?? "Mixed";
-  const batchSize = typeof config.batchSize === "number" ? config.batchSize : 7;
+  const sourceUrl = str(config, "sourceUrl");
+  const rawBrief = str(config, "rawBrief");
+  const targetPlatformsLabel = str(config, "targetPlatforms", "Facebook + Instagram");
+  const contentStyle = str(config, "contentStyle", "Mixed");
+  const includeHashtags = bool(config, "includeHashtags", true);
+  const batchSize = num(config, "batchSize", 5, { min: 1, max: 10 });
 
-  const businessProfile = await prisma.businessProfile.findFirst({
-    where: { workspaceId: run.agentConfig.workspaceId },
-  });
+  const targetPlatforms: "Facebook" | "Instagram" | "Both" =
+    targetPlatformsLabel === "Facebook only" ? "Facebook" : targetPlatformsLabel === "Instagram only" ? "Instagram" : "Both";
 
   const metaIntegration = await prisma.integration.findUnique({
-    where: {
-      workspaceId_provider: {
-        workspaceId: run.agentConfig.workspaceId,
-        provider: "META",
-      },
-    },
+    where: { workspaceId_provider: { workspaceId, provider: "META" } },
   });
+  if (!metaIntegration) {
+    throw new AgentInputError(
+      "No Meta integration is connected for this workspace.",
+      "Connect Meta under Settings → Integrations before running this agent — there is nowhere for an approved post to publish to otherwise.",
+      "meta_not_connected",
+    );
+  }
 
-  const systemPrompt = `You are a Meta social media strategist specialising in Facebook and Instagram content. Write distinct content optimised per surface (feed, story, reel) with appropriate tone, length, and CTA for each. Feed posts can be longer and educational. Stories are punchy and visual. Reels scripts are hook-first and direct. Respond ONLY with valid JSON — no markdown, no explanations.`;
+  const { client } = await resolveAnthropic(workspaceId);
+  const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId } });
 
-  const userPrompt = `Generate a batch of ${batchSize} Meta posts for ${businessProfile?.businessName ?? "the client"}.
+  const system = [
+    "You are a Meta social media strategist specialising in Facebook and Instagram content.",
+    "Write distinct content optimised per platform with appropriate tone, length, and CTA for each.",
+    `Content style: ${contentStyle}.`,
+    includeHashtags ? "Include a relevant hashtag set per post." : "Do not include hashtags.",
+    "Respond ONLY with the submit_meta_batch tool call.",
+  ].join("\n");
 
-Business context:
-- Industry: ${businessProfile?.industry ?? "General"}
-- Value proposition: ${businessProfile?.uniqueValueProp ?? "Not specified"}
-- Target audience: ${businessProfile?.targetAudience ?? "Not specified"}
-- Competitors: ${(businessProfile?.competitors ?? []).join(", ") || "Not specified"}
+  const userPrompt = [
+    `Draft a batch of ${batchSize} Meta posts for ${businessProfile?.businessName ?? "the client"}, distributed across ${targetPlatformsLabel}.`,
+    sourceUrl ? `Source URL to adapt: ${sourceUrl}` : "",
+    rawBrief ? `Brief:\n${rawBrief}` : "",
+    `Business context:`,
+    `- Industry: ${businessProfile?.industry ?? "General"}`,
+    `- Value proposition: ${businessProfile?.uniqueValueProp ?? "Not specified"}`,
+    `- Target audience: ${businessProfile?.targetAudience ?? "Not specified"}`,
+    `- Competitors: ${(businessProfile?.competitors ?? []).join(", ") || "Not specified"}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
-Publishing config:
-- Platforms: ${platforms}
-- Posting frequency: ${postingFrequency}
-- Content style: ${contentStyle}
-- Hashtag strategy: ${hashtagStrategy}
-
-Distribute the ${batchSize} posts across Facebook and Instagram, and across feed/story/reel surfaces as appropriate. Schedule them starting from today, spread across the posting frequency.
-
-Return exactly this JSON structure:
-{
-  "posts": [
-    {
-      "id": "meta_post_1",
-      "platform": "Facebook",
-      "surface": "feed",
-      "caption": "full caption text",
-      "hashtags": ["#hashtag1"],
-      "callToAction": "e.g. Link in bio / Comment below / DM us",
-      "visualBrief": "description of the ideal image or video for this post",
-      "scheduledFor": "ISO 8601 date string",
-      "charCount": 0,
-      "approved": false
-    }
-  ],
-  "batchSize": ${batchSize},
-  "strategyNotes": "2-3 sentences on the strategic intent and expected outcomes"
-}`;
-
-  const message = await client.messages.create({
+  const message = await createMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
-    system: systemPrompt,
+    system,
+    tools: [SUBMIT_BATCH_TOOL],
+    tool_choice: { type: "tool", name: SUBMIT_BATCH_TOOL_NAME },
     messages: [{ role: "user", content: userPrompt }],
   });
 
-  const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
-  try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };
-  } catch {
-    output = { result: rawText };
-  }
-
-  output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
-
-  const requireApproval = config.requireApproval !== false;
-  if (requireApproval) {
-    await updateStatus("AWAITING_APPROVAL", output);
-  }
-
-  // ── Auto-publish Facebook text posts when approval not required ──────────
-  if (!requireApproval && metaIntegration) {
-    // Deliberately NOT wrapped in try/catch: a decrypt failure here means the
-    // stored credentials are corrupt or this integration predates the current
-    // shape — a real config fault, and nothing has posted yet, so throwing is
-    // safe and correct (the run fails legibly instead of reporting "draft",
-    // which would read as "nothing happened" when the actual state is
-    // unknown). Once posting starts, per-post failures below are caught
-    // individually instead, because by then some posts may already be live
-    // on Facebook/Instagram — losing that fact by throwing mid-loop would be
-    // worse than recording it.
-    const creds = await decryptCredentials<MetaCredentials>(metaIntegration.encryptedCredentials);
-
-    const posts = (output.posts as Array<Record<string, unknown>>) ?? [];
-    let publishedCount = 0;
-
-    for (const post of posts) {
-      const caption = String(post.caption ?? "");
-      const hashtags = ((post.hashtags as string[]) ?? []).join(" ");
-      const fullText = [caption, hashtags].filter(Boolean).join("\n\n");
-      const platform = String(post.platform ?? "Facebook");
-      const surface = String(post.surface ?? "feed");
-
-      // Facebook feed posts — publish via Pages API (text only; media requires upload)
-      if (
-        (platforms === "Facebook" || platforms === "Both") &&
-        platform === "Facebook" &&
-        surface === "feed" &&
-        creds.page_id &&
-        creds.page_access_token
-      ) {
-        try {
-          const fbRes = await fetch(
-            `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.page_id}/feed`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                message: fullText.slice(0, 63206),
-                access_token: creds.page_access_token,
-              }),
-            }
-          );
-
-          if (fbRes.ok) {
-            const fbData = (await fbRes.json()) as { id?: string };
-            post.published = true;
-            post.fbPostId = fbData.id;
-            post.publishedAt = new Date().toISOString();
-            publishedCount++;
-          } else {
-            const errBody = await fbRes.text().catch(() => "");
-            post.publishError = `Facebook API ${fbRes.status}: ${errBody}`;
-          }
-        } catch (err) {
-          post.publishError = `Facebook feed publish failed: ${err instanceof Error ? err.message : String(err)}`;
-        }
-      }
-
-      // Instagram feed posts require an image_url — skip without media
-      // Mark Instagram posts as needing manual publish if no image URL is provided
-      if (
-        (platforms === "Instagram" || platforms === "Both") &&
-        platform === "Instagram" &&
-        surface === "feed" &&
-        creds.ig_user_id
-      ) {
-        const imageUrl = post.imageUrl as string | undefined;
-        if (imageUrl) {
-          try {
-            // Step 1: create container
-            const containerRes = await fetch(
-              `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.ig_user_id}/media`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  caption: fullText.slice(0, 2200),
-                  image_url: imageUrl,
-                  access_token: creds.page_access_token,
-                }),
-              }
-            );
-            if (!containerRes.ok) {
-              const errBody = await containerRes.text().catch(() => "");
-              post.publishError = `Instagram media (container) ${containerRes.status}: ${errBody}`;
-            } else {
-              const containerData = (await containerRes.json()) as { id?: string };
-              if (!containerData.id) {
-                post.publishError = "Instagram media container was created without an id";
-              } else {
-                // Step 2: publish container
-                const publishRes = await fetch(
-                  `https://graph.facebook.com/${META_GRAPH_VERSION}/${creds.ig_user_id}/media_publish`,
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      creation_id: containerData.id,
-                      access_token: creds.page_access_token,
-                    }),
-                  }
-                );
-                if (publishRes.ok) {
-                  const igData = (await publishRes.json()) as { id?: string };
-                  post.published = true;
-                  post.igPostId = igData.id;
-                  post.publishedAt = new Date().toISOString();
-                  publishedCount++;
-                } else {
-                  const errBody = await publishRes.text().catch(() => "");
-                  post.publishError = `Instagram media_publish ${publishRes.status}: ${errBody}`;
-                }
-              }
-            }
-          } catch (err) {
-            post.publishError = `Instagram publish failed: ${err instanceof Error ? err.message : String(err)}`;
-          }
-        } else {
-          post.publishNote = "Provide imageUrl field to enable Instagram auto-publish";
-        }
-      }
-    }
-
-    output.posts = posts;
-    output.publishedCount = publishedCount;
-    // "live": at least one post actually went out. "draft": Meta is connected
-    // and posting was attempted but nothing went out — check each post's
-    // publishError/publishNote for why, rather than treating this the same
-    // as "not connected".
-    output.source = publishedCount > 0 ? "live" : "draft";
-  } else if (!metaIntegration) {
-    output.source = "draft";
-    output.simulationNote =
-      "Connect Meta in Settings > Integrations to enable auto-publishing via Facebook Graph API.";
-  }
-
   const costUsd = estimateCostUsd(MODELS.standard, message.usage);
+
+  const block = message.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === SUBMIT_BATCH_TOOL_NAME,
+  );
+  if (!block) throw new Error("Meta Poster's drafting call did not submit a batch.");
+
+  const submitted = block.input as { posts?: unknown; strategyNotes?: string };
+  const rawPosts = asArray<{ platform?: unknown; caption?: unknown; hashtags?: unknown; callToAction?: unknown }>(submitted.posts);
+
+  const pendingPosts: MetaStagedPost[] = rawPosts.map((p, i) => ({
+    id: `post_${i + 1}`,
+    platform: p.platform === "Instagram" ? "Instagram" : "Facebook",
+    surface: "feed",
+    caption: typeof p.caption === "string" ? p.caption : "",
+    hashtags: (Array.isArray(p.hashtags) ? p.hashtags : []).filter((h): h is string => typeof h === "string"),
+    status: "pending",
+  }));
+
+  const output: Record<string, unknown> = {
+    pendingPosts,
+    targetPlatforms,
+    callsToAction: rawPosts.map((p) => (typeof p.callToAction === "string" ? p.callToAction : "")),
+    strategyNotes: submitted.strategyNotes ?? "",
+    generatedAt: new Date().toISOString(),
+    workspaceId,
+    howItWorks:
+      "Nothing is published during this run. Approving it publishes every post in this batch immediately, via Meta's Graph API — Facebook feed posts as text, Instagram feed posts only for entries that carry an imageUrl (add one to a post's imageUrl field before approving, or it is marked for manual posting). Neither Meta endpoint this integration calls supports native scheduling, so unlike LinkedIn/X Poster this batch does not spread out over the days a cadence would imply — it all goes out at once, on approval.",
+    approvalNote: "Nothing is sent to Facebook or Instagram until a workspace admin approves this run.",
+  };
+
+  await updateStatus("AWAITING_APPROVAL", output);
 
   return { output, costUsd };
 };

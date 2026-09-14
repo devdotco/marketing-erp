@@ -1,199 +1,203 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { createMessage } from "@/lib/ai/messages";
+import { resolveInputs, str, num, bool } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
+import { strictSchema, asArray } from "@/lib/content/article";
+import {
+  computeScheduledTimes,
+  validateSocialAccount,
+  type PendingSocialPost,
+  type PostingFrequency,
+} from "./social-poster-shared";
+
+/**
+ * Drafts a batch of LinkedIn posts and stages them — nothing is written to LinkedIn during this
+ * run. Credentials come from the Social module's `SocialAccount` (connected at /social/accounts,
+ * OAuth in app/api/linkedin/callback), not a `prisma.integration` row: LINKEDIN has no entry in
+ * lib/integrations/catalog.ts's CONNECT_METHODS, so an Integration row with that provider could
+ * never have been created by anything in this app. See lib/agent-handlers/social-poster-shared.ts
+ * for the scheduling/validation helpers this file shares with x-poster.ts, and
+ * lib/agent-handlers/on-approve.ts's socialPosterOnApprove for what happens once a workspace admin
+ * approves this run: it creates one `SocialPost` per staged post, scheduled at the time computed
+ * below, and app/api/cron/social-publish is what actually calls the LinkedIn API — reusing that
+ * cron's existing token refresh and company-page handling instead of duplicating it here.
+ */
+
+const SUBMIT_BATCH_TOOL_NAME = "submit_linkedin_batch";
+
+export const SUBMIT_BATCH_TOOL: Anthropic.Tool = {
+  name: SUBMIT_BATCH_TOOL_NAME,
+  strict: true,
+  description: "Submit the drafted batch of LinkedIn posts.",
+  input_schema: strictSchema({
+    type: "object",
+    required: ["posts", "strategyNotes"],
+    properties: {
+      posts: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          required: ["contentPillar", "hook", "body", "cta", "hashtags", "postFormat"],
+          properties: {
+            contentPillar: { type: "string", description: "Which content pillar this post draws from." },
+            hook: { type: "string", description: "First line engineered to stop the scroll — no clickbait." },
+            body: { type: "string", description: "Full post body, with blank lines between paragraphs." },
+            cta: { type: "string", description: "Specific call-to-action sentence." },
+            hashtags: { type: "array", minItems: 0, items: { type: "string" } },
+            postFormat: { type: "string", enum: ["text", "carousel", "poll", "document"] },
+          },
+        },
+      },
+      strategyNotes: { type: "string", description: "2-3 sentences on the strategic intent across the batch." },
+    },
+  }),
+};
 
 export const linkedinPosterHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
-  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
-  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const workspaceId = run.agentConfig.workspaceId;
   const config = resolveInputs(run);
 
-  const accountType = (config.accountType as string) ?? "Personal Profile";
-  const postingFrequency = (config.postingFrequency as string) ?? "3x week";
-  const contentPillars = (config.contentPillars as string) ?? "";
-  const toneOverride = (config.toneOverride as string) ?? "Use Brand default";
-  const batchSize = (config.batchSize as number) ?? 7;
+  const socialAccountId = str(config, "socialAccountId");
+  const sourceUrl = str(config, "sourceUrl");
+  const rawBrief = str(config, "rawBrief");
+  const contentPillars = str(config, "contentPillars");
+  const targetAudience = str(config, "targetAudience");
+  const toneOverride = str(config, "toneOverride", "Use Brand default");
+  const postFormat = str(config, "postFormat", "Auto-detect");
+  const includeEmoji = bool(config, "includeEmoji", true);
+  const hashtagCount = num(config, "hashtagCount", 4, { min: 0, max: 8 });
+  const postingFrequency = str(config, "postingFrequency", "3x week") as PostingFrequency;
+  const postingWindow = str(config, "postingWindow", "Auto (peak audience)");
+  const batchSize = num(config, "batchSize", 7, { min: 1, max: 14 });
 
-  const businessProfile = await prisma.businessProfile.findFirst({
-    where: { workspaceId: run.agentConfig.workspaceId },
-  });
+  if (!socialAccountId) {
+    throw new AgentInputError(
+      "No LinkedIn account was selected.",
+      "Pick a connected LinkedIn account, or connect one at /social/accounts.",
+      "no_account_selected",
+    );
+  }
 
-  const linkedinIntegration = await prisma.integration.findUnique({
-    where: {
-      workspaceId_provider: {
-        workspaceId: run.agentConfig.workspaceId,
-        provider: "LINKEDIN",
-      },
-    },
-  });
+  // Validate the account BEFORE spending any Anthropic tokens — an expired or foreign account is
+  // exactly as much a dead end after drafting as before it, so there's no reason to draft first.
+  const account = await prisma.socialAccount.findUnique({ where: { id: socialAccountId } });
+  const validation = validateSocialAccount(account, { workspaceId, platform: "LINKEDIN" });
+  if (!validation.ok) {
+    throw new AgentInputError(validation.message, validation.hint, `linkedin_account_${validation.code}`);
+  }
+
+  const { client } = await resolveAnthropic(workspaceId);
+  const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId } });
 
   const resolvedTone =
-    toneOverride === "Use Brand default"
-      ? (businessProfile?.brandVoice ?? "Professional")
-      : toneOverride;
+    toneOverride === "Use Brand default" ? (businessProfile?.brandVoice ?? "Professional") : toneOverride;
+  const isCompanyPage = account!.accountType === "COMPANY";
 
-  const horizonLabel =
-    postingFrequency === "Daily"
-      ? "7 days"
-      : postingFrequency === "3x week"
-      ? "2.5 weeks"
-      : "4 weeks";
+  const system = [
+    `You are an expert LinkedIn content strategist specialising in ${businessProfile?.industry ?? "business"}.`,
+    `Draft a batch of high-performing LinkedIn posts for ${isCompanyPage ? "a company LinkedIn page" : "a personal LinkedIn profile"} (${account!.displayName}).`,
+    `Tone: ${resolvedTone}.`,
+    `Company: ${businessProfile?.businessName ?? "the business"}.`,
+    postFormat !== "Auto-detect" ? `Preferred post format: ${postFormat}.` : "Choose whichever format (text, carousel, poll, document) best suits each post's content.",
+    targetAudience ? `Target audience: ${targetAudience}.` : "",
+    `${includeEmoji ? "Use emoji sparingly for scannability." : "Do not use emoji — keep a formal, executive tone."}`,
+    `Include roughly ${hashtagCount} relevant hashtags per post.`,
+    "Return ONLY the submit_linkedin_batch tool call.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  const systemPrompt = `You are an expert LinkedIn content strategist specialising in ${
-    businessProfile?.industry ?? "business"
-  }.
-Your task is to create a batch of high-performing LinkedIn posts for ${
-    accountType === "Company Page" ? "a company LinkedIn page" : "a personal LinkedIn profile"
-  }.
-Tone/voice: ${resolvedTone}
-Company: ${businessProfile?.businessName ?? "the business"}
-Always respond with ONLY a valid JSON object — no markdown fences, no extra prose.`;
+  const userPrompt = [
+    `Draft ${batchSize} LinkedIn posts.`,
+    sourceUrl ? `Source URL to adapt: ${sourceUrl}` : "",
+    rawBrief ? `Brief:\n${rawBrief}` : "",
+    `Content pillars to draw from:\n${contentPillars || "Thought Leadership, Industry Trends, Company Culture, Product Value, Client Success Stories"}`,
+    `Business context:`,
+    `- Company: ${businessProfile?.businessName ?? "Our Business"}`,
+    `- Industry: ${businessProfile?.industry ?? "Business Services"}`,
+    `- Target audience: ${targetAudience || businessProfile?.targetAudience || "Business professionals and decision-makers"}`,
+    `- Key value proposition: ${businessProfile?.uniqueValueProp ?? "Delivering exceptional results for clients"}`,
+    `- Website: ${businessProfile?.websiteUrl ?? "https://example.com"}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
-  const userPrompt = `Create ${batchSize} LinkedIn posts to distribute over ${horizonLabel}.
-
-Content pillars to draw from:
-${contentPillars || "Thought Leadership, Industry Trends, Company Culture, Product Value, Client Success Stories"}
-
-Business context:
-- Company: ${businessProfile?.businessName ?? "Our Business"}
-- Industry: ${businessProfile?.industry ?? "Business Services"}
-- Target audience: ${businessProfile?.targetAudience ?? "Business professionals and decision-makers"}
-- Key value proposition: ${businessProfile?.uniqueValueProp ?? "Delivering exceptional results for clients"}
-- Website: ${businessProfile?.websiteUrl ?? "https://example.com"}
-
-Return exactly this JSON shape (no other keys at root level):
-{
-  "posts": [
-    {
-      "id": "post_1",
-      "scheduledDate": "YYYY-MM-DD",
-      "scheduledTime": "HH:MM",
-      "contentPillar": "string",
-      "hook": "first line engineered to stop the scroll — no clickbait",
-      "body": "full post body with \\n line breaks between paragraphs",
-      "cta": "specific call-to-action sentence",
-      "hashtags": ["#Hashtag1", "#Hashtag2", "#Hashtag3"],
-      "postFormat": "text|carousel|poll|document|video",
-      "mediaNote": "description of accompanying visual or leave empty string",
-      "characterCount": 920,
-      "estimatedImpressions": 4200,
-      "estimatedEngagementRate": 3.6,
-      "approved": false
-    }
-  ],
-  "calendarSummary": {
-    "startDate": "YYYY-MM-DD",
-    "endDate": "YYYY-MM-DD",
-    "totalPosts": 7,
-    "pillarsDistribution": { "Thought Leadership": 2, "Industry Trends": 2, "Company Culture": 1, "Product Value": 1, "Client Success": 1 },
-    "formatsMix": { "text": 4, "carousel": 2, "poll": 1 }
-  },
-  "strategyNotes": "2-3 sentences explaining strategic intent and expected outcomes"
-}`;
-
-  const message = await client.messages.create({
+  const message = await createMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
-    system: systemPrompt,
+    system,
+    tools: [SUBMIT_BATCH_TOOL],
+    tool_choice: { type: "tool", name: SUBMIT_BATCH_TOOL_NAME },
     messages: [{ role: "user", content: userPrompt }],
   });
 
-  const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
-  try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };
-  } catch {
-    output = { result: rawText };
-  }
-
-  output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
-
-  const requireApproval = config.requireApproval !== false;
-  if (requireApproval) {
-    await updateStatus("AWAITING_APPROVAL", output);
-  }
-
-  // ── Auto-publish first post when approval not required ───────────────────
-  if (!requireApproval && linkedinIntegration) {
-    try {
-      const creds = await decryptCredentials<{
-        access_token: string;
-        person_id: string;
-        company_id?: string;
-      }>(linkedinIntegration.encryptedCredentials);
-
-      const posts = (output.posts as Array<Record<string, unknown>>) ?? [];
-      const firstPost = posts[0];
-
-      if (firstPost) {
-        const postText = [
-          String(firstPost.hook ?? ""),
-          String(firstPost.body ?? ""),
-          String(firstPost.cta ?? ""),
-          ((firstPost.hashtags as string[]) ?? []).join(" "),
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-          .slice(0, 3000);
-
-        const isCompanyPage = accountType === "Company Page" && creds.company_id;
-        const author = isCompanyPage
-          ? `urn:li:organization:${creds.company_id}`
-          : `urn:li:person:${creds.person_id}`;
-
-        const liRes = await fetch("https://api.linkedin.com/rest/posts", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${creds.access_token}`,
-            "LinkedIn-Version": "202410",
-            "X-Restli-Protocol-Version": "2.0.0",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            author,
-            commentary: postText,
-            visibility: "PUBLIC",
-            distribution: {
-              feedDistribution: "MAIN_FEED",
-              targetEntities: [],
-              thirdPartyDistributionChannels: [],
-            },
-            lifecycleState: "PUBLISHED",
-            isReshareDisabledByAuthor: false,
-          }),
-        });
-
-        if (liRes.ok || liRes.status === 201) {
-          const postId = liRes.headers.get("x-restli-id") ?? liRes.headers.get("x-linkedin-id");
-          posts[0] = { ...firstPost, published: true, linkedinPostId: postId, publishedAt: new Date().toISOString() };
-          output.posts = posts;
-          output.publishedCount = 1;
-          output.source = "live";
-        } else {
-          const errBody = await liRes.text().catch(() => "");
-          output.publishError = `LinkedIn API ${liRes.status}: ${errBody}`;
-          output.source = "draft";
-        }
-      }
-    } catch (err) {
-      output.publishError = err instanceof Error ? err.message : "LinkedIn publish failed";
-      output.source = "draft";
-    }
-  } else if (!linkedinIntegration) {
-    output.source = "draft";
-    output.simulationNote =
-      "Connect LinkedIn in Settings > Integrations to enable auto-publishing. Store credentials as { access_token, person_id } for personal profiles or add company_id for Company Pages.";
-  }
-
   const costUsd = estimateCostUsd(MODELS.standard, message.usage);
+
+  const block = message.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === SUBMIT_BATCH_TOOL_NAME,
+  );
+  if (!block) throw new Error("LinkedIn Poster's drafting call did not submit a batch.");
+
+  const submitted = block.input as { posts?: unknown; strategyNotes?: string };
+  const rawPosts = asArray<{
+    contentPillar?: unknown;
+    hook?: unknown;
+    body?: unknown;
+    cta?: unknown;
+    hashtags?: unknown;
+    postFormat?: unknown;
+  }>(submitted.posts);
+
+  const startAt = new Date();
+  const scheduledTimes = computeScheduledTimes({ batchSize: rawPosts.length, frequency: postingFrequency, window: postingWindow, startAt });
+
+  const draftedPosts = rawPosts.map((p, i) => {
+    const hook = typeof p.hook === "string" ? p.hook.trim() : "";
+    const body = typeof p.body === "string" ? p.body.trim() : "";
+    const cta = typeof p.cta === "string" ? p.cta.trim() : "";
+    const hashtags = (Array.isArray(p.hashtags) ? p.hashtags : []).filter((h): h is string => typeof h === "string");
+    const content = [hook, body, cta, hashtags.join(" ")].filter(Boolean).join("\n\n").slice(0, 3000);
+    return {
+      id: `post_${i + 1}`,
+      contentPillar: typeof p.contentPillar === "string" ? p.contentPillar : "",
+      hook,
+      body,
+      cta,
+      hashtags,
+      postFormat: typeof p.postFormat === "string" ? p.postFormat : "text",
+      content,
+      scheduledAt: (scheduledTimes[i] ?? startAt).toISOString(),
+    };
+  });
+
+  const pendingPosts: PendingSocialPost[] = draftedPosts.map((p) => ({ id: p.id, content: p.content, scheduledAt: p.scheduledAt }));
+
+  const output: Record<string, unknown> = {
+    posts: draftedPosts,
+    pendingPosts,
+    platform: "LINKEDIN",
+    socialAccountId: account!.id,
+    accountLabel: account!.displayName,
+    accountType: account!.accountType,
+    createdSocialPostIds: {},
+    strategyNotes: submitted.strategyNotes ?? "",
+    generatedAt: new Date().toISOString(),
+    workspaceId,
+    howItWorks:
+      `Nothing is sent to LinkedIn during this run. Approving it schedules each post as a SocialPost tied to ${account!.displayName}; ` +
+      `app/api/cron/social-publish publishes each one at its scheduled time via LinkedIn's UGC Posts API (refreshing the token first if needed) — ` +
+      `there is no such thing as a LinkedIn "Scheduled Posts API"; LinkedIn's API only publishes immediately, so scheduling is done on this side.`,
+    approvalNote: "Nothing is sent to LinkedIn until a workspace admin approves this run.",
+  };
+
+  await updateStatus("AWAITING_APPROVAL", output);
 
   return { output, costUsd };
 };

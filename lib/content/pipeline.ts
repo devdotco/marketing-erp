@@ -41,6 +41,30 @@ function withEvidenceBudget(brief: ContentBrief, research: ResearchResult): Cont
 }
 
 /**
+ * Which of two drafts to keep. Defect count first, same as always; but on a
+ * TIE, a draft under the brief's word-count floor never beats one that clears
+ * it. Owner decision, 2026-09-14: without this, two drafts tied on defect
+ * count could see the loop keep whichever was seen first even when the other
+ * one actually met the floor — the floor is enforced as its own defect
+ * (qc.ts), so this only matters for the tie case the defect-count compare
+ * alone does not resolve. Pure and exported so it is directly testable
+ * without running the pipeline.
+ */
+export function isBetterDraft(
+  candidate: { article: Article; qc: QcResult },
+  incumbent: { article: Article; qc: QcResult },
+  brief: ContentBrief,
+): boolean {
+  if (candidate.qc.defects.length !== incumbent.qc.defects.length) {
+    return candidate.qc.defects.length < incumbent.qc.defects.length;
+  }
+  const candidateMeetsFloor = candidate.article.wordCount >= brief.length.min;
+  const incumbentMeetsFloor = incumbent.article.wordCount >= brief.length.min;
+  if (candidateMeetsFloor !== incumbentMeetsFloor) return candidateMeetsFloor;
+  return false;
+}
+
+/**
  * Brief in, article out, with every stage the agent's own page promises.
  *
  * The shape is dm-watcher's: research the sources before writing so claims are
@@ -103,7 +127,7 @@ export async function writeArticle(
 
   // 3 ── Quality control
   startedAt = Date.now();
-  let qc = runQc(article, effective);
+  let qc = runQc(article, effective, research);
   await record(
     "Quality control",
     qc.pass ? "Passed on the first draft." : `${qc.defects.length} defect(s) found.`,
@@ -122,9 +146,9 @@ export async function writeArticle(
 
     const repaired = await repairArticle(client, effective, research, article, qc.defects);
     article = repaired.article;
-    qc = runQc(article, effective);
+    qc = runQc(article, effective, research);
 
-    const improved = qc.defects.length < best.qc.defects.length;
+    const improved = isBetterDraft({ article, qc }, best, effective);
     if (improved) best = { article, qc };
 
     await record(
@@ -138,8 +162,10 @@ export async function writeArticle(
   }
 
   // A repair round can trade two defects for three. Ship the cleanest draft the
-  // run actually produced, not whichever one happened to be last.
-  if (best.qc.defects.length < qc.defects.length) {
+  // run actually produced, not whichever one happened to be last — and never
+  // the one that ran a full defect-cycle over the word-count floor. See
+  // isBetterDraft above.
+  if (isBetterDraft(best, { article, qc }, effective)) {
     article = best.article;
     qc = best.qc;
   }

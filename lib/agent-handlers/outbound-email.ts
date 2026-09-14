@@ -1,5 +1,6 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
+import type { OutboundPlay, OutboundProspect } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
@@ -8,6 +9,14 @@ import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { listInstantlyCampaigns } from "@/lib/integrations/instantly";
+import { apolloEnrichOrganization, apolloMatchPerson } from "@/lib/integrations/apollo";
+import {
+  isApolloDataStale,
+  mapApolloOrg,
+  mapApolloPerson,
+  type StoredApolloEnrichment,
+} from "./outbound-strategist";
+import { parsePlayConfig, planCampaignResolution, type OutboundPlayConfig } from "./outbound-play-config";
 import type { OutboundEmailDelivery } from "./outbound-email-delivery";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
@@ -16,36 +25,23 @@ import type { OutboundEmailDelivery } from "./outbound-email-delivery";
 // stage/activate split exists.
 export { activateOutboundEmailDelivery, buildOutboundEmailLeadBody, type OutboundEmailDelivery } from "./outbound-email-delivery";
 
-const CAMPAIGN_MAP: Record<string, string> = {
-  "DEV-01": "DEV-01-SAAS-V1",
-  "DEV-02": "DEV-02-AGENCY-V1",
-  "DEV-03": "DEV-03-PE-V1",
-};
+/** Total Apollo enrichment calls (org + person) this run will make across every prospect in the
+ * batch that's missing intelligence and has no fresh cached data — mirrors
+ * outbound-strategist.ts's default maxApolloLookups so a large batch can't drain the account's
+ * credit balance just from Email Outbound backfilling what Strategist would normally have done. */
+const ENRICHMENT_BUDGET = 25;
+const ENRICHMENT_FRESHNESS_DAYS = 30;
 
-/** Per-run memo so a batch of leads for the same play only lists campaigns once. */
-const campaignIdCache = new Map<string, { at: number; id: string }>();
+/** Memo so a batch of leads across several plays only lists Instantly's campaigns once — keyed by
+ * API key (not just "the last call"), since this module is shared across every workspace's runs
+ * in the same worker process and a bare single-slot cache would leak one tenant's campaign list
+ * into another's lookup. */
+const campaignListCache = new Map<string, { at: number; campaigns: Array<{ id: string; name: string }> }>();
 const CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 
-/**
- * Instantly campaign ids are per-workspace UUIDs assigned when a campaign is
- * created in that account — nothing in this codebase can know one in advance.
- * Resolve the target by name instead: exact match on CAMPAIGN_MAP's value,
- * falling back to any campaign whose name contains the play slug (so renaming
- * "DEV-01-SAAS-V1" to something looser still works). No match is a
- * configuration problem the customer has to fix in Instantly, not something
- * to guess past.
- *
- * This is a read-only lookup — safe to run while staging, before approval.
- */
-async function resolveInstantlyCampaignId(
-  apiKey: string,
-  targetName: string,
-  playSlug: string,
-): Promise<string> {
-  const cacheKey = `${apiKey}:${playSlug}`;
-  const cached = campaignIdCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < CAMPAIGN_CACHE_TTL_MS) return cached.id;
-
+async function listCampaignsCached(apiKey: string): Promise<Array<{ id: string; name: string }>> {
+  const cached = campaignListCache.get(apiKey);
+  if (cached && Date.now() - cached.at < CAMPAIGN_CACHE_TTL_MS) return cached.campaigns;
   let campaigns: Array<{ id: string; name: string }>;
   try {
     campaigns = await listInstantlyCampaigns(apiKey);
@@ -67,66 +63,119 @@ async function resolveInstantlyCampaignId(
       "instantly_campaign_lookup_failed",
     );
   }
+  campaignListCache.set(apiKey, { at: Date.now(), campaigns });
+  return campaigns;
+}
 
-  const match =
-    campaigns.find((c) => c.name === targetName) ??
-    campaigns.find((c) => c.name.toLowerCase().includes(playSlug.toLowerCase()));
-
-  if (!match) {
+/**
+ * Resolves a play's configured Instantly campaign to a live id. A campaign chosen through the
+ * play editor's dropdown (components/ui/ResourceSelect via /api/outbound/integrations/options)
+ * already IS a live id — playConfig.instantlyCampaignId — so the common case needs no lookup at
+ * all. Only a play whose campaign was typed as plain text while Instantly wasn't connected yet
+ * (playConfig.instantlyCampaignName only) falls back to a by-name search, same convention as
+ * every other by-name lookup in this codebase (Aimfox, GHL pipelines).
+ */
+async function resolveInstantlyCampaign(
+  apiKey: string | null,
+  playConfig: OutboundPlayConfig,
+  playName: string,
+): Promise<{ campaignId: string; campaignName: string }> {
+  const plan = planCampaignResolution(playConfig.instantlyCampaignId, playConfig.instantlyCampaignName);
+  if (plan.mode === "id") {
+    return { campaignId: plan.campaignId, campaignName: plan.campaignName };
+  }
+  if (plan.mode === "unconfigured") {
     throw new AgentInputError(
-      `No Instantly campaign named "${targetName}" (or matching play ${playSlug}) exists in this workspace's Instantly account.`,
-      `Create a campaign in Instantly named "${targetName}", or rename an existing one to include "${playSlug}", then try again.`,
-      "instantly_campaign_not_found",
+      `The "${playName}" play has no Instantly campaign configured.`,
+      "Set one on the Outbound Engine page (/outbound) — pick it from the dropdown once Instantly is connected, or type its name if it isn't yet.",
+      "outbound_play_no_campaign",
     );
   }
 
-  campaignIdCache.set(cacheKey, { at: Date.now(), id: match.id });
-  return match.id;
+  const targetName = plan.targetName;
+  if (!apiKey) {
+    // Not connected — nothing to resolve against yet; the delivery stages with the typed name and
+    // activates as a simulation, matching every other agent's "not connected" behaviour.
+    return { campaignId: targetName, campaignName: targetName };
+  }
+
+  const campaigns = await listCampaignsCached(apiKey);
+  const match = campaigns.find((c) => c.name === targetName) ?? campaigns.find((c) => c.name.toLowerCase().includes(targetName.toLowerCase()));
+  if (!match) {
+    throw new AgentInputError(
+      `No Instantly campaign named "${targetName}" exists in this workspace's Instantly account.`,
+      `Create a campaign in Instantly named "${targetName}", or pick the right one from the dropdown on the Outbound Engine page.`,
+      "instantly_campaign_not_found",
+    );
+  }
+  return { campaignId: match.id, campaignName: targetName };
 }
 
-export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
-  await updateStatus("RUNNING");
+/** Backfills Apollo org/person enrichment for one prospect when it's missing or stale — the same
+ * mapApolloOrg/mapApolloPerson shapes and isApolloDataStale freshness check outbound-strategist.ts
+ * uses, exported from there rather than duplicated here (see that file). Only called when a
+ * prospect reaches this agent without having gone through the Strategist first (a manual run, or
+ * an explicit prospectIds run) and has no usable Intelligence Object yet. Budget-limited and
+ * best-effort: an enrichment failure here never fails the run, it just leaves the prospect's
+ * personalisation a little more generic. */
+async function backfillApolloEnrichment(
+  apiKey: string,
+  prospect: OutboundProspect,
+  budget: { remaining: number },
+): Promise<StoredApolloEnrichment | null> {
+  const stored = (prospect.apolloEnrichment ?? null) as StoredApolloEnrichment | null;
+  const domain = prospect.companyDomain?.trim().toLowerCase();
+  const now = new Date().toISOString();
+  const result: StoredApolloEnrichment = { ...stored };
+  let changed = false;
 
-  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
-  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
-  const config = resolveInputs(run);
-  const input = (run.input ?? {}) as Record<string, unknown>;
-
-  const prospectId = (input.prospectId ?? config.prospectId) as string | undefined;
-
-  if (!prospectId) {
-    const output = { error: "No prospectId in run.input.prospectId" };
-    return { output, costUsd: 0 };
+  if (domain && budget.remaining > 0 && isApolloDataStale(stored?.org?.fetchedAt, ENRICHMENT_FRESHNESS_DAYS)) {
+    budget.remaining -= 1;
+    try {
+      const res = await apolloEnrichOrganization(apiKey, domain);
+      if (res.ok) {
+        const json = (await res.json()) as { organization?: Parameters<typeof mapApolloOrg>[0] };
+        const org = mapApolloOrg(json.organization, domain, now);
+        if (org) {
+          result.org = org;
+          changed = true;
+        }
+      }
+    } catch {
+      // Best-effort — see doc comment.
+    }
   }
 
-  const prospect = await prisma.outboundProspect.findUnique({
-    where: { id: prospectId },
-    include: { play: true },
-  });
-
-  if (!prospect) {
-    const output = { error: `Prospect ${prospectId} not found` };
-    return { output, costUsd: 0 };
+  if (budget.remaining > 0 && isApolloDataStale(stored?.person?.fetchedAt, ENRICHMENT_FRESHNESS_DAYS)) {
+    budget.remaining -= 1;
+    try {
+      const res = await apolloMatchPerson(apiKey, { email: prospect.email });
+      if (res.ok) {
+        const json = (await res.json()) as { person?: Parameters<typeof mapApolloPerson>[0] };
+        const person = mapApolloPerson(json.person, now);
+        if (person) {
+          result.person = person;
+          changed = true;
+        }
+      }
+    } catch {
+      // Best-effort — see doc comment.
+    }
   }
 
-  const instantlyIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
-  });
+  return changed ? result : stored;
+}
 
-  if (prospect.channel === "WATCHLIST" || prospect.channel === "DISCARDED") {
-    const output = {
-      skipped: true,
-      reason: `Prospect channel is ${prospect.channel} — not eligible for email outreach`,
-      prospectId,
-    };
-    return { output, costUsd: 0 };
-  }
-
+async function generateVariables(
+  client: Anthropic,
+  prospect: OutboundProspect,
+  play: OutboundPlay,
+): Promise<{ variables: Record<string, string>; qualityNotes: unknown; costUsd: number }> {
   const intelligence = (prospect.intelligence ?? {}) as Record<string, unknown>;
   const intel = (intelligence.intelligence ?? {}) as Record<string, unknown>;
   const scoring = (intelligence.scoring ?? {}) as Record<string, unknown>;
 
-  const systemPrompt = `You are an outbound email specialist for Dev.co. Your job is to generate personalised Instantly campaign variables for a specific prospect based on their Prospect Intelligence Object.
+  const systemPrompt = `You are an outbound email specialist. Your job is to generate personalised Instantly campaign variables for a specific prospect based on their Prospect Intelligence Object.
 
 The variables will be injected into an email template. Each variable must be concise, specific to this prospect, and avoid generic outsourcing language.
 
@@ -149,7 +198,7 @@ Intelligence Object:
 - Context: ${(intel.companyContext as string) ?? "Not available"}
 - Score: ${scoring.total ?? 0}/100
 
-ICP Play: ${prospect.play.slug} — ${prospect.play.name}
+Play: ${play.slug} — ${play.name}
 
 Return exactly this JSON structure:
 {
@@ -161,7 +210,6 @@ Return exactly this JSON structure:
     "company_context": "string (1 compact fact about their situation, <12 words)",
     "proof_point": "string (social proof relevant to their situation, <15 words)"
   },
-  "campaignId": "${CAMPAIGN_MAP[prospect.play.slug] ?? "DEV-01-SAAS-V1"}",
   "qualityNotes": "string (any variables where you had to guess — flag them)"
 }`;
 
@@ -181,60 +229,146 @@ Return exactly this JSON structure:
     variableOutput = {};
   }
 
-  const variables = (variableOutput.variables ?? {}) as Record<string, string>;
-  // CAMPAIGN_MAP is a target *name* to look up in the workspace's own Instantly
-  // account below — never a live campaign id. Instantly ids are per-workspace
-  // UUIDs; there is no way to know one in advance.
-  const targetCampaignName = (CAMPAIGN_MAP[prospect.play.slug] ?? CAMPAIGN_MAP["DEV-01"]) as string;
+  return {
+    variables: (variableOutput.variables ?? {}) as Record<string, string>,
+    qualityNotes: variableOutput.qualityNotes,
+    costUsd: estimateCostUsd(MODELS.fast, message.usage),
+  };
+}
 
-  let campaignId = targetCampaignName;
-  const connected = Boolean(instantlyIntegration);
+export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
+  await updateStatus("RUNNING");
 
-  if (instantlyIntegration) {
-    // Auth is a v2 Bearer key; a v1 key is rejected outright by v2 endpoints.
-    // See lib/integrations/catalog.ts and lib/integrations/verify/outbound.ts.
-    const credentials = await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials);
-    // Read-only lookup — safe to run before approval.
-    campaignId = await resolveInstantlyCampaignId(credentials.apiKey, targetCampaignName, prospect.play.slug);
+  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
+  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
+  const config = resolveInputs(run);
+  const input = (run.input ?? {}) as Record<string, unknown>;
+
+  // "prospectIds" (batch, from Strategist via chaining.ts, or a manual multi-prospect run) and
+  // "prospectId" (single — the pre-batch shape, still the common manual-trigger case) both work;
+  // "prospectId" is read via `config` because it's a declared saved-config-backed form field, while
+  // "prospectIds" is always a one-off run input, never a saved default.
+  const prospectIds = Array.isArray(input.prospectIds)
+    ? (input.prospectIds as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
+  const singleId = (input.prospectId ?? config.prospectId) as string | undefined;
+  const allIds = [...new Set([...prospectIds, ...(singleId ? [singleId] : [])])];
+
+  if (allIds.length === 0) {
+    return { output: { error: "No prospectId(s) in run.input.prospectId / run.input.prospectIds" }, costUsd: 0 };
   }
 
-  const personalization: Record<string, string> = {
-    pain_signal: variables.pain_signal ?? "",
-    trigger: variables.trigger ?? "",
-    offer_angle: variables.offer_angle ?? "",
-    company_context: variables.company_context ?? "",
-    proof_point: variables.proof_point ?? "",
-  };
+  const prospects = await prisma.outboundProspect.findMany({
+    where: { id: { in: allIds }, workspaceId: run.agentConfig.workspaceId },
+    include: { play: true },
+  });
 
-  const delivery: OutboundEmailDelivery = {
-    status: "staged",
-    prospectId,
-    firstName: prospect.firstName,
-    company: prospect.company,
-    email: prospect.email,
-    campaignName: targetCampaignName,
-    campaignId,
-    connected,
-    personalization,
-  };
+  const instantlyIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
+  });
+  const connected = Boolean(instantlyIntegration);
+  const apiKey = instantlyIntegration
+    ? (await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials)).apiKey
+    : null;
+
+  const playConfigCache = new Map<string, OutboundPlayConfig>();
+  const campaignCache = new Map<string, { campaignId: string; campaignName: string }>();
+  const enrichmentBudget = { remaining: ENRICHMENT_BUDGET };
+
+  const deliveries: OutboundEmailDelivery[] = [];
+  const skipped: Array<{ prospectId: string; reason: string }> = [];
+  let costUsd = 0;
+
+  for (const prospectId of allIds) {
+    const prospect = prospects.find((p) => p.id === prospectId);
+    if (!prospect) {
+      skipped.push({ prospectId, reason: "Prospect not found in this workspace" });
+      continue;
+    }
+    if (prospect.channel === "WATCHLIST" || prospect.channel === "DISCARDED") {
+      skipped.push({ prospectId, reason: `Prospect channel is ${prospect.channel} — not eligible for email outreach` });
+      continue;
+    }
+
+    if (!playConfigCache.has(prospect.playId)) playConfigCache.set(prospect.playId, parsePlayConfig(prospect.play.config));
+    const playConfig = playConfigCache.get(prospect.playId)!;
+
+    let campaign: { campaignId: string; campaignName: string };
+    try {
+      if (!campaignCache.has(prospect.playId)) {
+        campaignCache.set(prospect.playId, await resolveInstantlyCampaign(apiKey, playConfig, prospect.play.name));
+      }
+      campaign = campaignCache.get(prospect.playId)!;
+    } catch (err) {
+      if (err instanceof AgentInputError && allIds.length > 1) {
+        // A batch with a campaign-configuration problem for one play shouldn't block prospects on
+        // a different, correctly-configured play in the same run.
+        skipped.push({ prospectId, reason: err.message });
+        continue;
+      }
+      throw err;
+    }
+
+    // Reuses the Strategist's Intelligence Object when there is one; backfills a minimal Apollo
+    // enrichment when there isn't (a prospect that reached this agent without Strategist having
+    // run — a manual/explicit-id trigger) so personalisation still has real facts to work from
+    // instead of only the bare prospect record.
+    let workingProspect = prospect;
+    const hasIntelligence = !!(prospect.intelligence && Object.keys(prospect.intelligence as object).length > 0);
+    if (!hasIntelligence && apiKey && enrichmentBudget.remaining > 0) {
+      const enrichment = await backfillApolloEnrichment(apiKey, prospect, enrichmentBudget);
+      if (enrichment) {
+        // Merged locally rather than reassigned from the update() result — that result has no
+        // `play` relation loaded (this is a plain update, not the findMany-with-include above), and
+        // generateVariables below needs workingProspect.play.
+        workingProspect = { ...prospect, apolloEnrichment: JSON.parse(JSON.stringify(enrichment)) };
+        await prisma.outboundProspect
+          .update({ where: { id: prospect.id }, data: { apolloEnrichment: workingProspect.apolloEnrichment as object } })
+          .catch((err) => console.error(`[outbound-email] could not persist backfilled enrichment for ${prospect.id}:`, err));
+      }
+    }
+
+    const { variables, qualityNotes, costUsd: genCost } = await generateVariables(client, workingProspect, prospect.play);
+    costUsd += genCost;
+
+    const personalization: Record<string, string> = {
+      pain_signal: variables.pain_signal ?? "",
+      trigger: variables.trigger ?? "",
+      offer_angle: variables.offer_angle ?? "",
+      company_context: variables.company_context ?? "",
+      proof_point: variables.proof_point ?? "",
+    };
+
+    deliveries.push({
+      status: "staged",
+      prospectId: prospect.id,
+      firstName: prospect.firstName,
+      company: prospect.company,
+      email: prospect.email,
+      campaignName: campaign.campaignName,
+      campaignId: campaign.campaignId,
+      connected,
+      personalization,
+    });
+
+    if (qualityNotes) skipped.push({ prospectId, reason: `note: ${String(qualityNotes)}` });
+  }
 
   const output: Record<string, unknown> = {
-    prospectId,
-    firstName: prospect.firstName,
-    company: prospect.company,
-    email: prospect.email,
-    campaignName: targetCampaignName,
-    qualityNotes: variableOutput.qualityNotes,
+    deliveries,
+    // Back-compat with the pre-batch single-prospect shape: when exactly one delivery was staged,
+    // also surface it at the top level as `delivery` — on-approve.ts, the run page, and any
+    // existing AWAITING_APPROVAL run created before batching still read this shape.
+    ...(deliveries.length === 1 ? { delivery: deliveries[0] } : {}),
+    staged: deliveries.length,
+    skipped,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
-    delivery,
     approvalRequired: true,
     approvalNote: connected
-      ? `Adding ${prospect.email} to the live Instantly campaign "${targetCampaignName}" requires workspace admin approval. Nothing has been sent to Instantly yet.`
-      : `No Instantly integration is connected — approving this run will record a simulated lead add instead of a live one.`,
+      ? `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Instantly campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Instantly yet.`
+      : `No Instantly integration is connected — approving this run will record simulated lead adds instead of live ones.`,
   };
-
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
   await updateStatus("AWAITING_APPROVAL", output);
   return { output, costUsd };

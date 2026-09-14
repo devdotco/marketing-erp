@@ -2,6 +2,7 @@ import { Worker, UnrecoverableError } from "bullmq";
 import { prisma } from "@/lib/prisma";
 import { getRedisConnection } from "@/lib/queue";
 import { getHandler } from "@/lib/agent-handlers/index";
+import { runOutboundChaining } from "@/lib/agent-handlers/chaining";
 import { describeRunError } from "@/lib/ai/errors";
 import { checkModelsAvailable } from "@/lib/ai/models";
 
@@ -52,6 +53,15 @@ const worker = new Worker(
             completedAt: new Date(),
           },
         });
+
+        // Outbound Engine pipeline chaining (Scout -> Strategist -> Email/LinkedIn Outbound) —
+        // no-ops for every other agent slug. Only reached here for a Scout run that did NOT await
+        // approval (requireApproval off); the approval path is handled from
+        // app/api/runs/[runId]/approve/route.ts instead, since this branch never runs for a run
+        // sitting in AWAITING_APPROVAL. Strategist never awaits approval, so it always chains here.
+        await runOutboundChaining({ ...run, status: "COMPLETED", output: output as object }).catch((err) =>
+          console.error(`[worker] run ${runId}: outbound chaining failed:`, err),
+        );
       } else if (freshRun?.status === "AWAITING_APPROVAL") {
         await prisma.agentRun.update({
           where: { id: runId },

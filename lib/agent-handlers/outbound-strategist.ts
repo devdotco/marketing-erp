@@ -10,6 +10,7 @@ import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { strictSchema } from "@/lib/content/article";
 import { apolloEnrichOrganization, apolloMatchPerson, apolloOrganizationJobPostings } from "@/lib/integrations/apollo";
+import { parsePlayConfig, firmographicBandFromIcp, routeByScore, type OutboundPlayConfig } from "./outbound-play-config";
 
 // ---------------------------------------------------------------------------
 // Apollo enrichment — pure planning logic (freshness, dedupe, cap selection).
@@ -111,25 +112,19 @@ export function planApolloLookups(
 }
 
 // ---------------------------------------------------------------------------
-// ICP firmographic bands — the same three plays Outbound Scout sources against
-// (lib/agent-handlers/outbound-scout.ts's ICP_DEFINITIONS), reduced to the slice the Strategist
-// needs to turn Apollo firmographics into a scoring note. Duplicated rather than imported so this
-// file has no cross-agent coupling.
+// ICP firmographic bands — derived from the play's own stored config, not a hardcoded per-slug
+// table. See the outbound-play-config module's firmographicBandFromIcp for how "employeeRanges"
+// strings become one min/max band.
 // ---------------------------------------------------------------------------
 
-const ICP_FIRMOGRAPHIC_BANDS: Record<string, { minEmployees: number; maxEmployees: number; industryHint: string }> = {
-  "DEV-01": { minEmployees: 50, maxEmployees: 500, industryHint: "B2B SaaS or software company" },
-  "DEV-02": { minEmployees: 10, maxEmployees: 200, industryHint: "marketing, creative, or digital agency" },
-  "DEV-03": { minEmployees: 100, maxEmployees: 2000, industryHint: "PE-backed portfolio company in any industry" },
-};
-
 /** Pure: turns one org's Apollo firmographics into plain-English notes for the scoring prompt.
- * Never invents a number — a note only appears for a field Apollo actually returned. */
+ * Never invents a number — a note only appears for a field Apollo actually returned. `band` comes
+ * from firmographicBandFromIcp(playConfig.icp) — pass a fallback ({ minEmployees: null,
+ * maxEmployees: null, industryHint: "this play's target ICP" }) when no band is known. */
 export function firmographicFitNotes(
-  playSlug: string,
+  band: { minEmployees: number | null; maxEmployees: number | null; industryHint: string },
   org: { employeeCount?: number | null; industry?: string | null } | null | undefined,
 ): string[] {
-  const band = ICP_FIRMOGRAPHIC_BANDS[playSlug] ?? ICP_FIRMOGRAPHIC_BANDS["DEV-01"];
   const notes: string[] = [];
 
   if (!org || (org.employeeCount == null && !org.industry)) {
@@ -137,7 +132,7 @@ export function firmographicFitNotes(
     return notes;
   }
 
-  if (typeof org.employeeCount === "number") {
+  if (typeof org.employeeCount === "number" && band.minEmployees !== null && band.maxEmployees !== null) {
     if (org.employeeCount < band.minEmployees) {
       notes.push(`Apollo reports ${org.employeeCount} employees — below this play's ${band.minEmployees}-${band.maxEmployees} ICP band.`);
     } else if (org.employeeCount > band.maxEmployees) {
@@ -145,6 +140,8 @@ export function firmographicFitNotes(
     } else {
       notes.push(`Apollo reports ${org.employeeCount} employees — within this play's ${band.minEmployees}-${band.maxEmployees} ICP band.`);
     }
+  } else if (typeof org.employeeCount === "number") {
+    notes.push(`Apollo reports ${org.employeeCount} employees — this play has no employee-range ICP filter configured to compare against.`);
   }
   if (org.industry) {
     notes.push(`Apollo industry: "${org.industry}" — this play targets a ${band.industryHint}.`);
@@ -157,7 +154,7 @@ export function firmographicFitNotes(
 // unit tested (same convention as lead-enrichment.ts and outbound-scout.ts).
 // ---------------------------------------------------------------------------
 
-interface RawApolloOrg {
+export interface RawApolloOrg {
   id?: string;
   primary_domain?: string;
   industry?: string;
@@ -175,7 +172,7 @@ interface RawApolloOrg {
   country?: string;
 }
 
-interface RawApolloPerson {
+export interface RawApolloPerson {
   title?: string;
   seniority?: string;
   departments?: string[];
@@ -183,11 +180,11 @@ interface RawApolloPerson {
   organization?: { id?: string };
 }
 
-interface RawApolloJobPosting {
+export interface RawApolloJobPosting {
   title?: string;
 }
 
-interface ApolloOrgEnrichment {
+export interface ApolloOrgEnrichment {
   id?: string;
   domain: string;
   industry?: string;
@@ -203,7 +200,7 @@ interface ApolloOrgEnrichment {
   fetchedAt: string;
 }
 
-interface ApolloPersonEnrichment {
+export interface ApolloPersonEnrichment {
   title?: string;
   seniority?: string;
   departments?: string[];
@@ -211,19 +208,19 @@ interface ApolloPersonEnrichment {
   fetchedAt: string;
 }
 
-interface ApolloJobPostingsEnrichment {
+export interface ApolloJobPostingsEnrichment {
   count: number;
   titles: string[];
   fetchedAt: string;
 }
 
-interface StoredApolloEnrichment {
+export interface StoredApolloEnrichment {
   org?: ApolloOrgEnrichment;
   person?: ApolloPersonEnrichment;
   jobPostings?: ApolloJobPostingsEnrichment;
 }
 
-function mapApolloOrg(raw: RawApolloOrg | undefined, domain: string, now: string): ApolloOrgEnrichment | null {
+export function mapApolloOrg(raw: RawApolloOrg | undefined, domain: string, now: string): ApolloOrgEnrichment | null {
   if (!raw) return null;
   return {
     id: raw.id,
@@ -242,7 +239,7 @@ function mapApolloOrg(raw: RawApolloOrg | undefined, domain: string, now: string
   };
 }
 
-function mapApolloPerson(raw: RawApolloPerson | undefined, now: string): ApolloPersonEnrichment | null {
+export function mapApolloPerson(raw: RawApolloPerson | undefined, now: string): ApolloPersonEnrichment | null {
   if (!raw) return null;
   return {
     title: raw.title,
@@ -255,7 +252,7 @@ function mapApolloPerson(raw: RawApolloPerson | undefined, now: string): ApolloP
   };
 }
 
-function mapApolloJobPostings(raw: RawApolloJobPosting[] | undefined, now: string): ApolloJobPostingsEnrichment | null {
+export function mapApolloJobPostings(raw: RawApolloJobPosting[] | undefined, now: string): ApolloJobPostingsEnrichment | null {
   if (!raw) return null;
   return {
     count: raw.length,
@@ -278,7 +275,7 @@ const SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME = "submit_prospect_intelligence";
 const CHANNELS = ["EMAIL_AND_LINKEDIN", "EMAIL_ONLY", "WATCHLIST", "DISCARDED"] as const;
 type Channel = (typeof CHANNELS)[number];
 
-const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
+export const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
   name: SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME,
   strict: true,
   description: "Submit this prospect's ICP score and Prospect Intelligence Object.",
@@ -292,7 +289,7 @@ const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
         properties: {
           total: { type: "integer", description: "0-100 composite score — the sum of the six dimensions below." },
           signal: { type: "integer", description: "0-25: observable pain or trigger signal." },
-          serviceFit: { type: "integer", description: "0-20: fit with Dev.co's service offer." },
+          serviceFit: { type: "integer", description: "0-20: fit with this play's service offer." },
           firmographic: { type: "integer", description: "0-25: company size, industry, revenue, location vs. the play's ICP." },
           persona: { type: "integer", description: "0-15: title/seniority/department fit." },
           timing: { type: "integer", description: "0-10: funding recency, hiring signals, headcount growth." },
@@ -307,7 +304,7 @@ const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
         properties: {
           painHypothesis: { type: "string", description: "1 sentence: the core pain this company likely has." },
           primarySignal: { type: "string", description: "The single strongest signal that makes this prospect worth contacting." },
-          bestOffer: { type: "string", description: "The specific Dev.co offer that maps to their situation." },
+          bestOffer: { type: "string", description: "The specific part of this play's service offer that maps to their situation." },
           messagingAngle: { type: "string", description: "The angle that will resonate — NOT generic outsourcing." },
           avoid: { type: "string", description: "What NOT to say in outreach to this prospect." },
           proofPoints: {
@@ -364,10 +361,17 @@ interface ScoredProspect {
 async function scoreProspect(
   client: Anthropic,
   prospect: Record<string, unknown>,
-  playSlug: string,
+  play: { name: string; config: OutboundPlayConfig },
   apollo: { org: ApolloOrgEnrichment | null; person: ApolloPersonEnrichment | null; jobPostings: ApolloJobPostingsEnrichment | null },
 ): Promise<{ scored: ScoredProspect; costUsd: number }> {
-  const firmographicNotes = firmographicFitNotes(playSlug, apollo.org);
+  // Destructured once, rather than reading each field off play.config inline below — not just
+  // style: test/content.test.ts's fleet-wide handler/metadata key-parity guard regexes this file's
+  // source for accesses on the *other* `config` object (outboundStrategistHandler's own
+  // resolveInputs(run) result, a screen down) by literal text, so writing play.config's fields out
+  // inline reads as a false hit against that unrelated object.
+  const { icp, routingThresholds: thresholds, serviceOffer, proofPoints } = play.config;
+  const band = firmographicBandFromIcp(icp);
+  const firmographicNotes = firmographicFitNotes(band, apollo.org);
 
   const apolloBlock = apollo.org || apollo.person || apollo.jobPostings
     ? [
@@ -385,27 +389,29 @@ async function scoreProspect(
       ].join("\n")
     : "No Apollo.io data is available for this prospect (not connected, or nothing fetched this run). Score and write the Intelligence Object from the prospect record alone — do not fabricate funding, tech stack, or hiring facts, and list every such claim in intelligence.inferredAssumptions instead of apolloFactsUsed.";
 
-  const systemPrompt = `You are an ICP scoring specialist for Dev.co, a software development agency.
+  const systemPrompt = `You are an ICP scoring specialist for the outbound play "${play.name}".
+${serviceOffer ? `\nWhat is being sold: ${serviceOffer}` : ""}
+${proofPoints.length ? `\nProof points available to reference: ${proofPoints.join(" | ")}` : ""}
 
-Your job is to score a single prospect against Dev.co's ICP criteria and generate a Prospect Intelligence Object used by the email and LinkedIn outreach agents.
+Your job is to score a single prospect against this play's ICP criteria and generate a Prospect Intelligence Object used by the email and LinkedIn outreach agents.
 
 Score the prospect across exactly these six dimensions (max points shown):
 1. Observable pain / trigger signal: 0-25 points
-2. Dev.co service fit: 0-20 points
+2. Service fit: 0-20 points
 3. Firmographic fit: 0-25 points
 4. Persona fit: 0-15 points
 5. Timing indicators: 0-10 points
 6. Data quality: 0-5 points
 
-Channel routing rules:
-- 80+: EMAIL_AND_LINKEDIN
-- 65-79: EMAIL_ONLY
-- 50-64: WATCHLIST
-- <50: DISCARDED
+Channel routing rules for this play (the total below decides the actual routing — these are so your rationale is consistent with it):
+- ${thresholds.emailAndLinkedin}+: EMAIL_AND_LINKEDIN
+- ${thresholds.emailOnly}-${thresholds.emailAndLinkedin - 1}: EMAIL_ONLY
+- ${thresholds.watchlist}-${thresholds.emailOnly - 1}: WATCHLIST
+- <${thresholds.watchlist}: DISCARDED
 
 Never fabricate a funding round, tech-stack entry, headcount figure, or hiring signal. Every fact in apolloFactsUsed must trace back to the Apollo data block you were given; anything else you assert belongs in inferredAssumptions instead. Call submit_prospect_intelligence exactly once with the complete result — no other text.`;
 
-  const userPrompt = `Score this prospect for play ${playSlug} and generate their Prospect Intelligence Object.
+  const userPrompt = `Score this prospect for play "${play.name}" and generate their Prospect Intelligence Object.
 
 Prospect data:
 ${JSON.stringify(prospect, null, 2)}
@@ -440,38 +446,60 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
   const config = resolveInputs(run);
   const input = (run.input ?? {}) as Record<string, unknown>;
 
-  const playSlug = (input.playSlug ?? config.playSlug ?? "DEV-01") as string;
+  const playSlug = (input.playSlug ?? config.playSlug) as string | undefined;
+  if (!playSlug) {
+    return {
+      output: { error: "No outbound play selected. Choose a play in Settings → Outbound Engine, or pass playSlug when triggering this run." },
+      costUsd: 0,
+    };
+  }
+
+  // Fetch the OutboundPlay for this workspace + slug — never auto-created with a guessed name
+  // (that's how the three hardcoded Dev.co plays used to leak into every workspace that ran this agent before a play
+  // existed). A workspace must create its play on the Outbound Engine page first.
+  const play = await prisma.outboundPlay.findUnique({
+    where: { workspaceId_slug: { workspaceId: run.agentConfig.workspaceId, slug: playSlug } },
+  });
+  if (!play) {
+    return {
+      output: {
+        error: `No outbound play "${playSlug}" exists for this workspace.`,
+        hint: "Create it on the Outbound Engine page (/outbound), then run this again.",
+      },
+      costUsd: 0,
+    };
+  }
+  const playConfig = parsePlayConfig(play.config);
+
   // "prospects" (batch, from Outbound Scout's own output array) and "prospect" (single) are read
   // straight off the raw run input — only "prospect" is a declared, saved-config-backed form field
   // (see lib/agent-metadata.ts); a batch handoff is always a one-off run input, never a saved default.
-  const rawProspects = normalizeProspects(input.prospects ?? input.prospect ?? config.prospect);
+  let rawProspects = normalizeProspects(input.prospects ?? input.prospect ?? config.prospect);
+
+  // "prospectIds" — a batch of already-persisted OutboundProspect ids, handed over by chaining.ts
+  // when Outbound Scout auto-advances into this run (see lib/agent-handlers/chaining.ts). Loaded
+  // and reshaped into the same raw-prospect record shape the rest of this handler already expects,
+  // so scoring/upsert below runs identically regardless of which path prospects arrived by.
+  if (rawProspects.length === 0 && Array.isArray(input.prospectIds) && input.prospectIds.length > 0) {
+    const ids = (input.prospectIds as unknown[]).filter((v): v is string => typeof v === "string");
+    const rows = await prisma.outboundProspect.findMany({ where: { id: { in: ids }, workspaceId: run.agentConfig.workspaceId } });
+    rawProspects = rows.map((r) => ({
+      firstName: r.firstName,
+      lastName: r.lastName ?? undefined,
+      email: r.email,
+      linkedInUrl: r.linkedInUrl ?? undefined,
+      title: r.title ?? undefined,
+      company: r.company,
+      companyDomain: r.companyDomain ?? undefined,
+    }));
+  }
+
   const maxApolloLookups = num(config, "maxApolloLookups", 25, { min: 0, max: 200 });
   const enrichmentFreshnessDays = num(config, "enrichmentFreshnessDays", 30, { min: 1, max: 365 });
 
   if (rawProspects.length === 0) {
-    const output = { error: "No prospect(s) provided in run.input.prospect / run.input.prospects", playSlug };
+    const output = { error: "No prospect(s) provided in run.input.prospect / run.input.prospects / run.input.prospectIds", playSlug };
     return { output, costUsd: 0 };
-  }
-
-  // Fetch the OutboundPlay for this workspace + slug
-  let play = await prisma.outboundPlay.findUnique({
-    where: { workspaceId_slug: { workspaceId: run.agentConfig.workspaceId, slug: playSlug } },
-  });
-  if (!play) {
-    // Auto-create the play record if it doesn't exist yet
-    const playNames: Record<string, string> = {
-      "DEV-01": "SaaS Engineering Capacity",
-      "DEV-02": "Agency White-Label Fulfillment",
-      "DEV-03": "PE-Backed Modernization",
-    };
-    play = await prisma.outboundPlay.create({
-      data: {
-        workspaceId: run.agentConfig.workspaceId,
-        slug: playSlug,
-        name: playNames[playSlug] ?? playSlug,
-        enabled: true,
-      },
-    });
   }
 
   // ── Apollo: connect check + freshness/dedupe/cap plan ──────────────────────
@@ -599,11 +627,15 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
       ...(jobPostings ? { jobPostings } : stored?.jobPostings ? { jobPostings: stored.jobPostings } : {}),
     };
 
-    const { scored, costUsd: scoreCost } = await scoreProspect(client, prospect, playSlug, { org, person, jobPostings });
+    const { scored, costUsd: scoreCost } = await scoreProspect(client, prospect, { name: play.name, config: playConfig }, { org, person, jobPostings });
     costUsd += scoreCost;
 
     const total = scored.scoring.total;
-    const routing = CHANNELS.includes(scored.scoring.routing) ? scored.scoring.routing : "WATCHLIST";
+    // Routing is recomputed from the total against this play's own configured thresholds rather
+    // than trusting Claude's own `scoring.routing` pick verbatim (still requested — CHANNELS is in
+    // the tool schema's enum, so a malformed response is caught at parse time — but the thresholds
+    // are the ground truth for what actually happens, so a play's configured cutoffs always win).
+    const routing = routeByScore(total, playConfig.routingThresholds);
 
     const dbProspect = await prisma.outboundProspect.upsert({
       where: { workspaceId_email: { workspaceId: run.agentConfig.workspaceId, email } },

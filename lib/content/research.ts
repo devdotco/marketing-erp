@@ -32,7 +32,7 @@ export interface ResearchResult {
   searched: boolean;
 }
 
-const SUBMIT_RESEARCH_TOOL: Anthropic.Tool = {
+export const SUBMIT_RESEARCH_TOOL: Anthropic.Tool = {
   name: "submit_research",
   // Without this the input is only best-effort JSON. A live run returned
   // `angles` as the string '\n<parameter name="angles">["…"]' — the model's own

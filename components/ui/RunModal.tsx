@@ -351,6 +351,34 @@ export function RunModal({
                       disabled={pending}
                       fieldStyle={inputFieldStyle}
                     />
+                  ) : input.type === "play_select" ? (
+                    <ResourceSelect
+                      id={`run-input-${input.key}`}
+                      optionsUrl="/api/outbound/plays/options"
+                      value={values[input.key] ?? ""}
+                      onChange={(v) => handleChange(input.key, v)}
+                      disabled={pending}
+                      fieldStyle={inputFieldStyle}
+                    />
+                  ) : input.type === "agent_run" ? (
+                    <ResourceSelect
+                      id={`run-input-${input.key}`}
+                      optionsUrl={`/api/runs/drafts?agents=${(input.sourceAgents ?? []).join(",")}`}
+                      value={values[input.key] ?? ""}
+                      onChange={(v) => handleChange(input.key, v)}
+                      disabled={pending}
+                      fieldStyle={inputFieldStyle}
+                      emptyLabel={input.emptyLabel}
+                    />
+                  ) : input.type === "social_account" ? (
+                    <ResourceSelect
+                      id={`run-input-${input.key}`}
+                      optionsUrl={`/api/social/accounts/options?platform=${input.socialPlatform}`}
+                      value={values[input.key] ?? ""}
+                      onChange={(v) => handleChange(input.key, v)}
+                      disabled={pending}
+                      fieldStyle={inputFieldStyle}
+                    />
                   ) : input.type === "textarea" ? (
                     <textarea
                       id={`run-input-${input.key}`}

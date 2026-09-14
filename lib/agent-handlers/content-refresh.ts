@@ -338,7 +338,7 @@ Return this exact JSON structure (no markdown, no code fences):
 
   if (!isLive) {
     output.simulationNote =
-      "Connect Google Search Console in Settings to pull real traffic decay signals, impressions, and click data per URL. Connect your CMS (WordPress/Storyblok/Webflow) to auto-publish refreshed content directly to the original URL without manual copy-paste.";
+      "Connect Google Search Console in Settings to pull real traffic decay signals, impressions, and click data per URL. Connect your CMS (WordPress/Storyblok/Webflow/Payload) to auto-publish refreshed content directly to the original URL without manual copy-paste.";
   }
 
   const requireApproval = config.requireApproval !== false;

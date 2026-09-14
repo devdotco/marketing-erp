@@ -45,11 +45,13 @@ export async function listInstantlyCampaigns(apiKey: string, limit = 100): Promi
 }
 
 /**
- * Resolve a campaign by name — exact match first, then a loose "contains the play slug" match so
- * renaming a campaign in Instantly doesn't break the lookup. Shared by Outbound Email (which
- * resolves DEV-01/02/03 campaigns) and anything else that targets a campaign by its configured
- * name rather than a stored id, since Instantly ids are per-workspace UUIDs nothing here can know
- * in advance.
+ * Resolve a campaign by name — exact match first, then a loose "contains" match so renaming a
+ * campaign in Instantly doesn't break the lookup. For anything that targets a campaign by a
+ * configured name rather than a stored id, since Instantly ids are per-workspace UUIDs nothing
+ * here can know in advance. Outbound Email (lib/agent-handlers/outbound-email.ts) resolves a play's
+ * configured campaign this same way when the play only has a name on file (no id chosen yet
+ * through the play editor's dropdown) — it inlines its own cached version of this lookup rather
+ * than calling this export, since it needs to memoize across a whole batch of prospects.
  */
 export async function resolveInstantlyCampaignIdByName(
   apiKey: string,

@@ -8,6 +8,7 @@ import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import type { OutboundRevenueDelivery } from "./outbound-revenue-delivery";
+import { parsePlayConfig } from "./outbound-play-config";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
 // implementation lives in outbound-revenue-delivery.ts, which imports neither Prisma nor
@@ -56,6 +57,7 @@ async function resolveGhlPipelineStage(
   authHeaders: Record<string, string>,
   locationId: string,
   targetStageName: string,
+  preferredPipelineId?: string,
 ): Promise<{ pipelineId: string; pipelineStageId: string; pipelineName: string; stageName: string }> {
   const cached = pipelineCache.get(locationId);
   const pipelines =
@@ -98,8 +100,12 @@ async function resolveGhlPipelineStage(
     );
   }
 
+  // A play with a GHL pipeline id configured (Outbound Engine page) picks that exact pipeline;
+  // otherwise falls back to the by-name "Outbound" convention, then the sub-account's first one.
   const pipeline =
-    pipelines.find((p) => p.name.toLowerCase().includes("outbound")) ?? pipelines[0];
+    (preferredPipelineId ? pipelines.find((p) => p.id === preferredPipelineId) : undefined) ??
+    pipelines.find((p) => p.name.toLowerCase().includes("outbound")) ??
+    pipelines[0];
   const stage =
     pipeline.stages.find((s) => s.name.toLowerCase() === targetStageName.toLowerCase()) ??
     pipeline.stages.find((s) => s.name.toLowerCase().includes(targetStageName.toLowerCase())) ??
@@ -247,7 +253,7 @@ Return exactly this JSON structure:
     if (wantsOpportunity && !prospect.ghlOpportunityId) {
       const authHeaders = { Authorization: `Bearer ${creds.apiKey}`, Version: GHL_VERSION, "Content-Type": "application/json" };
       // Read-only lookup — safe to run before approval.
-      const resolved = await resolveGhlPipelineStage(authHeaders, creds.locationId, GHL_STAGE_MAP[event]);
+      const resolved = await resolveGhlPipelineStage(authHeaders, creds.locationId, GHL_STAGE_MAP[event], parsePlayConfig(prospect.play.config).ghlPipelineId);
       pipelineId = resolved.pipelineId;
       pipelineStageId = resolved.pipelineStageId;
       pipelineName = resolved.pipelineName;

@@ -128,6 +128,58 @@ export function ConfigureForm({
                   <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
                 )}
               </div>
+            ) : field.type === "play_select" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <ResourceSelect
+                  id={field.key}
+                  optionsUrl="/api/outbound/plays/options"
+                  value={String(values[field.key] ?? "")}
+                  onChange={(v) => handleChange(field.key, v)}
+                  className="input"
+                />
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            ) : field.type === "agent_run" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <ResourceSelect
+                  id={field.key}
+                  optionsUrl={`/api/runs/drafts?agents=${(field.sourceAgents ?? []).join(",")}`}
+                  value={String(values[field.key] ?? "")}
+                  onChange={(v) => handleChange(field.key, v)}
+                  className="input"
+                  emptyLabel={field.emptyLabel}
+                />
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
+            ) : field.type === "social_account" ? (
+              <div>
+                <label className="input-label" htmlFor={field.key}>
+                  {field.label}
+                  {field.required && <span style={{ color: "var(--danger)", marginLeft: 3 }}>*</span>}
+                </label>
+                <ResourceSelect
+                  id={field.key}
+                  optionsUrl={`/api/social/accounts/options?platform=${field.socialPlatform}`}
+                  value={String(values[field.key] ?? "")}
+                  onChange={(v) => handleChange(field.key, v)}
+                  className="input"
+                />
+                {field.hint && (
+                  <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{field.hint}</p>
+                )}
+              </div>
             ) : field.type === "textarea" ? (
               <div>
                 <label className="input-label" htmlFor={field.key}>

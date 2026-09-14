@@ -30,6 +30,8 @@ export interface PayloadCredentials {
   siteUrl: string;
   bodyField: string;
   bodyFormat: "html" | "lexical";
+  /** Upload-enabled collection Blog Writer uploads AI-generated images to. Defaults to "media" — see catalog.ts's normaliseKeyCredentials. */
+  mediaCollection?: string;
 }
 
 /** One post as read back from Payload, trimmed to what internal linking needs. */
