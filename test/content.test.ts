@@ -105,6 +105,7 @@ import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { constantTimeEqual } from "@/lib/security/compare";
 import { adminSeedGate } from "@/lib/security/admin-seed";
 import { canInviteRole } from "@/lib/security/invite-roles";
+import { resolveInviter } from "@/lib/security/invite-authority";
 import {
   allowUnsignedWebhooks,
   generateWebhookToken,
@@ -2090,6 +2091,33 @@ check(
   check("canInviteRole: a VIEWER cannot invite at all", !canInviteRole("VIEWER", { role: "VIEWER", isSuperAdmin: false }));
   check("canInviteRole: a non-member cannot invite", !canInviteRole("VIEWER", { role: null, isSuperAdmin: false }));
   check("canInviteRole: a platform super admin with no membership may invite up to WORKSPACE_ADMIN", canInviteRole("WORKSPACE_ADMIN", { role: null, isSuperAdmin: true }));
+}
+
+// ─── Invitations: platform super admin is DB-derived, not the always-false session flag ───
+{
+  const db = (opts: { superAdmin: boolean; memberRole: string | null; workspace?: boolean }) => ({
+    workspaceMember: {
+      findFirst: async (args: { where: { userId: string; role: "SUPER_ADMIN" } }) => (opts.superAdmin && args.where.role === "SUPER_ADMIN" ? { id: "sa" } : null),
+      findUnique: async () => (opts.memberRole ? { role: opts.memberRole } : null),
+    },
+    workspace: { findUnique: async () => (opts.workspace === false ? null : { id: "ws" }) },
+  });
+  const platformOp = await resolveInviter("u-op", "ws", db({ superAdmin: true, memberRole: null }));
+  check("resolveInviter: a platform super admin (SUPER_ADMIN row in the DB) with no membership may invite", platformOp.mayInvite && platformOp.isSuperAdmin, platformOp);
+  check("resolveInviter: …and up to WORKSPACE_ADMIN, but still never SUPER_ADMIN", canInviteRole("WORKSPACE_ADMIN", platformOp) && !canInviteRole("SUPER_ADMIN", platformOp));
+  const admin = await resolveInviter("u-a", "ws", db({ superAdmin: false, memberRole: "WORKSPACE_ADMIN" }));
+  check("resolveInviter: a workspace admin may invite, not as a super admin", admin.mayInvite && !admin.isSuperAdmin && admin.role === "WORKSPACE_ADMIN", admin);
+  const operator = await resolveInviter("u-o", "ws", db({ superAdmin: false, memberRole: "OPERATOR" }));
+  check("resolveInviter: an OPERATOR member may not invite", !operator.mayInvite, operator);
+  const stranger = await resolveInviter("u-x", "ws", db({ superAdmin: false, memberRole: null }));
+  check("resolveInviter: a non-member who is not a super admin may not invite", !stranger.mayInvite, stranger);
+  const ghost = await resolveInviter("u-op", "missing", db({ superAdmin: true, memberRole: null, workspace: false }));
+  check("resolveInviter: not even a super admin invites into a workspace that does not exist", !ghost.mayInvite, ghost);
+  check("resolveInviter: nobody without a user id", !(await resolveInviter(null, "ws", db({ superAdmin: true, memberRole: "WORKSPACE_ADMIN" }))).mayInvite);
+  const route = readFileSync(path.join(process.cwd(), "app/api/invitations/route.ts"), "utf8");
+  check("invitations route: no longer reads session.user.isSuperAdmin", !/isSuperAdmin:\s*Boolean\(|session\.user\.isSuperAdmin/.test(route));
+  check("invitations route: gates on resolveInviter and keeps the canInviteRole allowlist", /await resolveInviter\(session\.user\.id, workspaceId\)/.test(route) && /canInviteRole\(role, \{ role: inviter\.role, isSuperAdmin: inviter\.isSuperAdmin \}\)/.test(route));
+  check("invitation-authority: super admin comes from isPlatformSuperAdmin", /isPlatformSuperAdmin\(userId, db\)/.test(readFileSync(path.join(process.cwd(), "lib/security/invite-authority.ts"), "utf8")));
 }
 
 // Payload two-step connect: discovery parsing, no network (fake fetch, stubbed DNS guard).

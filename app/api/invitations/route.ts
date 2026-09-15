@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { randomBytes } from "crypto";
 import { canInviteRole, INVITABLE_ROLES } from "@/lib/security/invite-roles";
+import { resolveInviter } from "@/lib/security/invite-authority";
 
 export const dynamic = "force-dynamic";
 
@@ -19,17 +19,17 @@ export async function POST(req: NextRequest) {
   }
 
   // Only a WORKSPACE_ADMIN of THIS workspace (or a platform super admin) may invite.
-  let access: Awaited<ReturnType<typeof requireWorkspaceAccess>>;
-  try {
-    access = await requireWorkspaceAccess(workspaceId, "WORKSPACE_ADMIN");
-  } catch {
+  // Super admin is read from the database (isPlatformSuperAdmin), never from
+  // the session's isSuperAdmin flag, which getServerSession() hardcodes to false.
+  const inviter = await resolveInviter(session.user.id, workspaceId);
+  if (!inviter.mayInvite) {
     return NextResponse.json({ error: "Only workspace admins can invite members" }, { status: 403 });
   }
 
   // The role used to be stored verbatim — SUPER_ADMIN included, and a SUPER_ADMIN membership
-  // anywhere makes a user a platform operator (lib/auth.ts). Allowlist it, capped at the
-  // inviter's own role.
-  if (!canInviteRole(role, { role: access.member?.role, isSuperAdmin: Boolean(access.session.user.isSuperAdmin) })) {
+  // anywhere makes a user a platform operator (lib/platform-admin.ts). Allowlist it, capped at
+  // the inviter's own role.
+  if (!canInviteRole(role, { role: inviter.role, isSuperAdmin: inviter.isSuperAdmin })) {
     return NextResponse.json({ error: `role must be one of ${INVITABLE_ROLES.join(", ")}, and no higher than your own` }, { status: 400 });
   }
 
