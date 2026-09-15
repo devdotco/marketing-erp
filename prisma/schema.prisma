@@ -408,6 +408,22 @@ model OutboundProspect {
   @@unique([workspaceId, email])
 }
 
+/// One Instantly / Aimfox webhook delivery already acted on — the idempotency record that stops a
+/// vendor retry from applying the same event twice or starting a second Outbound Revenue run.
+/// `dedupeKey` is a sha256 (no address in it) of the vendor's event id, else prospect + event +
+/// the vendor's timestamp — see lib/webhooks/outbound-events.ts. Deliberately no relation to
+/// Workspace: it holds nothing but hashes and needs no back-reference on that model.
+model WebhookReceipt {
+  id          String   @id @default(cuid())
+  workspaceId String
+  provider    String
+  dedupeKey   String
+  eventType   String
+  createdAt   DateTime @default(now())
+
+  @@unique([workspaceId, provider, dedupeKey])
+}
+
 // ── Social Publishing ─────────────────────────────────────────────────────────
 
 enum SocialPlatform {
