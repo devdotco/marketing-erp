@@ -88,6 +88,7 @@ import { AimfoxApiError } from "@/lib/integrations/aimfox";
 import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { constantTimeEqual } from "@/lib/security/compare";
+import { adminSeedGate } from "@/lib/security/admin-seed";
 import {
   allowUnsignedWebhooks,
   generateWebhookToken,
@@ -2023,6 +2024,19 @@ check(
   walk(path.join(repoRoot, "app"));
   check("prospect scoping: the scan found the outbound call sites", scanned >= 15, scanned);
   check("prospect scoping: every OutboundProspect query/write filters by workspaceId", unscoped.length === 0, unscoped);
+}
+
+// ─── Security hotfix: /api/admin/seed gate (public route, query-string secret, NEXTAUTH_SECRET fallback) ───
+{
+  const strong = "x".repeat(40);
+  check("adminSeedGate: production without ALLOW_ADMIN_SEED is 404 even with the right secret", adminSeedGate({ NODE_ENV: "production", ADMIN_SEED_SECRET: strong }, strong) === "not_found");
+  check("adminSeedGate: production with ALLOW_ADMIN_SEED=true and the right secret is ok", adminSeedGate({ NODE_ENV: "production", ALLOW_ADMIN_SEED: "true", ADMIN_SEED_SECRET: strong }, strong) === "ok");
+  check("adminSeedGate: ALLOW_ADMIN_SEED must be exactly 'true'", adminSeedGate({ NODE_ENV: "production", ALLOW_ADMIN_SEED: "1", ADMIN_SEED_SECRET: strong }, strong) === "not_found");
+  check("adminSeedGate: no ADMIN_SEED_SECRET is 404 — NEXTAUTH_SECRET is not a fallback", adminSeedGate({ NODE_ENV: "development", NEXTAUTH_SECRET: strong, SEED_SECRET: strong }, strong) === "not_found");
+  check("adminSeedGate: a short ADMIN_SEED_SECRET is refused (404)", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: "short" }, "short") === "not_found");
+  check("adminSeedGate: wrong secret is 403", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, strong + "y") === "forbidden");
+  check("adminSeedGate: missing header is 403", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, null) === "forbidden");
+  check("adminSeedGate: right secret outside production is ok", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, strong) === "ok");
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

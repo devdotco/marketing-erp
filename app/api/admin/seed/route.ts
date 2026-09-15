@@ -3,17 +3,31 @@ import { prisma } from "@/lib/prisma";
 import { encryptCredentials } from "@/lib/crypto";
 import { IntegrationProvider } from "@prisma/client";
 import { cookies } from "next/headers";
+import { ADMIN_SEED_HEADER, adminSeedGate } from "@/lib/security/admin-seed";
 
 export const dynamic = "force-dynamic";
 
-// Protected by SEED_SECRET env var. Call once to bootstrap admin workspace.
-// GET /api/admin/seed?secret=<SEED_SECRET>
+/**
+ * Bootstrap-only. This route is public at the proxy and can promote the admin
+ * user to SUPER_ADMIN and overwrite the admin workspace's integration keys, so
+ * it is gated by lib/security/admin-seed.ts:
+ *  - production: 404 unless ALLOW_ADMIN_SEED=true
+ *  - ADMIN_SEED_SECRET unset (or under 32 chars): 404 — no fallback secret
+ *  - `x-admin-seed-secret` header, compared in constant time: else 403
+ *
+ *   curl -H "x-admin-seed-secret: $ADMIN_SEED_SECRET" .../api/admin/seed
+ */
+function gate(req: NextRequest): NextResponse | null {
+  const verdict = adminSeedGate(process.env, req.headers.get(ADMIN_SEED_HEADER));
+  if (verdict === "ok") return null;
+  if (verdict === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  return NextResponse.json({ error: "Not found" }, { status: 404 });
+}
+
+// GET /api/admin/seed — bootstrap the admin workspace (header: x-admin-seed-secret)
 export async function GET(req: NextRequest) {
-  const secret = req.nextUrl.searchParams.get("secret");
-  const expected = process.env.SEED_SECRET || process.env.NEXTAUTH_SECRET;
-  if (!expected || secret !== expected) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const denied = gate(req);
+  if (denied) return denied;
 
   const adminEmail = process.env.ADMIN_EMAIL || "nate@dev.co";
 
@@ -129,19 +143,17 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/admin/seed
-// Body: { secret, provider, credentials }
+// Header: x-admin-seed-secret. Body: { provider, credentials }
 // Saves an Integration for the admin workspace. No session required.
 export async function POST(req: NextRequest) {
-  let body: { secret?: string; provider?: string; credentials?: Record<string, unknown> };
+  const denied = gate(req);
+  if (denied) return denied;
+
+  let body: { provider?: string; credentials?: Record<string, unknown> };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  const expected = process.env.SEED_SECRET || process.env.NEXTAUTH_SECRET;
-  if (!expected || body.secret !== expected) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const { provider, credentials } = body;
