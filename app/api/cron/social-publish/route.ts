@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { constantTimeEqual } from "@/lib/security/compare";
 import { publishLinkedInPost, refreshLinkedInToken } from "@/lib/social/linkedin-publish";
 import { publishXPost, refreshXToken } from "@/lib/social/x-publish";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  const secret = req.headers.get("x-cron-secret");
-  if (secret !== process.env.CRON_SECRET) {
+  // Constant time, and an unset CRON_SECRET matches nothing.
+  if (!constantTimeEqual(req.headers.get("x-cron-secret"), process.env.CRON_SECRET)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

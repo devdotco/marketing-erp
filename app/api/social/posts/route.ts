@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getActiveWorkspaceId } from "@/lib/actions/workspace";
+import { PUBLIC_SOCIAL_ACCOUNT_SELECT } from "@/lib/social/account-select";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest) {
       ...(status ? { status: status as "DRAFT" | "SCHEDULED" | "PUBLISHED" | "FAILED" } : {}),
       ...(accountId ? { socialAccountId: accountId } : {}),
     },
-    include: { socialAccount: true },
+    include: { socialAccount: { select: PUBLIC_SOCIAL_ACCOUNT_SELECT } },
     orderBy: { createdAt: "desc" },
   });
 
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
       status: body.status ?? "DRAFT",
       scheduledAt: body.scheduledAt ? new Date(body.scheduledAt) : null,
     },
-    include: { socialAccount: true },
+    include: { socialAccount: { select: PUBLIC_SOCIAL_ACCOUNT_SELECT } },
   });
 
   return NextResponse.json(post, { status: 201 });
