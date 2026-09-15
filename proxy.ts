@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { BASE_PATH, withBase } from "@/lib/base-path";
+import { SHELL_SESSION_COOKIE, shellHandoffUrl } from "@/lib/shell-handoff";
 
 /** The path as this app names it, whether or not the mount arrived attached. */
 function stripBase(pathname: string): string {
@@ -22,11 +23,12 @@ export default auth((req: NextRequest & { auth: { user?: { id: string; isSuperAd
   const pathname = stripBase(req.nextUrl.pathname);
   const session = req.auth;
 
-  // Public routes — always accessible
-  const isPublic =
-    pathname.startsWith("/login") ||
-    pathname.startsWith("/signup") ||
-    pathname.startsWith("/start") ||
+  // Infrastructure routes — never gated, and never candidates for the SSO fast
+  // path below. `/api/auth` in particular is where the shell hand-off itself is
+  // REDEEMED (`/api/auth/shell`) and where NextAuth's own routes live: sending
+  // either of those back to the shell for a token they were about to consume is
+  // exactly the redirect loop the fast path has to avoid.
+  const isInfra =
     pathname.startsWith("/invite/") ||
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/admin") ||
@@ -41,7 +43,44 @@ export default auth((req: NextRequest & { auth: { user?: { id: string; isSuperAd
     // reports only whether the configured Claude models resolve.
     pathname.startsWith("/api/health") ||
     pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon") ||
+    pathname.startsWith("/favicon");
+
+  if (isInfra) return NextResponse.next();
+
+  // FAST PATH. Signed in to the suite (the shell's `__vibe_session` cookie is
+  // present — readable here because every module now shares app.erp.io as its
+  // origin) but not yet to Marketing: hand off silently rather than showing
+  // `/login` or the public `/start` sign-up page. This is what makes
+  // `app.erp.io/marketing` land suite users straight in their workspace
+  // instead of the "create your free account" page.
+  //
+  // Two things keep this from looping:
+  //  - `session` (Marketing's OWN session) is checked FIRST. An existing
+  //    Marketing session is never bounced back to the shell just because the
+  //    shell cookie is also present — the ordering bug fixed in Sign on
+  //    2026-09-15 was exactly this check running before the module's session.
+  //  - Guarded on there being no `error`/`reason` query param, and excluded
+  //    from `/api/*` (a `fetch()` call gets the pre-existing 401/redirect
+  //    behavior below, not a cross-origin bounce a program cannot follow). The
+  //    shell's mint never redirects a refusal back to this app — see
+  //    app-erp-io module-token/route.ts — but a bare guard against retrying
+  //    costs nothing and matches the pattern used estate-wide.
+  //
+  // `pathname` is passed as `next` UNMOUNTED — the module's own callback adds
+  // the mount back with `withBase`.
+  if (!session?.user && !pathname.startsWith("/api/")) {
+    const shellCookie = req.cookies.get(SHELL_SESSION_COOKIE)?.value;
+    const alreadyTried = req.nextUrl.searchParams.has("error") || req.nextUrl.searchParams.has("reason");
+    if (shellCookie && !alreadyTried) {
+      return NextResponse.redirect(shellHandoffUrl(`${pathname}${req.nextUrl.search}`));
+    }
+  }
+
+  // Public routes — reachable with no session of any kind (nobody to hand off)
+  const isPublic =
+    pathname.startsWith("/login") ||
+    pathname.startsWith("/signup") ||
+    pathname.startsWith("/start") ||
     pathname === "/";
 
   if (isPublic) return NextResponse.next();
