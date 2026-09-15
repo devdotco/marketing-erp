@@ -20,6 +20,7 @@ import { underLength } from "@/lib/content/draft";
 import { isBetterDraft } from "@/lib/content/pipeline";
 import { AGENTS } from "@/lib/agents";
 import { AGENT_META } from "@/lib/agent-metadata";
+import { applyRenamedInputs } from "@/lib/agent-handlers/renamed-inputs";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -449,16 +450,14 @@ check(
   // silence 44 pre-existing agents on faith. Remove a slug once its agent's
   // handler and metadata are reconciled.
   const KNOWN_MISMATCHES = new Set([
-    "ad-creative", "ai-search-visibility", "attribution",
     "blog-writer", // false positive: reads flow through lib/content/brief.ts's buildBrief(), not inline — see doc comment above.
-    "captions-clips", "community", "competitor-watch", "content-refresh", "cro-experiments",
-    "digital-pr", "email-marketing", // owned by a concurrent edit — do not touch per task instructions.
-    "google-ads", "inbox-responder", "internal-linking", "keyword-research", "landing-page-copy",
-    "lead-enrichment", "linkedin-ads", "local-seo-gbp",
-    "meta-ads", "newsletter", "on-site-publisher", "onboarder", "operator",
-    "outreach", "placement", "podcast", "proposal", "prospector",
-    "repurposer", "review-engine", "schema", "short-form", "technical-audit", "topic-planner",
-    "video-script", "weekly-report", "x-engager", "youtube",
+    // ad-creative, captions-clips, content-refresh, digital-pr, internal-linking, landing-page-copy,
+    // newsletter, on-site-publisher, podcast, repurposer, schema, short-form, topic-planner,
+    // video-script, youtube: reconciled 2026-09-14; old input names still honoured via
+    // lib/agent-handlers/renamed-inputs.ts.
+    // community, email-marketing, inbox-responder, lead-enrichment, onboarder, operator, outreach,
+    // prospector, proposal, x-engager: reconciled 2026-09-14; old input names still honoured via
+    // lib/agent-handlers/renamed-inputs.ts.
     // linkedin-poster, x-poster, meta-poster: reconciled 2026-09-14 (Social module rebuild) — see
     // the "no requireApproval escape hatch" check below and social-poster-shared.test coverage.
   ]);
@@ -493,6 +492,32 @@ check(
   for (const slug of ["rank-tracker", "gsc-analyst", "backlink-monitor", "anomaly-watch"]) {
     check(`${slug} is not on the known-mismatch list`, !KNOWN_MISMATCHES.has(slug));
   }
+}
+
+// 12b. Renamed inputs: an old key saved before a form/handler reconciliation still reaches the
+// handler under the new name, but never beats a value supplied under the new name, and a select
+// never accepts a label outside its current options.
+{
+  const renamedRun = (slug: string, input: Record<string, unknown>, saved: Record<string, unknown>) =>
+    ({ input, agentConfig: { agentSlug: slug, config: saved } }) as unknown as Parameters<typeof resolveInputs>[0];
+
+  const r1 = renamedRun("outreach", {}, { pitchAngle: "our churn study", sequenceLength: "4", dailyLimit: 12 });
+  const c1 = applyRenamedInputs(r1, resolveInputs(r1), {
+    yourPitch: "pitchAngle",
+    followUpCount: { from: "sequenceLength", map: (v: unknown) => Number(v) - 1 },
+    dailySendLimit: "dailyLimit",
+  });
+  check("a saved old key reaches the new name over its metadata default", c1.yourPitch === "our churn study" && c1.dailySendLimit === 12, c1);
+  check("a mapped rename converts the old value (sequenceLength 4 → 3 follow-ups)", c1.followUpCount === 3, c1);
+
+  const r2 = renamedRun("outreach", { dailySendLimit: "25" }, { dailyLimit: 12 });
+  const c2 = applyRenamedInputs(r2, resolveInputs(r2), { dailySendLimit: "dailyLimit" });
+  check("a value typed under the new name beats a saved old key", c2.dailySendLimit === 25, c2);
+
+  const r3 = renamedRun("x-engager", {}, { replyStyle: "Informative", requireHumanApproval: "false" });
+  const c3 = applyRenamedInputs(r3, resolveInputs(r3), { replyTone: "replyStyle", requireApproval: "requireHumanApproval" });
+  check("an old select label that no longer exists falls back to the default", c3.replyTone === "Conversational", c3);
+  check("an old boolean key is coerced under the new name", c3.requireApproval === false, c3);
 }
 
 // ---------------------------------------------------------------------------

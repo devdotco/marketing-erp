@@ -6,7 +6,8 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 function formatDate(d: Date): string {
@@ -25,10 +26,16 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
   // connected grant, so a fake fallback here would fail every run that
   // didn't explicitly pick something (a scheduled run, in particular).
   const siteUrl = typeof config.siteUrl === "string" ? config.siteUrl : "";
-  const maxPagesPerRun = typeof config.maxPagesPerRun === "number" ? config.maxPagesPerRun : 10;
-  const decayThresholdDays = typeof config.decayThresholdDays === "number" ? config.decayThresholdDays : 180;
-  const refreshDepth = typeof config.refreshDepth === "string" ? config.refreshDepth : "Medium";
+  // Renamed to the Run form's key on 2026-09-14; a saved maxPagesPerRun still works.
+  applyRenamedInputs(run, config, { maxPostsPerRun: "maxPagesPerRun" });
+  const maxPagesPerRun = num(config, "maxPostsPerRun", 5, { min: 1, max: 50 });
+  // Search Console keeps 16 months. Six is the floor because the baseline window
+  // (90 days starting this many months back) must end before the recent 90 days begin.
+  const analysisWindowMonths = num(config, "analysisWindowMonths", 16, { min: 6, max: 16 });
+  const decayThresholdPercent = num(config, "decayThresholdPercent", 20, { min: 1, max: 100 });
+  const refreshDepth = str(config, "refreshDepth", "Medium");
   const cmsTarget = typeof config.cmsTarget === "string" ? config.cmsTarget : "Draft";
+  const preservePublishDate = bool(config, "preservePublishDate", false);
 
   const businessProfile = await prisma.businessProfile.findFirst({ where: { workspaceId: run.agentConfig.workspaceId } });
 
@@ -74,19 +81,18 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
       const yesterday = new Date(today);
       yesterday.setDate(today.getDate() - 1);
 
-      // Last 16 months (~490 days) for decay signal
-      const sixteenMonthsAgo = new Date(yesterday);
-      sixteenMonthsAgo.setDate(yesterday.getDate() - 490);
-
       // Recent 90-day window for current traffic
       const ninetyDaysAgo = new Date(yesterday);
       ninetyDaysAgo.setDate(yesterday.getDate() - 89);
 
-      // Older 90-day window (90-180 days ago) for decay comparison
-      const oneEightyDaysAgo = new Date(yesterday);
-      oneEightyDaysAgo.setDate(yesterday.getDate() - 179);
-      const ninetyOneeDaysAgo = new Date(yesterday);
-      ninetyOneeDaysAgo.setDate(yesterday.getDate() - 90);
+      // Baseline 90-day window at the start of the analysis window, for the
+      // decay comparison. At the 6-month floor this is roughly the 90-180-days-ago
+      // window the agent always used before the months field was wired in.
+      const windowDays = Math.round(analysisWindowMonths * 30.4);
+      const baselineStart = new Date(yesterday);
+      baselineStart.setDate(yesterday.getDate() - Math.min(windowDays, 486));
+      const baselineEnd = new Date(baselineStart);
+      baselineEnd.setDate(baselineStart.getDate() + 89);
 
       type GscRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
       type GscResponse = { rows?: GscRow[] };
@@ -108,8 +114,8 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
           method: "POST",
           headers,
           body: JSON.stringify({
-            startDate: formatDate(oneEightyDaysAgo),
-            endDate: formatDate(ninetyOneeDaysAgo),
+            startDate: formatDate(baselineStart),
+            endDate: formatDate(baselineEnd),
             dimensions: ["page"],
             rowLimit: 25000,
           }),
@@ -153,7 +159,7 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
             olderPosition: older?.position ?? null,
           };
         })
-        .filter((p) => p.decayPercent < -10 || p.recentClicks === 0) // Pages losing >10% traffic or completely dead
+        .filter((p) => p.decayPercent <= -decayThresholdPercent || p.recentClicks === 0) // Pages past the decay threshold or completely dead
         .sort((a, b) => a.decayPercent - b.decayPercent) // Worst decay first
         .slice(0, maxPagesPerRun * 3); // Extra buffer so Claude can pick the best candidates
 
@@ -168,15 +174,15 @@ export const contentRefreshHandler: AgentHandler = async (run, updateStatus) => 
       gscPageContext = `REAL GSC PAGE PERFORMANCE DATA:
 Property: ${propertyUrl}
 Recent period: ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)} (last 90 days)
-Comparison period: ${formatDate(oneEightyDaysAgo)} to ${formatDate(ninetyOneeDaysAgo)} (90-180 days ago)
+Comparison period: ${formatDate(baselineStart)} to ${formatDate(baselineEnd)} (90 days starting ${analysisWindowMonths} months back)
 
 Total pages with recent impressions: ${recentRows.length}
-Pages losing traffic (>10% drop or zero clicks): ${decayingPages.length}
+Pages losing traffic (${decayThresholdPercent}%+ click drop or zero clicks): ${decayingPages.length}
 
 Decaying pages (sorted worst decay first — use these as priority candidates):
 ${JSON.stringify(decayingPages, null, 2)}
 
-Pages that vanished from recent results (had traffic 90-180 days ago, none recently):
+Pages that vanished from recent results (had traffic in the comparison period, none recently):
 ${JSON.stringify(vanishedPages, null, 2)}`;
 
       isLive = true;
@@ -198,9 +204,11 @@ Business context:
 Configuration:
 - Site URL: ${siteUrl}
 - Pages to process this run: ${maxPagesPerRun}
-- Decay threshold: content not updated in ${decayThresholdDays}+ days is considered decaying
+- Analysis window: ${analysisWindowMonths} months
+- Decay threshold: a click decline of ${decayThresholdPercent}% or more across the analysis window marks a page as decaying
 - Refresh depth: ${refreshDepth} (Light = metadata + stats only; Medium = section rewrites + new FAQ; Full = complete structural rewrite)
 - CMS target for publishing: ${cmsTarget}
+- Publish date on republish: ${preservePublishDate ? "keep the original publication date" : "set to the refresh date so the post surfaces as recently updated"}
 
 ${isLive ? gscPageContext + "\n\nUsing the real decay data above, select the top " + maxPagesPerRun + " most critical pages to refresh (prioritize by worst decay % and lost impressions). Use actual URLs from the data. For each page, fabricate realistic content issues and refresh recommendations based on the URL path and traffic patterns." : ""}
 
@@ -226,7 +234,8 @@ Return this exact JSON structure (no markdown, no code fences):
     "refreshDepth": "${refreshDepth}",
     "cmsTarget": "${cmsTarget}",
     "estimatedTotalTrafficRecoveryPercent": 0,
-    "decayThresholdDays": ${decayThresholdDays},
+    "analysisWindowMonths": ${analysisWindowMonths},
+    "decayThresholdPercent": ${decayThresholdPercent},
     "source": "${isLive ? "live" : "simulation"}"
   },
   "decaySignalBreakdown": {
@@ -300,7 +309,8 @@ Return this exact JSON structure (no markdown, no code fences):
         "platform": "${cmsTarget}",
         "steps": [],
         "scheduledPublishDate": "",
-        "preserveOriginalUrl": true
+        "preserveOriginalUrl": true,
+        "preserveOriginalPublishDate": ${preservePublishDate}
       },
       "estimatedTrafficRecoveryPercent": 0,
       "estimatedTimeToResultWeeks": 0

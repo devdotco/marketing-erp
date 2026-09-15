@@ -2,7 +2,8 @@ import type { AgentHandler } from "./index";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { createKlaviyoDraft, createMailchimpDraft, resolveEspLiveData } from "./esp-providers";
 
@@ -15,14 +16,15 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
 
   const newsletterName =
     typeof config.newsletterName === "string" ? config.newsletterName : "The Newsletter";
-  const cadence =
-    typeof config.cadence === "string" ? config.cadence : "Weekly";
-  const issueTheme =
-    typeof config.issueTheme === "string" ? config.issueTheme : "";
-  const numberOfStories =
-    typeof config.numberOfStories === "number" ? config.numberOfStories : 4;
-  const ctaText =
-    typeof config.cta === "string" ? config.cta : "";
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, { issueFrequency: "cadence", maxItemsPerIssue: "numberOfStories" });
+  const cadence = str(config, "issueFrequency", "Monthly");
+  const issueTheme = str(config, "issueTheme");
+  const numberOfStories = num(config, "maxItemsPerIssue", 6, { min: 1, max: 12 });
+  const ctaText = str(config, "cta");
+  const lookbackWindowDays = num(config, "lookbackWindowDays", 30, { min: 1, max: 365 });
+  const internalHighlights = str(config, "internalHighlights");
+  const subjectLineVariants = num(config, "subjectLineVariants", 3, { min: 1, max: 5 });
   const espTarget =
     typeof config.espTarget === "string" ? config.espTarget : "Draft";
 
@@ -89,7 +91,12 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
     `Write a complete ${cadence.toLowerCase()} issue of "${newsletterName}".`,
     issueTheme ? `Issue theme: ${issueTheme}` : "",
     `Include exactly ${numberOfStories} stories, each connected by the editorial through-line of the issue theme.`,
+    `Cover developments from the last ${lookbackWindowDays} days only (today is ${new Date().toISOString().slice(0, 10)}) — nothing older.`,
+    internalHighlights
+      ? `\nInternal highlights to feature in this issue (announcements, product updates, events — use these facts as given, and count each as one of the stories):\n${internalHighlights}`
+      : "",
     ctaText ? `Primary CTA for this issue: ${ctaText}` : "",
+    `Write ${subjectLineVariants} distinct subject line variant(s) for A/B testing; subjectLine is the one you recommend and must also appear in subjectLineVariants.`,
     espNote,
     liveContext
       ? `\nReal ESP performance data — use these past campaign results to inform your subject line style, story angles, and content tone:\n${liveContext}`
@@ -108,6 +115,7 @@ export const newsletterHandler: AgentHandler = async (run, updateStatus) => {
     JSON.stringify({
       issueNumber: null,
       subjectLine: "Specific, curiosity-driven subject line",
+      subjectLineVariants: ["Subject line variant"],
       previewText: "Preview text shown in inbox — 90 characters max",
       fromName: newsletterName,
       editorialNote:

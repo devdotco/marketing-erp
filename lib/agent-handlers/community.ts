@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const communityHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,21 @@ export const communityHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const subreddits = String(config.subreddits ?? "");
-  const keywords = String(config.keywords ?? "");
-  const answerStyle = String(config.answerStyle ?? "Expert");
-  const dailyLimit = Number(config.dailyLimit ?? 5);
-  const includeSubtleProof = config.includeSubtleProof === true;
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, {
+    monitorSubreddits: "subreddits",
+    monitorKeywords: "keywords",
+    repliesPerRun: ["maxRepliesPerWeek", "dailyLimit"],
+  });
+  const subreddits = lines(config, "monitorSubreddits", 20).join(", ");
+  const keywords = lines(config, "monitorKeywords", 30).join(", ");
+  const answerStyle = str(config, "answerStyle", "Expert");
+  // Capped so the drafted batch fits the 4096-token response below.
+  const dailyLimit = Math.round(num(config, "repliesPerRun", 5, { min: 1, max: 10 }));
+  const includeSubtleProof = bool(config, "includeSubtleProof", false);
+  const includeHackerNews = bool(config, "includeHackerNews", true);
+  const brandMentionAlerts = bool(config, "brandMentionAlerts", true);
+  const platforms = includeHackerNews ? "Reddit, Quora, and/or Hacker News" : "Reddit and/or Quora";
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -44,10 +55,14 @@ export const communityHandler: AgentHandler = async (run, updateStatus) => {
   ].filter(Boolean).join("\n");
 
   const userPrompt = [
-    `Generate ${dailyLimit} community engagement opportunities on Reddit and/or Quora.`,
+    `Generate ${dailyLimit} community engagement opportunities on ${platforms}.`,
+    includeHackerNews ? "" : "Do not include Hacker News threads.",
     subreddits ? `Target subreddits: ${subreddits}` : "Identify relevant subreddits based on the business profile.",
     keywords ? `Focus keywords/topics: ${keywords}` : "",
     `Answer style: ${answerStyle}`,
+    brandMentionAlerts && businessProfile?.businessName
+      ? `List threads that mention ${businessProfile.businessName}${businessProfile.websiteUrl ? ` or ${businessProfile.websiteUrl}` : ""} by name first, marked brandMention: true, ahead of keyword matches.`
+      : "",
     includeSubtleProof
       ? "Where natural, include subtle social proof (e.g. 'In my experience working with X type of business…') — never overt promotion."
       : "Keep answers purely educational with no promotional language whatsoever.",
@@ -56,7 +71,8 @@ export const communityHandler: AgentHandler = async (run, updateStatus) => {
     JSON.stringify({
       opportunities: [
         {
-          platform: "Reddit | Quora",
+          platform: includeHackerNews ? "Reddit | Quora | Hacker News" : "Reddit | Quora",
+          brandMention: false,
           thread: {
             title: "Thread or question title",
             url: "https://reddit.com/r/...",

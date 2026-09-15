@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const xEngagerHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,28 +14,49 @@ export const xEngagerHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const monitoredLists = (config.monitoredLists as string) ?? "";
-  const relevanceThreshold = (config.relevanceThreshold as string) ?? "Medium";
-  const replyStyle = (config.replyStyle as string) ?? "Informative";
-  const dailyLimit = (config.dailyLimit as number) ?? 15;
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, {
+    replyTone: "replyStyle",
+    repliesPerRun: ["maxRepliesPerHour", "dailyLimit"],
+    requireApproval: "requireHumanApproval",
+  });
+
+  const monitorKeywords = lines(config, "monitorKeywords", 30);
+  const competitorHandles = lines(config, "competitorHandles", 20);
+  const avoidTopics = lines(config, "avoidTopics", 30);
+  const replyTone = str(config, "replyTone", "Conversational");
+  const relevanceThreshold = str(config, "relevanceThreshold", "Medium");
+  const minAuthorFollowers = num(config, "minAuthorFollowers", 1000, { min: 0 });
+  // Capped so the drafted batch fits the 4096-token response below.
+  const repliesPerRun = Math.round(num(config, "repliesPerRun", 10, { min: 1, max: 20 }));
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
+  const toneGuide: Record<string, string> = {
+    Analytical: "adds a fact, stat, or framework the original missed",
+    Conversational: "sounds like a peer joining the thread, plain and specific",
+    Challenging: "respectfully challenges the premise with evidence",
+    Supportive: "amplifies the point with a specific real-world example",
+  };
+
   const systemPrompt = `You are an X (Twitter) engagement analyst and reply drafter for ${
     (businessProfile as any)?.companyName ?? "a business"
   }.
-You monitor X lists, score posts for genuine relevance, and draft replies/quote-posts that add real substance.
+You score posts for genuine relevance and draft replies/quote-posts that add real substance.
 Every reply must contribute new information, a distinct perspective, or a compelling question — no hollow agreement.
-Reply style: ${replyStyle}
+Reply tone: ${replyTone}
 Relevance threshold: ${relevanceThreshold}
+${avoidTopics.length > 0 ? `Brand safety: never engage with, draft for, or mention these topics — skip any post touching them: ${avoidTopics.join(", ")}.` : ""}
 Always respond with ONLY a valid JSON object — no markdown fences, no extra prose.`;
 
-  const userPrompt = `Simulate monitoring the following X lists and draft ${dailyLimit} engagement actions for today.
+  const userPrompt = `Simulate monitoring X for the conversations below and draft ${repliesPerRun} engagement actions for today.
 
-Monitored X lists:
-${monitoredLists || "Founders, Marketing Leaders, Industry Analysts, Venture Capital, Tech Journalists"}
+Keywords and hashtags to track:
+${monitorKeywords.length > 0 ? monitorKeywords.join(", ") : "Topics central to the business context below"}
+${competitorHandles.length > 0 ? `\nCompetitor handles (threads they post, and conversations mentioning them, are engagement opportunities — never disparage them):\n${competitorHandles.join(", ")}\n` : ""}
+Only engage with posts whose author has at least ${minAuthorFollowers.toLocaleString("en-US")} followers.
 
 Business context:
 - Company: ${(businessProfile as any)?.companyName ?? "Our Business"}
@@ -50,10 +72,7 @@ Relevance threshold: ${relevanceThreshold} (${
       : "broad industry posts where we can add value"
   })
 
-Reply style: ${replyStyle}
-- Informative: adds a fact, stat, or framework the original missed
-- Contrarian: respectfully challenges the premise with evidence
-- Supportive: amplifies with a specific real-world example
+Reply tone: ${replyTone} — ${toneGuide[replyTone] ?? toneGuide.Conversational}
 
 Return exactly this JSON shape:
 {
@@ -66,14 +85,14 @@ Return exactly this JSON shape:
       "postImpressions": 22400,
       "postEngagementRate": 3.1,
       "postedAt": "2024-01-15T09:30:00Z",
-      "sourceList": "Founders",
+      "matchedOn": "the keyword or competitor handle this post was found by",
       "relevanceScore": 0.87,
       "relevanceReason": "directly discusses our core topic",
       "actionRecommended": "reply|quotePost|like",
       "draftedReply": {
         "text": "drafted reply text (max 280 chars)",
         "characterCount": 218,
-        "replyStyle": "${replyStyle}",
+        "replyTone": "${replyTone}",
         "valueAdded": "what new perspective or data this reply contributes",
         "estimatedImpressions": 3200,
         "approved": false
@@ -83,7 +102,7 @@ Return exactly this JSON shape:
   ],
   "skippedPosts": [
     {
-      "reason": "below relevance threshold",
+      "reason": "below relevance threshold | author below follower minimum | avoided topic",
       "count": 34
     }
   ],

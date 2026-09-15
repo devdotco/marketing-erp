@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const digitalPrHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,17 @@ export const digitalPrHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const expertiseAreas = String(config.expertiseAreas ?? "");
-  const responseStyle = String(config.responseStyle ?? "Expert Quote");
-  const wordLimit = Number(config.wordLimit ?? 200);
-  const includedBioLines = Number(config.includedBioLines ?? 2);
-  const deadline = String(config.deadline ?? "");
+  // The handler used to draft HARO-style expert quotes from an "expertiseAreas" field the
+  // form never collected; it now builds what the Run form and overview describe. A saved
+  // expertiseAreas value still stands in for the vertical.
+  applyRenamedInputs(run, config, { businessVertical: "expertiseAreas" });
+
+  const businessVertical = str(config, "businessVertical");
+  const storyDataSources = str(config, "storyDataSources");
+  const targetOutletTiers = str(config, "targetOutletTiers", "National + Trade");
+  const geographicFocus = str(config, "geographicFocus");
+  const brandVoice = str(config, "brandVoice");
+  const excludeOutlets = lines(config, "excludeOutlets", 50);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -35,58 +42,68 @@ export const digitalPrHandler: AgentHandler = async (run, updateStatus) => {
       ].filter(Boolean).join("\n")
     : "";
 
-  const formatKeyMap: Record<string, "quote" | "data" | "story"> = {
-    "Expert Quote": "quote",
-    "Data-Led": "data",
-    "Story-Led": "story",
+  const tierMap: Record<string, string[]> = {
+    "Trade Press Only": ["trade"],
+    "National + Trade": ["national", "trade"],
+    "Local + Trade": ["local", "trade"],
+    "All Tiers": ["national", "trade", "local"],
   };
-  const formatKey = formatKeyMap[responseStyle] ?? "quote";
+  const tiers = tierMap[targetOutletTiers] ?? ["national", "trade"];
 
   const systemPrompt = [
-    "You are a digital PR specialist who writes expert responses for journalist enquiries (HARO, Qwoted, Terkel).",
-    "Every response must demonstrate genuine domain expertise — journalists can tell when a quote is written by a PR firm vs an actual expert.",
-    "Lead with the insight, not the credentials. Avoid hollow phrases like 'As an industry leader' or 'In today's fast-paced world'.",
-    "Bio lines must be concise, credible, and directly relevant to the question topic.",
+    "You are a digital PR strategist who turns a company's own data and milestones into stories journalists want to cover.",
+    "A story angle must be anchored in a specific data point or milestone the client supplied — never invent statistics, customer names, or results.",
+    "Write press releases in the register and length each outlet tier expects: national outlets want the wider trend first, trade press wants industry specifics, local press wants the community angle.",
+    "Avoid hollow phrases like 'industry leader', 'revolutionary' or 'In today's fast-paced world'.",
+    "You have no journalist database: suggest outlets and the beats worth pitching, but never invent journalist names or contact details.",
     "Return ONLY valid JSON — no markdown fences, no preamble.",
     brandContext ? `\nClient context:\n${brandContext}` : "",
+    brandVoice ? `\nBrand voice guidelines for every release:\n${brandVoice}` : "",
   ].filter(Boolean).join("\n");
 
   const userPrompt = [
-    `Generate expert journalist responses based on the following expertise profile.`,
-    expertiseAreas ? `Areas of expertise: ${expertiseAreas}` : "",
-    `Response style: ${responseStyle}`,
-    `Word limit per response: ${wordLimit} words`,
-    `Bio lines to include: ${includedBioLines}`,
-    deadline ? `Deadline context: ${deadline}` : "",
+    "Build a digital PR package.",
+    businessVertical ? `Business vertical: ${businessVertical}` : "",
+    storyDataSources
+      ? `Story data and metrics supplied by the client (the only facts you may build angles on):\n${storyDataSources}`
+      : "No story data was supplied — propose angles as briefs of the data the client would need to gather, and mark every one needsData: true.",
+    `Outlet tiers to target: ${tiers.join(", ")}`,
+    geographicFocus ? `Geographic focus: ${geographicFocus}` : "",
+    excludeOutlets.length > 0 ? `Never suggest these outlets or people: ${excludeOutlets.join(", ")}` : "",
     "",
-    "Create at least 5 realistic journalist request scenarios relevant to the expertise areas, then write complete responses to each.",
-    "Each response must be within the word limit. The bio must be exactly the number of lines specified.",
-    `Format every response as a '${formatKey}' type.`,
+    "Produce 3 to 5 story angles. For each angle write one press release variation (250–400 words) per targeted tier, and suggest outlets (publication names and the beat to pitch) that fit the tier and geography.",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
-      responses: [
+      storyAngles: [
         {
-          requestSource: "HARO / Qwoted / Terkel",
-          journalist: null,
-          publication: null,
-          question: "The journalist's question",
-          deadline: deadline || null,
-          response: "Expert response text within word limit",
-          responseWordCount: 0,
-          bio: `${includedBioLines}-line author bio`,
-          expertise: "Relevant expertise area matched to this question",
-          format: formatKey,
+          angle: "Headline-style angle",
+          hook: "Why a journalist would care right now",
+          supportingData: ["Data point taken from the supplied story data"],
+          needsData: false,
+          pressReleases: [
+            {
+              tier: tiers[0],
+              headline: "Release headline",
+              subheadline: "Release subheadline",
+              body: "Full press release body in HTML",
+              wordCount: 0,
+            },
+          ],
+          outletTargets: [
+            { outlet: "Publication name", tier: tiers[0], beat: "Beat or section to pitch", relevance: "Why it fits" },
+          ],
         },
       ],
       simulationNote:
-        "Connect to HARO, Qwoted, or Terkel in Settings to surface real journalist requests matching your expertise",
+        "Outlet suggestions come from Claude's general knowledge, not a media database — verify each outlet and find the right journalist before pitching.",
     }),
   ].filter(Boolean).join("\n");
 
   const message = await client.messages.create({
     model: MODELS.standard,
-    max_tokens: 4096,
+    // Up to 5 angles × 3 tiers of full press releases — 4096 can't hold that JSON.
+    max_tokens: 16000,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
   });

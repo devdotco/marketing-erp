@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 function formatDate(d: Date): string {
@@ -23,8 +23,15 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
   const testQueries = String(config.testQueries ?? "");
   const competitors = String(config.competitors ?? "");
   const generateLlmsTxt = config.generateLlmsTxt !== false;
-  const reportFormat = String(config.reportFormat ?? "Dashboard");
   const siteUrl = String(config.siteUrl ?? "");
+  const targetDomain = str(config, "targetDomain");
+  const brandTerms = lines(config, "brandTerms", 20);
+  const targetPlatforms = str(config, "targetPlatforms", "all");
+  // Every query is answered once per engine inside a single 4k-token reply, so
+  // the count is capped where that reply can still hold them.
+  const testQueryCount = num(config, "testQueryCount", 10, { min: 1, max: 25 });
+  const industryContext = str(config, "industryContext");
+  const includeCompetitorBenchmark = config.includeCompetitorBenchmark === true;
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -36,7 +43,7 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
         businessProfile.industry ? `Industry: ${businessProfile.industry}` : "",
         businessProfile.targetAudience ? `Target audience: ${businessProfile.targetAudience}` : "",
         businessProfile.uniqueValueProp ? `Unique value: ${businessProfile.uniqueValueProp}` : "",
-        businessProfile.websiteUrl ? `Website: ${siteUrl || businessProfile.websiteUrl}` : "",
+        businessProfile.websiteUrl ? `Website: ${targetDomain || siteUrl || businessProfile.websiteUrl}` : "",
         businessProfile.competitors.length > 0
           ? `Known competitors: ${competitors || businessProfile.competitors.join(", ")}`
           : competitors
@@ -45,7 +52,9 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
       ].filter(Boolean).join("\n")
     : "";
 
-  const resolvedSiteUrl = siteUrl || businessProfile?.websiteUrl || "";
+  // The domain being audited: the form's Target Domain, else the GSC property,
+  // else the Business Profile website.
+  const resolvedSiteUrl = targetDomain || siteUrl || businessProfile?.websiteUrl || "";
 
   // --- Live GSC branded query fetch ---
   let gscBrandedContext = "";
@@ -68,8 +77,8 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
       const creds = await googleCredentials(integration);
 
       // Only the explicit "siteUrl" dropdown value is validated against the
-      // grant here — resolvedSiteUrl's Business Profile fallback is not
-      // something the user chose, so it's used only if nothing else resolves.
+      // grant here — resolvedSiteUrl (Target Domain / Business Profile) is not
+      // a property the user picked, so it's used only if nothing else resolves.
       const propertyUrl = (await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, siteUrl)) || resolvedSiteUrl;
       if (!propertyUrl) {
         throw new AgentInputError(
@@ -112,7 +121,7 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
       const rows = data.rows ?? [];
 
       // Build brand name tokens for matching (business name + domain parts)
-      const brandTokens: string[] = [];
+      const brandTokens: string[] = brandTerms.map((t) => t.toLowerCase());
       if (businessProfile?.businessName) {
         // Break the name into words, filter short words
         brandTokens.push(
@@ -192,7 +201,20 @@ ${JSON.stringify(nonBrandedHighImpression.map((r) => ({ query: r.keys[0], impres
   const queries = testQueries
     .split(/[\n,]+/)
     .map((q) => q.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .slice(0, testQueryCount);
+
+  const ENGINE_NAMES: Record<string, string[]> = {
+    all: ["ChatGPT", "Perplexity", "Gemini", "Claude"],
+    chatgpt: ["ChatGPT"],
+    perplexity: ["Perplexity"],
+    "google-aio": ["Google AI Overviews"],
+  };
+  const engines = ENGINE_NAMES[targetPlatforms] ?? ENGINE_NAMES.all;
+
+  const benchmarkCompetitors = competitors
+    ? competitors.split(/[\n,]+/).map((c) => c.trim()).filter(Boolean)
+    : (businessProfile?.competitors ?? []);
 
   const competitorList = competitors
     .split(/[\n,]+/)
@@ -202,8 +224,12 @@ ${JSON.stringify(nonBrandedHighImpression.map((r) => ({ query: r.keys[0], impres
   const userPrompt = [
     `Analyse AI search visibility for: ${resolvedSiteUrl || "the client website"}`,
     "",
-    `Test queries (${queries.length}):`,
-    queries.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+    brandTerms.length > 0 ? `Brand terms that count as a citation or mention: ${brandTerms.join(", ")}` : "",
+    industryContext ? `Industry context: ${industryContext}` : "",
+    queries.length > 0
+      ? `Test queries (${queries.length}):\n${queries.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+      : `No test queries were supplied: write ${testQueryCount} representative queries a prospective customer${industryContext ? ` in this industry (${industryContext})` : ""} would ask an AI assistant, then test those.`,
+    `AI engines to simulate: ${engines.join(", ")}`,
     "",
     competitorList.length > 0
       ? `Competing domains to track in AI citations: ${competitorList.join(", ")}`
@@ -219,7 +245,7 @@ Use this real data to:
 - Reference actual query volumes when explaining citation probability
 `
       : "",
-    "For each test query, simulate how each major AI engine would likely respond:",
+    `For each test query, simulate how each of these AI engines (${engines.join(", ")}) would likely respond — aiEngines holds exactly one entry per engine listed:`,
     "- Would the client's site be cited?",
     "- If yes, at what position?",
     "- Which competitors would more likely be cited, and why?",
@@ -232,7 +258,9 @@ Use this real data to:
       ? `Generate an llms.txt file for ${resolvedSiteUrl || "the client site"} following the llms.txt spec (machine-readable site summary for AI crawlers).`
       : "Set llmsTxt to null.",
     "",
-    `Report format requested: ${reportFormat}`,
+    includeCompetitorBenchmark && benchmarkCompetitors.length > 0
+      ? `Competitor benchmark: estimate the same citation share for ${benchmarkCompetitors.slice(0, 3).join(", ")} across these queries and fill competitorBenchmark, so the client's score reads comparatively.`
+      : "Set competitorBenchmark to null.",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -284,6 +312,9 @@ Use this real data to:
         },
       ],
       overallCitationShare: 25,
+      competitorBenchmark: includeCompetitorBenchmark
+        ? [{ domain: "competitor.com", estimatedCitationShare: 40, whyTheyWin: "What gives them the edge in AI answers..." }]
+        : null,
       llmsTxt: generateLlmsTxt
         ? `# ${businessProfile?.businessName ?? "Site Name"}\n\n> One-line site description\n\n## About\n...\n\n## Key Pages\n...\n\n## Products/Services\n...`
         : null,

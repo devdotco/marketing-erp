@@ -3,7 +3,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { AgentInputError } from "@/lib/ai/errors";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { googleCredentials } from "@/lib/integrations/google";
 import { microsoftCredentials } from "@/lib/integrations/microsoft";
@@ -44,11 +46,20 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const emailAccount = (config.emailAccount as string) ?? "Gmail";
-  const autoCategories = (config.autoCategories as string) ?? "All";
-  const draftReplyStyle = (config.draftReplyStyle as string) ?? "Professional";
-  const flagKeywords = (config.flagKeywords as string) ?? "Not specified";
-  const dailyBatchSize = (config.dailyBatchSize as number) ?? 20;
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, {
+    emailProvider: "emailAccount",
+    replyTone: "draftReplyStyle",
+  });
+  const emailAccount = str(config, "emailProvider", "Gmail");
+  const inboxLabel = str(config, "inboxLabel");
+  const knowledgeBaseUrl = str(config, "knowledgeBaseUrl");
+  const highPriorityDomains = lines(config, "highPriorityDomains", 50).map((d) => d.replace(/^@/, "").toLowerCase());
+  const excludeCategory = str(config, "excludeCategories", "None");
+  const autoCategories = excludeCategory === "None" ? "All" : `All except ${excludeCategory}`;
+  const draftReplyStyle = str(config, "replyTone", "Professional");
+  const flagKeywords = lines(config, "flagKeywords", 50).join(", ") || "Not specified";
+  const dailyBatchSize = Math.round(num(config, "dailyBatchSize", 20, { min: 1, max: 50 }));
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -66,14 +77,21 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
   let accessToken: string | null = null;
   let emailSource = "simulation";
 
-  const gmailIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "GMAIL" } },
-  });
-  const m365Integration = !gmailIntegration
-    ? await prisma.integration.findUnique({
-        where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "MICROSOFT_365" } },
-      })
-    : null;
+  // The selected Email Provider is tried first; the other one only when the selected one isn't
+  // connected, so a workspace with a single connected inbox keeps working either way.
+  const findIntegration = (provider: "GMAIL" | "MICROSOFT_365") =>
+    prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider } },
+    });
+  let gmailIntegration: Awaited<ReturnType<typeof findIntegration>> = null;
+  let m365Integration: Awaited<ReturnType<typeof findIntegration>> = null;
+  if (emailAccount === "Microsoft 365") {
+    m365Integration = await findIntegration("MICROSOFT_365");
+    if (!m365Integration) gmailIntegration = await findIntegration("GMAIL");
+  } else {
+    gmailIntegration = await findIntegration("GMAIL");
+    if (!gmailIntegration) m365Integration = await findIntegration("MICROSOFT_365");
+  }
 
   // Only "not connected" falls back to simulation. Once an integration row
   // exists, a failed call is a real failure and must surface as one — it used
@@ -87,8 +105,10 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
     accessToken = creds.access_token;
     liveProvider = "GMAIL";
 
+    // Inbox Label narrows the unread query to one Gmail label (quoted, so labels with spaces work).
+    const gmailQuery = inboxLabel ? `is:unread label:"${inboxLabel.replace(/"/g, "")}"` : "is:unread";
     const listRes = await fetch(
-      "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread&maxResults=20",
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(gmailQuery)}&maxResults=${dailyBatchSize}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     if (!listRes.ok) {
@@ -100,7 +120,7 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
     // Fetch metadata only (subject + from header) — full body never fetched for privacy.
     // A single message's metadata failing to load doesn't invalidate the batch —
     // it's skipped and processing continues with what did load.
-    for (const msg of (listData.messages ?? []).slice(0, 20)) {
+    for (const msg of (listData.messages ?? []).slice(0, dailyBatchSize)) {
       const detailRes = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -121,8 +141,30 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
     accessToken = creds.access_token;
     liveProvider = "MICROSOFT_365";
 
+    // Inbox Label names a mail folder; blank (or "Inbox") is the well-known inbox folder.
+    let folderId = "inbox";
+    if (inboxLabel && inboxLabel.toLowerCase() !== "inbox") {
+      const folderRes = await fetch(
+        `https://graph.microsoft.com/v1.0/me/mailFolders?$filter=${encodeURIComponent(`displayName eq '${inboxLabel.replace(/'/g, "''")}'`)}&$select=id`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!folderRes.ok) {
+        throw new Error(
+          `Microsoft 365 is connected but looking up the folder "${inboxLabel}" failed (Graph HTTP ${folderRes.status}): ${(await folderRes.text()).slice(0, 300)} — reconnect Microsoft 365 on the Integrations page if this persists.`
+        );
+      }
+      const folders = (await folderRes.json()) as { value?: { id: string }[] };
+      if (!folders.value?.[0]?.id) {
+        throw new AgentInputError(
+          `No top-level Microsoft 365 mail folder is named "${inboxLabel}".`,
+          "Check the Inbox Label or Folder field against the folder name in Outlook, or leave it blank to process the inbox.",
+          "m365_folder_not_found",
+        );
+      }
+      folderId = folders.value[0].id;
+    }
     const listRes = await fetch(
-      "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$filter=isRead eq false&$select=id,subject,from",
+      `https://graph.microsoft.com/v1.0/me/mailFolders/${encodeURIComponent(folderId)}/messages?$top=${dailyBatchSize}&$filter=isRead eq false&$select=id,subject,from`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     if (!listRes.ok) {
@@ -150,6 +192,18 @@ export const inboxResponderHandler: AgentHandler = async (run, updateStatus) => 
 
 Respond ONLY with a valid JSON object. No markdown, no explanations outside the JSON.`;
 
+  const triageRules = [
+    highPriorityDomains.length > 0
+      ? `High-priority sender domains: ${highPriorityDomains.join(", ")} — any message from these domains goes in genuineInquiries with urgency "high" (or in flagged), never in pitches, newsletters, or automated.`
+      : "",
+    excludeCategory !== "None"
+      ? `Skip ${excludeCategory.toLowerCase()} entirely: don't list, summarise, or draft for them — count them only.`
+      : "",
+    knowledgeBaseUrl
+      ? `Our help docs live at ${knowledgeBaseUrl}. In replies to support or how-to questions, point the sender there rather than answering specifics you weren't given.`
+      : "",
+  ].filter(Boolean).join("\n");
+
   let userPrompt: string;
 
   if (emailSource === "live" && liveMessages.length > 0) {
@@ -164,6 +218,7 @@ Industry: ${businessProfile?.industry ?? "General"}
 Website: ${businessProfile?.websiteUrl ?? "Not specified"}
 Draft Reply Style: ${draftReplyStyle}
 Flag Keywords: ${flagKeywords}
+${triageRules}
 
 Unread messages (subject + sender only — full message body is not available; do not infer content beyond what is shown):
 ${messageList}
@@ -228,6 +283,7 @@ Inbox Configuration:
 - Draft Reply Style: ${draftReplyStyle}
 - Flag Keywords: ${flagKeywords}
 - Daily Batch Size: ${dailyBatchSize}
+${triageRules}
 
 Since no live inbox is connected, simulate a realistic batch of ${dailyBatchSize} emails for this business type. Generate a realistic mix of genuine inquiries, pitches, flagged emails, newsletters, and automated messages. Draft replies only for genuineInquiries where requiresHumanReview is false.
 

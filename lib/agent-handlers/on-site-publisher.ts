@@ -22,6 +22,22 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
   const draftId = String(config.draftId ?? "");
   const primaryCategory = String(config.primaryCategory ?? "");
   const overwriteExisting = config.overwriteExisting === true;
+  // Only meaningful with Publish Status "Scheduled". This agent still only ever
+  // creates drafts: the time is stamped on the WordPress draft as its publish
+  // date (WordPress schedules it for then once an editor publishes it) and
+  // recorded in the output for the other CMSes — nothing goes live from here.
+  const scheduledAtRaw = publishStatus === "Scheduled" ? String(config.scheduledAt ?? "").trim() : "";
+  const scheduledDate = scheduledAtRaw ? new Date(scheduledAtRaw) : null;
+  const scheduledAt = scheduledDate && !Number.isNaN(scheduledDate.getTime()) ? scheduledDate.toISOString() : "";
+  const scheduleNote = publishStatus !== "Scheduled"
+    ? undefined
+    : scheduledAt
+      ? cmsTarget === "WordPress"
+        ? `Requested publish time ${scheduledAt} was set on the WordPress draft — publish it in WordPress to schedule it for then.`
+        : `Requested publish time ${scheduledAt}. The ${cmsTarget} post was created as a draft; set this time when you schedule it in ${cmsTarget}.`
+      : scheduledAtRaw
+        ? `"${scheduledAtRaw}" isn't a valid ISO 8601 datetime, so no publish time was set on the draft.`
+        : "Publish Status is Scheduled but no Scheduled Publish Time was given, so no publish time was set on the draft.";
 
   const requireApproval = config.requireApproval !== false;
 
@@ -179,6 +195,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
           title: postTitle,
           content: postContent,
           status: "draft",
+          ...(scheduledAt ? { date_gmt: scheduledAt.replace(/\.\d{3}Z$/, "") } : {}),
           categories: [],
           tags: [],
           meta: { _yoast_wpseo_title: postTitle, _yoast_wpseo_metadesc: postMetaDesc },
@@ -196,6 +213,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
         liveUrl: r.link ?? `${siteUrl}/wp-admin/edit.php?post_status=draft`,
         stagedAt: new Date().toISOString(),
         generatedAt: new Date().toISOString(),
+        ...(scheduleNote ? { scheduledAt: scheduledAt || null, scheduleNote } : {}),
       });
     }
   }
@@ -247,6 +265,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
           : `https://app.storyblok.com/#!/me/spaces/${spaceId}/stories`,
         stagedAt: new Date().toISOString(),
         generatedAt: new Date().toISOString(),
+        ...(scheduleNote ? { scheduledAt: scheduledAt || null, scheduleNote } : {}),
       });
     }
   }
@@ -282,6 +301,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
         liveUrl: `https://webflow.com/design/${siteId}`,
         stagedAt: new Date().toISOString(),
         generatedAt: new Date().toISOString(),
+        ...(scheduleNote ? { scheduledAt: scheduledAt || null, scheduleNote } : {}),
       });
     }
   }
@@ -331,6 +351,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
           liveUrl,
           stagedAt: new Date().toISOString(),
           generatedAt: new Date().toISOString(),
+          ...(scheduleNote ? { scheduledAt: scheduledAt || null, scheduleNote } : {}),
         });
       }
     }
@@ -375,6 +396,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
     `Simulate publishing a content draft to ${cmsTarget}.`,
     `Draft ID: ${draftId || "latest approved draft"}`,
     `Publish status: ${publishStatus}`,
+    scheduledAt ? `Scheduled publish time: ${scheduledAt}` : "",
     primaryCategory ? `Category/collection: ${primaryCategory}` : "",
     overwriteExisting ? "Overwrite mode: enabled" : "Overwrite mode: disabled",
     "",
@@ -428,6 +450,10 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
   }
 
   output.source = "simulation";
+  if (scheduleNote) {
+    output.scheduledAt = scheduledAt || null;
+    output.scheduleNote = scheduleNote;
+  }
   output.generatedAt = new Date().toISOString();
   output.note = "Simulated publish — connect a live CMS integration in Settings to enable real deployment.";
 

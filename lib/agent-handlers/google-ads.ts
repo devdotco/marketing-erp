@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface AdsStreamChunk {
@@ -21,6 +21,23 @@ interface AdsStreamChunk {
   }>;
 }
 
+/** GAQL date clause for the audit window — the predefined ranges where one matches, else an explicit span ending yesterday. */
+function gaqlDateClause(days: number): string {
+  if (days === 7 || days === 14 || days === 30) return `segments.date DURING LAST_${days}_DAYS`;
+  const fmt = (d: Date) => d.toISOString().split("T")[0];
+  const end = new Date();
+  end.setDate(end.getDate() - 1);
+  const start = new Date(end);
+  start.setDate(end.getDate() - (days - 1));
+  return `segments.date BETWEEN '${fmt(start)}' AND '${fmt(end)}'`;
+}
+
+const CHANNEL_TYPE_FILTER: Record<string, string> = {
+  "Search Only": "SEARCH",
+  "Shopping Only": "SHOPPING",
+  "Performance Max Only": "PERFORMANCE_MAX",
+};
+
 export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
@@ -28,12 +45,20 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const campaignGoal = (config.campaignGoal as string) ?? "Leads";
-  const adGroupTheme = (config.adGroupTheme as string) ?? "General";
-  const numHeadlines = (config.numHeadlines as number) ?? 15;
-  const numDescriptions = (config.numDescriptions as number) ?? 4;
-  const negativesReview = (config.negativesReview as boolean) ?? true;
+  const campaignGoal = str(config, "campaignGoal", "Leads");
+  const adGroupTheme = str(config, "adGroupTheme", "General");
+  // RSA hard limits: 3-15 headlines, 2-4 descriptions.
+  const numHeadlines = num(config, "numHeadlines", 15, { min: 3, max: 15 });
+  const numDescriptions = num(config, "numDescriptions", 4, { min: 2, max: 4 });
+  const negativesReview = bool(config, "includeNegativeKeywords", true);
   const accountId = ((config.accountId as string) ?? "").replace(/-/g, "");
+  const auditWindowDays = num(config, "auditWindowDays", 30, { min: 1, max: 365 });
+  const primaryConversionAction = str(config, "primaryConversionAction");
+  const minImpressions = num(config, "minImpressions", 100, { min: 0 });
+  // Optional, no default: blank means "not set", not zero.
+  const maxCpcWaste = str(config, "maxCPCWasteThreshold") ? num(config, "maxCPCWasteThreshold", 0, { min: 0 }) : null;
+  const targetRoasPct = str(config, "targetROAS") ? num(config, "targetROAS", 0, { min: 0 }) : null;
+  const campaignFilter = str(config, "campaignFilter", "All Campaigns");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -75,8 +100,13 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
           method: "POST",
           headers: googleAdsHeaders(creds.access_token),
           body: JSON.stringify({
-            query:
-              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
+            query: [
+              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE",
+              gaqlDateClause(auditWindowDays),
+              CHANNEL_TYPE_FILTER[campaignFilter]
+                ? `AND campaign.advertising_channel_type = '${CHANNEL_TYPE_FILTER[campaignFilter]}'`
+                : "",
+            ].filter(Boolean).join(" "),
           }),
         }
       );
@@ -106,7 +136,12 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
         }
       }
 
-      liveAdsData = JSON.stringify(campaigns, null, 2);
+      // Low-sample campaigns are left out of the evaluation, not silently averaged in.
+      const evaluated = campaigns.filter((c) => c.impressions >= minImpressions);
+      const excluded = campaigns.length - evaluated.length;
+      liveAdsData =
+        JSON.stringify(evaluated, null, 2) +
+        (excluded > 0 ? `\n(${excluded} campaign(s) under ${minImpressions} impressions excluded as too low-sample to evaluate.)` : "");
       source = "live";
     } catch (err) {
       if (err instanceof AgentInputError) throw err;
@@ -119,7 +154,7 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
 Respond ONLY with a valid JSON object. No markdown, no explanations outside the JSON.`;
 
   const liveDataBlock = liveAdsData
-    ? `\n\nLive Google Ads Campaign Performance (Last 30 Days):\n${liveAdsData}\n\nUse the above real campaign data to ground your RSA recommendations, keyword priorities, and bid strategy rationale. Reference actual campaign names and performance figures in your analysis.`
+    ? `\n\nLive Google Ads Campaign Performance (Last ${auditWindowDays} Days${CHANNEL_TYPE_FILTER[campaignFilter] ? `, ${campaignFilter}` : ""}):\n${liveAdsData}\n\nUse the above real campaign data to ground your RSA recommendations, keyword priorities, and bid strategy rationale. Reference actual campaign names and performance figures in your analysis.`
     : "";
 
   const userPrompt = `Generate a comprehensive Google Ads RSA, keyword strategy, and search term analysis for:
@@ -136,7 +171,10 @@ Campaign Configuration:
 - Headlines Needed: ${numHeadlines} (max 30 chars each)
 - Descriptions Needed: ${numDescriptions} (max 90 chars each)
 - Negative Keywords Review: ${negativesReview}
-${liveDataBlock}
+- Campaign Types in Scope: ${campaignFilter}
+- Audit Window: last ${auditWindowDays} days
+- Primary Conversion Action: ${primaryConversionAction || "Not specified"} — judge performance, CPA and bid strategy against this conversion, not all conversions
+${maxCpcWaste !== null ? `- Budget Waste Threshold: flag any search term or keyword spending above $${maxCpcWaste} CPC with zero conversions in wastedSpendRisks and spendAnomalyAlerts\n` : ""}${targetRoasPct !== null ? `- Target ROAS: ${targetRoasPct}% (${(targetRoasPct / 100).toFixed(1)}x) — bidStrategy.targetROAS and its rationale must align to this\n` : ""}${negativesReview ? "" : "- Negative keyword recommendations were NOT requested: return empty arrays for negativeKeywords.campaign and negativeKeywords.adGroup.\n"}${liveDataBlock}
 
 Return a JSON object with this exact structure:
 {

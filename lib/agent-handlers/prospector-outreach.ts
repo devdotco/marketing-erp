@@ -344,7 +344,7 @@ export async function stageProspectorInstantlyCampaign(
   if (input.leads.length === 0) {
     throw new AgentInputError(
       "None of this run's prospects had a real, well-formed, non-generic email address to stage in Instantly.",
-      "Check the skipped list in this run's output — widen Target Topics or lower the quality bar to surface prospects with named contacts, or add outreach targets by hand in Instantly.",
+      "Check the skipped list in this run's output — widen Topical Keywords or lower Minimum Domain Authority to surface prospects with named contacts, or add outreach targets by hand in Instantly.",
       "instantly_no_leads",
     );
   }

@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface Ga4Row {
@@ -25,11 +25,15 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const pageUrl = (config.pageUrl as string) ?? "Not specified";
-  const conversionGoal = (config.conversionGoal as string) ?? "Not specified";
-  const trafficMonthly = (config.trafficMonthly as number) ?? 10000;
-  const hypothesisCount = (config.hypothesisCount as number) ?? 5;
-  const baselineConvRate = (config.baselineConvRate as number | undefined) ?? null;
+  const targetUrls = lines(config, "targetUrls", 10);
+  const pageUrl = targetUrls[0] ?? "Not specified";
+  const conversionGoal = str(config, "primaryConversionEvent", "Not specified");
+  const trafficMonthly = num(config, "monthlyUniqueVisitors", 10000, { min: 0 });
+  const hypothesisCount = num(config, "hypothesesPerRun", 5, { min: 1, max: 10 });
+  // Optional, no default: blank means unknown, not 0%.
+  const baselineConvRate = str(config, "baselineConvRate") ? num(config, "baselineConvRate", 0, { min: 0, max: 100 }) : null;
+  const analysisDays = num(config, "analysisDateRange", 90, { min: 7, max: 365 });
+  const experimentLogFormat = str(config, "experimentLogFormat", "Markdown table");
   // "" rather than a placeholder string: resolvePropertyOverride below treats
   // a non-empty value as a real dropdown choice to verify against the
   // connected grant, so a fake fallback here would fail every run that
@@ -80,7 +84,7 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            dateRanges: [{ startDate: "30daysAgo", endDate: "today" }],
+            dateRanges: [{ startDate: `${analysisDays}daysAgo`, endDate: "today" }],
             dimensions: [{ name: "pagePath" }],
             metrics: [
               { name: "sessions" },
@@ -106,14 +110,13 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
         avgSessionDurationSec: Math.round(Number(row.metricValues[3]?.value ?? 0)),
       }));
 
-      // Try to find the target page URL in results
-      const targetPath = pageUrl !== "Not specified"
-        ? pageUrl.replace(/^https?:\/\/[^/]+/, "")
-        : null;
+      // Find each target URL in the results (the first one is the primary page)
+      const targetMatches = targetUrls
+        .map((u) => u.replace(/^https?:\/\/[^/]+/, "") || "/")
+        .map((path) => pages.find((p) => (path === "/" ? p.pagePath === "/" : p.pagePath.includes(path))))
+        .filter((p): p is (typeof pages)[number] => Boolean(p));
 
-      const targetPage = targetPath
-        ? pages.find((p) => p.pagePath.includes(targetPath))
-        : null;
+      const targetPage = targetMatches[0] ?? null;
 
       const realConvRate = targetPage && targetPage.sessions > 0
         ? Math.round((targetPage.conversions / targetPage.sessions) * 10000) / 100
@@ -121,7 +124,7 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
 
       livePageBlock = [
         targetPage
-          ? `Target Page Metrics (${targetPage.pagePath}, last 30 days):\n${JSON.stringify(targetPage, null, 2)}`
+          ? `Target Page Metrics (last ${analysisDays} days):\n${JSON.stringify(targetMatches, null, 2)}`
           : null,
         realConvRate !== null
           ? `Observed conversion rate: ${realConvRate}%`
@@ -140,7 +143,7 @@ export const croExperimentsHandler: AgentHandler = async (run, updateStatus) => 
 
   const resolvedConvRate = baselineConvRate;
   const liveDataSection = livePageBlock
-    ? `\n\nLIVE GA4 DATA (last 30 days) — use real bounce rate, session duration, and conversion rate to ground your hypotheses and sample size calculations:\n${livePageBlock}`
+    ? `\n\nLIVE GA4 DATA (last ${analysisDays} days) — use real bounce rate, session duration, and conversion rate to ground your hypotheses and sample size calculations:\n${livePageBlock}`
     : "";
 
   const systemPrompt = `You are a conversion rate optimisation specialist. Hypotheses must specify mechanism (WHY will this change behaviour) not just what to change. Sample size calculations must use correct statistical formulas. Never recommend running more than one test on the same page simultaneously.
@@ -157,12 +160,16 @@ Unique Value Proposition: ${businessProfile?.uniqueValueProp ?? "Not specified"}
 
 Page Configuration:
 - Page URL: ${pageUrl}
-- Conversion Goal: ${conversionGoal}
+- Funnel Pages (in order): ${targetUrls.length > 0 ? targetUrls.join(" -> ") : "Not specified"}
+- Primary Conversion Event (GA4): ${conversionGoal}
 - Monthly Traffic: ${trafficMonthly}
 - Number of Hypotheses: ${hypothesisCount}
 - Baseline Conversion Rate: ${resolvedConvRate !== null ? `${resolvedConvRate}%` : "Unknown"}
 - GA4 Property: ${ga4Property || "Not specified"}
 ${liveDataSection}
+
+Rank hypotheses by where the funnel drops off most between the funnel pages above.
+Write experimentLog as a single string formatted as a ${experimentLogFormat}, with one row/entry per hypothesis (hypothesis number, page, change, primary metric, required sample size, estimated duration, status "Proposed").
 
 For sample size calculations, use 80% statistical power, 95% confidence level, and assume a minimum detectable effect of 20% relative lift unless the baseline conversion rate suggests otherwise. Calculate required sample size per variant.
 
@@ -199,6 +206,7 @@ Return a JSON object with this exact structure:
     }
   ],
   "prioritisedTestingRoadmap": string,
+  "experimentLog": string,
   "simulationNote": "Connect GA4 in Settings to pull real page performance data. These hypotheses are generated from your page description."
 }`;
 

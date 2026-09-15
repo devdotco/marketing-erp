@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface GbpReview {
@@ -34,10 +34,12 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const reviewPlatforms = (config.reviewPlatforms as string) ?? "All";
-  const requestTrigger = (config.requestTrigger as string) ?? "Post-purchase";
-  const responseStyle = (config.responseStyle as string) ?? "Professional";
-  const negativeEscalation = (config.negativeEscalation as boolean) ?? true;
+  const reviewPlatforms = str(config, "reviewPlatforms", "All");
+  const requestTrigger = str(config, "requestTrigger", "Post-purchase");
+  const responseStyle = str(config, "responsePersona", "Professional");
+  const negativeEscalation = bool(config, "negativeEscalation", true);
+  const negativeThreshold = num(config, "negativeThreshold", 3, { min: 1, max: 5 });
+  const trackSentimentTrends = bool(config, "trackSentimentTrends", true);
   const gbpLocation = (config.gbpLocation as string) ?? "";
 
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -54,6 +56,7 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
     },
   });
 
+  let allReviews: GbpReview[] = [];
   let unansweredReviews: GbpReview[] = [];
   let isLive = false;
 
@@ -85,7 +88,8 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
       }
 
       const data = (await res.json()) as { reviews?: GbpReview[] };
-      unansweredReviews = (data.reviews ?? []).filter((r) => !r.reviewReply);
+      allReviews = data.reviews ?? [];
+      unansweredReviews = allReviews.filter((r) => !r.reviewReply);
       isLive = true;
     } catch (err) {
       if (err instanceof AgentInputError) throw err;
@@ -109,7 +113,8 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
           `LIVE DATA — ${unansweredReviews.length} unanswered review(s) fetched from Google Business Profile:`,
           ...unansweredReviews.map((r, i) => {
             const stars = starRatingMap[r.starRating] ?? "?";
-            return `Review ${i + 1}: ${stars}/5 stars — by ${r.reviewer.displayName} on ${r.createTime}\n"${r.comment ?? "(no comment)"}"`;
+            const escalate = typeof stars === "number" && stars <= negativeThreshold;
+            return `Review ${i + 1}: ${stars}/5 stars — by ${r.reviewer.displayName} on ${r.createTime}${escalate ? " [AT/BELOW NEGATIVE THRESHOLD — human sign-off]" : ""}\n"${r.comment ?? "(no comment)"}"`;
           }),
           "",
           `For each of the ${unansweredReviews.length} live review(s) above, generate a personalised reply in the liveReviewDrafts array below.`,
@@ -125,7 +130,8 @@ export const reviewEngineHandler: AgentHandler = async (run, updateStatus) => {
       "reviewerName": "<reviewer display name>",
       "rating": 0,
       "originalComment": "<original review text>",
-      "suggestedReply": "<personalised reply that acknowledges the specific feedback — not a template>"
+      "suggestedReply": "<personalised reply that acknowledges the specific feedback — not a template>",
+      "needsEscalation": false
     }
   ]`
       : "";
@@ -142,7 +148,8 @@ Business Context:
 Review Engine Configuration:
 - Review Platforms: ${platformList.join(", ")}
 - Request Trigger: ${requestTrigger}
-- Response Style: ${responseStyle}
+- Response Persona and Tone (every reply and template must follow this): ${responseStyle}
+- Negative Review Threshold: ${negativeThreshold} stars or below
 - Negative Review Escalation: ${negativeEscalation}
 ${liveReviewsSection}
 Produce:
@@ -150,7 +157,7 @@ Produce:
 2. Response templates for positive reviews (4-5 stars)
 3. Response templates for neutral reviews (3 stars)
 4. Response templates for negative reviews (1-2 stars) with de-escalation
-5. ${negativeEscalation ? "An escalation playbook for severe negative reviews" : "Standard handling only"}
+5. ${negativeEscalation ? `An escalation playbook for reviews at or below ${negativeThreshold} stars` : "Standard handling only"}
 6. Simulated current review snapshot per platform${isLive ? " (mark as simulated since live snapshot is provided separately)" : ""}
 
 Return JSON matching this exact shape:
@@ -279,6 +286,26 @@ Return JSON matching this exact shape:
   if (isLive) {
     output.source = "live";
     output.unansweredReviewCount = unansweredReviews.length;
+    output.negativeThreshold = negativeThreshold;
+    // Decided in code from the real star rating, not left to the model.
+    const drafts = output.liveReviewDrafts;
+    if (Array.isArray(drafts)) {
+      for (const draft of drafts as Array<Record<string, unknown>>) {
+        const review = unansweredReviews.find((r) => r.reviewId === draft.reviewId);
+        const stars = review ? starRatingMap[review.starRating] : Number(draft.rating);
+        if (Number.isFinite(stars)) draft.needsEscalation = stars <= negativeThreshold;
+      }
+    }
+    if (trackSentimentTrends) {
+      const rated = allReviews.map((r) => starRatingMap[r.starRating]).filter((n): n is number => typeof n === "number");
+      output.ratingSnapshot = {
+        reviewsFetched: allReviews.length,
+        averageRating: rated.length > 0 ? Math.round((rated.reduce((a, b) => a + b, 0) / rated.length) * 100) / 100 : null,
+        distribution: Object.fromEntries([1, 2, 3, 4, 5].map((n) => [n, rated.filter((r) => r === n).length])),
+        atOrBelowThreshold: rated.filter((r) => r <= negativeThreshold).length,
+        capturedAt: new Date().toISOString(),
+      };
+    }
     delete output.simulationNote;
   } else {
     output.source = "simulation";

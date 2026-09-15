@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface Ga4Row {
@@ -41,9 +41,38 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
   const ga4Property = (config.ga4Property as string) ?? "";
   const gscProperty = (config.gscProperty as string) ?? "";
   const adsAccount = (config.adsAccount as string) ?? "";
-  const reportPeriod = (config.reportPeriod as string) ?? "Last 7 days";
-  const clientName = (config.clientName as string) ?? "Client";
-  const whiteLabelBrand = (config.whiteLabelBrand as string) ?? "Marketing Analytics";
+  const windowDays = num(config, "reportingWindowDays", 7, { min: 1, max: 90 });
+  const comparisonPeriod = str(config, "comparisonPeriod", "Previous period");
+  const includedMetrics = str(config, "includedMetrics", "Traffic + Conversions + Spend");
+  const includeSpend = includedMetrics !== "Traffic + Conversions only";
+  const clientName = str(config, "brandName", "Client");
+  const whiteLabelBrand = str(config, "whiteLabelBrand", "Marketing Analytics");
+
+  // The reporting window ends yesterday (today is still incomplete); the
+  // comparison windows are the same length, shifted back.
+  const fmtDate = (d: Date) => d.toISOString().split("T")[0];
+  const shift = (d: Date, days: number) => {
+    const next = new Date(d);
+    next.setDate(next.getDate() + days);
+    return next;
+  };
+  const shiftYear = (d: Date) => {
+    const next = new Date(d);
+    next.setFullYear(next.getFullYear() - 1);
+    return next;
+  };
+  const periodEnd = shift(new Date(), -1);
+  const periodStart = shift(periodEnd, -(windowDays - 1));
+  const reportPeriod = `${fmtDate(periodStart)} to ${fmtDate(periodEnd)} (last ${windowDays} days)`;
+  const ga4DateRanges: Array<{ name: string; startDate: string; endDate: string }> = [
+    { name: "current", startDate: fmtDate(periodStart), endDate: fmtDate(periodEnd) },
+  ];
+  if (comparisonPeriod === "Previous period" || comparisonPeriod === "Both") {
+    ga4DateRanges.push({ name: "previous_period", startDate: fmtDate(shift(periodStart, -windowDays)), endDate: fmtDate(shift(periodStart, -1)) });
+  }
+  if (comparisonPeriod === "Same period last year" || comparisonPeriod === "Both") {
+    ga4DateRanges.push({ name: "same_period_last_year", startDate: fmtDate(shiftYear(periodStart)), endDate: fmtDate(shiftYear(periodEnd)) });
+  }
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -89,7 +118,7 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            dateRanges: [{ startDate: "7daysAgo", endDate: "today" }],
+            dateRanges: ga4DateRanges,
             dimensions: [{ name: "sessionDefaultChannelGroup" }],
             metrics: [{ name: "sessions" }, { name: "conversions" }],
           }),
@@ -100,12 +129,14 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
       }
 
       const ga4Data = (await ga4Res.json()) as Ga4Response;
+      // With more than one date range GA4 appends the range name as a trailing dimension.
       const channelRows = (ga4Data.rows ?? []).map((row) => ({
         channel: row.dimensionValues[0]?.value ?? "Unknown",
+        period: ga4DateRanges.length > 1 ? (row.dimensionValues[1]?.value ?? "current") : "current",
         sessions: Number(row.metricValues[0]?.value ?? 0),
         conversions: Number(row.metricValues[1]?.value ?? 0),
       }));
-      liveGa4Block = `Live GA4 Channel Performance (Last 7 Days):\n${JSON.stringify(channelRows, null, 2)}`;
+      liveGa4Block = `Live GA4 Channel Performance (${ga4DateRanges.map((r) => `${r.name}: ${r.startDate} to ${r.endDate}`).join("; ")}):\n${JSON.stringify(channelRows, null, 2)}`;
       source = "live";
     } catch (err) {
       if (err instanceof AgentInputError) throw err;
@@ -122,7 +153,8 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
     },
   });
 
-  if (adsIntegration) {
+  // Spend left out of the report → the Ads account isn't queried at all.
+  if (adsIntegration && includeSpend) {
     try {
       const adsCreds = await googleCredentials(adsIntegration);
       // A submitted dropdown choice wins over the integration's saved
@@ -144,7 +176,7 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
           headers: googleAdsHeaders(adsCreds.access_token),
           body: JSON.stringify({
             query:
-              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
+              `SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${fmtDate(periodStart)}' AND '${fmtDate(periodEnd)}'`,
           }),
         }
       );
@@ -173,7 +205,7 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
         }
       }
 
-      liveAdsBlock = `Live Google Ads Campaign Performance (Last 30 Days):\n${JSON.stringify(campaigns, null, 2)}`;
+      liveAdsBlock = `Live Google Ads Campaign Performance (${reportPeriod}):\n${JSON.stringify(campaigns, null, 2)}`;
       source = "live";
     } catch (err) {
       if (err instanceof AgentInputError) throw err;
@@ -204,6 +236,8 @@ Report Configuration:
 - GSC Property: ${gscProperty}
 - Google Ads Account: ${adsAccount}
 - Report Period: ${reportPeriod}
+- Comparison Period for every delta: ${comparisonPeriod}${comparisonPeriod === "Both" ? " (report deltas against the previous period, and add the year-over-year change in each narrative)" : ""}
+- Metric Groups: ${includedMetrics}${includeSpend ? "" : " — paid media is excluded: set keyMetrics.paid to null and paidCampaignSummary to []"}
 - Prepared by: ${whiteLabelBrand}
 - Prepared for: ${clientName}
 ${liveDataSection}

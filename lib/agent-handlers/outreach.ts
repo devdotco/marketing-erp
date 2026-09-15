@@ -3,7 +3,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
+import { AgentInputError } from "@/lib/ai/errors";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { googleCredentials } from "@/lib/integrations/google";
 import { microsoftCredentials } from "@/lib/integrations/microsoft";
@@ -36,12 +38,74 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const pitchAngle = String(config.pitchAngle ?? "");
-  const sequenceLength = Number(config.sequenceLength ?? 3);
-  const followUpDays = Number(config.followUpDays ?? 3);
-  const dailyLimit = Number(config.dailyLimit ?? 20);
-  const emailAccount = String(config.emailAccount ?? "Gmail");
-  const personalisation = String(config.personalisation ?? "High");
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts. The old
+  // `sequenceLength` counted the first email too; Follow-Up Email Count doesn't.
+  applyRenamedInputs(run, config, {
+    yourPitch: "pitchAngle",
+    followUpCount: { from: "sequenceLength", map: (v: unknown) => Number(v) - 1 },
+    dailySendLimit: "dailyLimit",
+  });
+  const pitchAngle = str(config, "yourPitch");
+  const followUpCount = Math.round(num(config, "followUpCount", 2, { min: 0, max: 5 }));
+  const sequenceLength = followUpCount + 1;
+  const followUpDays = Math.round(num(config, "followUpDays", 3, { min: 1, max: 30 }));
+  const dailyLimit = Math.round(num(config, "dailySendLimit", 40, { min: 1 }));
+  const senderEmail = str(config, "senderEmail");
+  const emailTone = str(config, "emailTone", "Professional");
+  const signatureName = str(config, "signatureName");
+  const personalisation = str(config, "personalisation", "High");
+  const prospectListId = str(config, "prospectListId");
+
+  // --- Prospect List: an approved Prospector run's real prospects ---
+  // Without one (an API caller or an old saved config that never set it) the agent writes
+  // sequences for representative example prospects, as it always has.
+  type ListedProspect = {
+    domain: string;
+    pageUrl?: string;
+    contactName?: string | null;
+    contactEmail?: string | null;
+    outreachAngle?: string;
+    linkPlacementOpportunity?: string;
+    targetUrl?: string;
+  };
+  let listedProspects: ListedProspect[] = [];
+  if (prospectListId) {
+    const listRun = await prisma.agentRun.findFirst({
+      where: {
+        id: prospectListId,
+        workspaceId: run.agentConfig.workspaceId,
+        agentConfig: { agentSlug: "prospector" },
+      },
+      select: { status: true, output: true },
+    });
+    if (!listRun) {
+      throw new AgentInputError(
+        "The selected Prospect List isn't a Prospector run in this workspace.",
+        "Pick a list from the Prospect List dropdown, or run Prospector and approve the run first.",
+        "prospect_list_not_found",
+      );
+    }
+    if (listRun.status !== "APPROVED" && listRun.status !== "COMPLETED") {
+      throw new AgentInputError(
+        `The selected Prospect List hasn't been approved yet (status: ${listRun.status}).`,
+        "Approve the Prospector run first — Outreach only writes to prospects a person has reviewed.",
+        "prospect_list_not_approved",
+      );
+    }
+    const rawProspects = (listRun.output as { prospects?: unknown } | null)?.prospects;
+    listedProspects = (Array.isArray(rawProspects) ? rawProspects : [])
+      .filter((p): p is ListedProspect => Boolean(p) && typeof (p as ListedProspect).domain === "string" && (p as ListedProspect).domain.trim() !== "");
+    if (listedProspects.length === 0) {
+      throw new AgentInputError(
+        "The selected Prospect List has no prospects in it.",
+        "Run Prospector again with broader criteria, then pick the new list.",
+        "prospect_list_empty",
+      );
+    }
+  }
+  // One batch is at most a day's send limit, and at most 10 sequences so the whole batch fits the
+  // 8096-token response below.
+  const batchProspects = listedProspects.slice(0, Math.min(dailyLimit, 10));
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -158,18 +222,24 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
 
   const userPrompt = [
     `Write link building outreach email sequences for ${dailyLimit} prospects per day.`,
-    `Sequence length: ${sequenceLength} emails per prospect, with ${followUpDays}-day gaps between follow-ups.`,
+    `Sequence length: ${sequenceLength} emails per prospect (the first email plus ${followUpCount} follow-up${followUpCount === 1 ? "" : "s"}), with ${followUpDays}-day gaps between follow-ups.`,
+    `Tone: ${emailTone}`,
     `Personalisation level: ${personalisation}`,
-    `Sending account: ${emailAccount}`,
+    `Sending account: ${senderEmail || liveProvider || "not connected"}`,
+    signatureName ? `Sign every email off as: ${signatureName}` : "",
     pitchAngle ? `Pitch angle / value offer: ${pitchAngle}` : "",
     emailContextSummary
       ? `\nContext from live sent emails (calibrate tone; avoid patterns already used):\n${emailContextSummary}`
       : "",
     "",
-    "Generate sequences for at least 5 representative prospects across different site types (blog, resource page, news site, directory, niche community).",
+    batchProspects.length > 0
+      ? `Write exactly one sequence for each of these ${batchProspects.length} prospects, from the approved Prospector list. Personalise only from what is stated here — never invent facts about their site:\n${JSON.stringify(batchProspects.map((p) => ({ domain: p.domain, pageUrl: p.pageUrl, contactName: p.contactName ?? null, contactEmail: p.contactEmail ?? null, outreachAngle: p.outreachAngle, placementOpportunity: p.linkPlacementOpportunity, ourPage: p.targetUrl })), null, 2)}`
+      : "Generate sequences for at least 5 representative prospects across different site types (blog, resource page, news site, directory, niche community).",
     "Each email body must be plain text — no HTML, no excessive formatting. Initial emails must be under 100 words.",
     "Follow-up emails should acknowledge the previous email briefly and add a new angle or piece of value.",
-    "Include a prospectEmail field on each sequence (use a realistic address for the domain).",
+    batchProspects.length > 0
+      ? "Copy each prospect's domain and contactEmail into prospectDomain and prospectEmail exactly as given (null when none was given)."
+      : "Include a prospectEmail field on each sequence (use a realistic address for the domain).",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -228,7 +298,8 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
       const firstEmail = seq.emails[0];
       if (!firstEmail) continue;
 
-      const toAddress = seq.prospectEmail ?? `contact@${seq.prospectDomain}`;
+      const listed = batchProspects.find((p) => p.domain.toLowerCase() === String(seq.prospectDomain ?? "").toLowerCase());
+      const toAddress = (listed ? listed.contactEmail : seq.prospectEmail) ?? `contact@${seq.prospectDomain}`;
       let draftId: string | undefined;
       let draftError: string | undefined;
 
@@ -285,6 +356,7 @@ export const outreachHandler: AgentHandler = async (run, updateStatus) => {
   const output: Record<string, unknown> = {
     ...claudeOutput,
     drafts,
+    ...(prospectListId ? { prospectListId, prospectsInList: listedProspects.length, prospectsInBatch: batchProspects.length } : {}),
     source: emailSource,
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,

@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const operatorHandler: AgentHandler = async (run, updateStatus) => {
@@ -14,11 +15,23 @@ export const operatorHandler: AgentHandler = async (run, updateStatus) => {
 
   const config = resolveInputs(run);
 
-  const weeklyBudgetUsd = Number(config.weeklyBudgetUsd ?? 500);
-  const priorityChannels = String(config.priorityChannels ?? "All");
-  const autoApproveThreshold = Number(config.autoApproveThreshold ?? 50);
-  const reportingDay = String(config.reportingDay ?? "Monday");
-  const goalsContext = String(config.goalsContext ?? "");
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, {
+    focusArea: {
+      from: "priorityChannels",
+      map: (v: unknown) => ({ "Content+SEO": "Content-heavy", "Paid+Social": "Paid-heavy", "SEO only": "SEO-heavy", All: "Balanced" } as Record<string, string>)[String(v)],
+    },
+    priorityOverride: "goalsContext",
+  });
+  const weeklyBudgetUsd = num(config, "weeklyBudgetUsd", 500, { min: 0 });
+  const focusArea = str(config, "focusArea", "Balanced");
+  const goalsContext = str(config, "priorityOverride");
+  const planningHorizonDays = Math.round(num(config, "planningHorizonDays", 7, { min: 1, max: 30 }));
+  const maxAgentRuns = Math.round(num(config, "maxAgentsPerWeek", 5, { min: 1, max: 20 }));
+  const includeAnomalies = bool(config, "includeAnomalies", true);
+  // Not a form input: the plan's autoApprove flags are recommendations only — nothing in the
+  // platform auto-approves a run — so this stays the fixed bar it always was.
+  const autoApproveThreshold = 50;
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -51,13 +64,37 @@ export const operatorHandler: AgentHandler = async (run, updateStatus) => {
     : "";
 
   const channelFocus =
-    priorityChannels === "Content+SEO"
-      ? "Focus exclusively on content creation and SEO agents (blog-writer, keyword-research, technical-audit, on-site-publisher, rank-tracker, topic-planner, internal-linking, schema)."
-      : priorityChannels === "Paid+Social"
-        ? "Focus exclusively on paid advertising and social media agents (google-ads, meta-ads, linkedin-ads, linkedin-poster, x-poster, captions-clips)."
-        : priorityChannels === "SEO only"
-          ? "Focus exclusively on SEO agents (keyword-research, technical-audit, rank-tracker, topic-planner, internal-linking, schema, content-refresh, gsc-analyst)."
-          : "Include agents across all channels: content, SEO, paid, social, email, outreach, and analytics.";
+    focusArea === "Content-heavy"
+      ? "Weight the plan toward content creation agents (blog-writer, topic-planner, repurposer, newsletter, on-site-publisher, content-refresh, landing-page-copy)."
+      : focusArea === "Paid-heavy"
+        ? "Weight the plan toward paid advertising agents (google-ads, meta-ads, linkedin-ads, ad-creative) and the social agents that feed them."
+        : focusArea === "SEO-heavy"
+          ? "Weight the plan toward SEO agents (keyword-research, technical-audit, rank-tracker, topic-planner, internal-linking, schema, content-refresh, gsc-analyst)."
+          : focusArea === "Conversion optimisation"
+            ? "Weight the plan toward conversion agents (landing-page-copy, attribution, email-marketing, anomaly-watch) and fixing what leaks between click and conversion."
+            : "Include agents across all channels: content, SEO, paid, social, email, outreach, and analytics.";
+
+  // Open anomalies from the latest live Anomaly Watch run. Simulated anomaly output is never fed
+  // in — planning a week around invented alerts is worse than planning without any.
+  let anomalySection = "";
+  if (includeAnomalies) {
+    const anomalyRun = await prisma.agentRun.findFirst({
+      where: {
+        workspaceId: run.agentConfig.workspaceId,
+        agentConfig: { agentSlug: "anomaly-watch" },
+        status: { in: ["COMPLETED", "APPROVED", "AWAITING_APPROVAL"] },
+        createdAt: { gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { output: true, createdAt: true },
+    });
+    const anomalyOutput = anomalyRun?.output as { source?: unknown; anomalies?: unknown } | null | undefined;
+    if (anomalyOutput?.source === "live" && Array.isArray(anomalyOutput.anomalies) && anomalyOutput.anomalies.length > 0) {
+      anomalySection = `Open anomaly alerts from Anomaly Watch (${anomalyRun!.createdAt.toISOString().slice(0, 10)}) — treat these as high-priority inputs:\n${JSON.stringify(anomalyOutput.anomalies).slice(0, 4000)}`;
+    } else {
+      anomalySection = "Anomaly alerts: none open from a live Anomaly Watch run in the last 14 days.";
+    }
+  }
 
   const today = new Date();
   const weekOfDate = today.toISOString().split("T")[0];
@@ -75,14 +112,15 @@ Return ONLY valid JSON — no markdown fences, no preamble.`;
 Business context:
 ${businessContext || "No business profile configured."}
 
-Goals and context provided by operator:
-${goalsContext || "No specific goals context provided. Use business profile goals."}
-
+Priority notes from the operator (factor these in ahead of data-driven signals):
+${goalsContext || "No specific priority notes provided. Use business profile goals."}
+${anomalySection ? `\n${anomalySection}\n` : ""}
 Operator configuration:
+- Planning horizon: ${planningHorizonDays} day${planningHorizonDays === 1 ? "" : "s"}
+- Maximum agent runs in the plan: ${maxAgentRuns}
 - Weekly budget: $${weeklyBudgetUsd}
-- Priority channels: ${priorityChannels}
+- Strategic focus: ${focusArea}
 - Auto-approve threshold: $${autoApproveThreshold} per run
-- Reporting day: ${reportingDay}
 
 Available agents to schedule (pick the most impactful for this week):
 blog-writer, keyword-research, technical-audit, weekly-report, competitor-watch, email-marketing,
@@ -132,9 +170,9 @@ ${JSON.stringify({
   autoApprovedCount: 0,
 })}
 
-Propose 8-14 agent runs that fit within the $${weeklyBudgetUsd} budget.
+Propose at most ${maxAgentRuns} agent run${maxAgentRuns === 1 ? "" : "s"} that fit within the $${weeklyBudgetUsd} budget.
 Set autoApprove to true for agents costing under $${autoApproveThreshold} that are routine.
-Set scheduledFor to realistic ISO datetime strings within the next 7 days.
+Set scheduledFor to realistic ISO datetime strings within the next ${planningHorizonDays} day${planningHorizonDays === 1 ? "" : "s"}.
 Include meaningful rationale for each agent that references the business goals and current situation.
 Ensure totalEstimatedCost, requiresApprovalCount, and autoApprovedCount are accurate tallies.`;
 

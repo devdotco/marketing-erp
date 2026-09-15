@@ -2,7 +2,7 @@ import type { AgentHandler } from "./index";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushPhraseThis, resolveSeoLiveData } from "./seo-data-providers";
 
@@ -14,15 +14,20 @@ export const keywordResearchHandler: AgentHandler = async (run, updateStatus) =>
   const config = resolveInputs(run);
 
   const seedKeywords = (config.seedKeywords as string) ?? "";
-  const industry = (config.industry as string) ?? "general";
   const targetCountry = (config.targetCountry as string) ?? "US";
   const clusterMethod = (config.clusterMethod as string) ?? "Intent";
   const briefDepth = (config.briefDepth as string) ?? "Full";
-  const maxKeywords = (config.maxKeywords as number) ?? 100;
+  const maxKeywords = num(config, "maxKeywords", 100, { min: 10, max: 300 });
+  const minVolume = num(config, "minVolume", 100, { min: 0 });
+  const maxDifficulty = num(config, "maxDifficulty", 70, { min: 0, max: 100 });
+  const intentFilter = str(config, "intentFilter", "all").toLowerCase();
+  const includeQuestions = bool(config, "includeQuestions", true);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
+  // The form field overrides; left blank, the Business Profile's industry is the better default.
+  const industry = str(config, "industry") || businessProfile?.industry || "general";
 
   // --- Live API: Ahrefs → Semrush → SearchAtlas. Throws (not caught here) if
   // a connected provider fails — see resolveSeoLiveData for why that's not a
@@ -119,8 +124,11 @@ ${liveDataSection}
 Generate up to ${maxKeywords} keywords total, grouped into clusters using the ${clusterMethod} clustering method.
 ${briefDepth === "Full" ? "Provide full article briefs with detailed outlines (5+ H2s with sub-H3s) for each cluster." : "Provide basic briefs with title, target keyword, and top 3 sections only."}
 Focus on realistic keyword metrics for the ${targetCountry} market.
-Prioritize commercially valuable, winnable keywords (difficulty < 60, volume > 100/mo).
-Aim for at least 4 distinct clusters covering different buyer journey stages.`;
+Hard filters — exclude any keyword that fails them: monthly volume below ${minVolume}; keyword difficulty above ${maxDifficulty} (0-100 scale).
+${intentFilter === "all" ? "Cover all search intents." : `Only include ${intentFilter}-intent keywords and clusters; exclude every other intent.`}
+${includeQuestions ? "Include question-format queries (People Also Ask style: how, what, why, which...) alongside head and long-tail terms." : "Exclude question-format queries; keep to head and long-tail non-question terms."}
+Prioritize commercially valuable, winnable keywords within those limits.
+Aim for at least 4 distinct clusters${intentFilter === "all" ? " covering different buyer journey stages" : ""}.`;
 
   const message = await client.messages.create({
     model: MODELS.standard,

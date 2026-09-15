@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const onboarderHandler: AgentHandler = async (run, updateStatus) => {
@@ -14,43 +14,45 @@ export const onboarderHandler: AgentHandler = async (run, updateStatus) => {
 
   const config = resolveInputs(run);
 
-  const interviewDepth = String(config.interviewDepth ?? "Standard");
-  const readWebsite = config.readWebsite !== false;
-  const focusAreas = String(config.focusAreas ?? "All");
-  const outputFormat = String(config.outputFormat ?? "Full Profile");
+  const interviewDepth = str(config, "interviewDepth", "Standard");
+  const focusAreas = str(config, "focusAreas", "All");
+  const outputFormat = str(config, "outputFormat", "Full Profile");
+  // What the person typed on the form outranks the saved Business Profile — this run exists to
+  // capture the business as they describe it now.
+  const businessName = str(config, "businessName");
+  const websiteUrl = str(config, "websiteUrl");
+  const industry = str(config, "industry");
+  const primaryGoal = str(config, "primaryGoal");
+  const competitorUrls = lines(config, "competitorUrls", 10);
+  const existingChannels = lines(config, "existingChannels", 30);
+  const annualRevenueRange = str(config, "annualRevenueRange");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
   });
 
-  const knownContext = businessProfile
-    ? [
-        businessProfile.businessName
-          ? `Business name: ${businessProfile.businessName}`
-          : "",
-        businessProfile.websiteUrl
-          ? `Website: ${businessProfile.websiteUrl}`
-          : "",
-        businessProfile.industry ? `Industry: ${businessProfile.industry}` : "",
-        businessProfile.targetAudience
-          ? `Target audience: ${businessProfile.targetAudience}`
-          : "",
-        businessProfile.brandVoice
-          ? `Brand voice: ${businessProfile.brandVoice}`
-          : "",
-        businessProfile.uniqueValueProp
-          ? `Unique value proposition: ${businessProfile.uniqueValueProp}`
-          : "",
-        businessProfile.competitors.length > 0
-          ? `Known competitors: ${businessProfile.competitors.join(", ")}`
-          : "",
-        businessProfile.goals
-          ? `Primary goals: ${JSON.stringify(businessProfile.goals)}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
+  const siteUrl = websiteUrl || businessProfile?.websiteUrl || "";
+  const profileName = businessName || businessProfile?.businessName || "";
+  const profileIndustry = industry || businessProfile?.industry || "";
+  const knownContext = [
+    profileName ? `Business name: ${profileName}` : "",
+    siteUrl ? `Website: ${siteUrl}` : "",
+    profileIndustry ? `Industry: ${profileIndustry}` : "",
+    primaryGoal ? `Primary marketing goal: ${primaryGoal}` : "",
+    annualRevenueRange && annualRevenueRange !== "Prefer not to say" ? `Annual revenue range: ${annualRevenueRange}` : "",
+    existingChannels.length > 0 ? `Currently active marketing channels: ${existingChannels.join(", ")}` : "",
+    competitorUrls.length > 0
+      ? `Top competitors: ${competitorUrls.join(", ")}`
+      : businessProfile?.competitors.length
+        ? `Known competitors: ${businessProfile.competitors.join(", ")}`
+        : "",
+    businessProfile?.targetAudience ? `Target audience: ${businessProfile.targetAudience}` : "",
+    businessProfile?.brandVoice ? `Brand voice: ${businessProfile.brandVoice}` : "",
+    businessProfile?.uniqueValueProp ? `Unique value proposition: ${businessProfile.uniqueValueProp}` : "",
+    businessProfile?.goals ? `Profile goals: ${JSON.stringify(businessProfile.goals)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const depthInstruction =
     interviewDepth === "Quick"
@@ -86,9 +88,7 @@ Ask about the business, customer, competition, current marketing state, and goal
 Infer realistic details where the business profile is incomplete. Never return placeholder text or "N/A" — always synthesise something useful.
 Return ONLY valid JSON — no markdown fences, no preamble.`;
 
-  const websiteNote = readWebsite
-    ? `Assume you have reviewed the business website (${businessProfile?.websiteUrl ?? "URL not provided"}) and incorporate insights accordingly.`
-    : "";
+  const websiteNote = `Assume you have reviewed the business website (${siteUrl || "URL not provided"}) and incorporate insights accordingly.`;
 
   const userPrompt = `Conduct a ${interviewDepth.toLowerCase()} marketing onboarding for this business and produce a comprehensive profile.
 

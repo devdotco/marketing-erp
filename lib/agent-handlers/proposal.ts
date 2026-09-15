@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const proposalHandler: AgentHandler = async (run, updateStatus) => {
@@ -14,12 +15,22 @@ export const proposalHandler: AgentHandler = async (run, updateStatus) => {
 
   const config = resolveInputs(run);
 
-  const prospectName = String(config.prospectName ?? "");
-  const prospectCompany = String(config.prospectCompany ?? "");
-  const callNotes = String(config.callNotes ?? "");
-  const rateCard = String(config.rateCard ?? "");
-  const scopeLevel = String(config.scopeLevel ?? "Growth");
-  const trackOpens = config.trackOpens !== false;
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, { clientName: "prospectCompany" });
+  const proposalTitle = str(config, "proposalTitle");
+  const audienceType = str(config, "audienceType", "Prospective client");
+  const prospectName = str(config, "prospectName");
+  const prospectCompany = str(config, "clientName");
+  const callNotes = str(config, "callNotes");
+  const rateCard = str(config, "rateCard");
+  const scopeLevel = str(config, "scopeLevel", "Growth");
+  const toneOfVoice = str(config, "toneOfVoice", "Consultative");
+  const includeCompetitorAnalysis = bool(config, "includeCompetitorAnalysis", true);
+  const includeProjectedKPIs = bool(config, "includeProjectedKPIs", true);
+  const customInstructions = str(config, "customInstructions");
+  // "Prospect: Jane at Acme", "Prospect: Jane", or "Prospect: Acme" — never "Prospect:  at ".
+  const addressee = [prospectName, prospectCompany].filter(Boolean).join(" at ") || "the recipient";
+  const addresseeCompany = prospectCompany || "the recipient's organisation";
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -37,7 +48,10 @@ export const proposalHandler: AgentHandler = async (run, updateStatus) => {
           ? `Agency UVP: ${businessProfile.uniqueValueProp}`
           : "",
         businessProfile.brandVoice
-          ? `Writing tone: ${businessProfile.brandVoice}`
+          ? `Brand voice: ${businessProfile.brandVoice}`
+          : "",
+        includeCompetitorAnalysis && businessProfile.competitors.length > 0
+          ? `Known competitors: ${businessProfile.competitors.join(", ")}`
           : "",
       ]
         .filter(Boolean)
@@ -69,6 +83,8 @@ Proposals that win are specific to the prospect's situation (not generic), show 
 Mirror the prospect's language from the call notes. Reference specific problems they mentioned.
 Never use "synergy", "leverage", or "ecosystem".
 Write in a confident, direct tone — not corporate fluff.
+Tone of voice for this document: ${toneOfVoice} (this overrides the brand voice where they differ).
+Audience: ${audienceType} — calibrate structure, depth, and vocabulary for that reader (a board wants decisions and risk, an investor wants market and returns, a prospective client wants their problem solved, an internal team wants owners and sequencing).
 Return ONLY valid JSON — no markdown fences, no preamble.`;
 
   const rateCardSection = rateCard
@@ -77,7 +93,7 @@ Return ONLY valid JSON — no markdown fences, no preamble.`;
 
   const userPrompt = `Write a winning proposal based on these call notes.
 
-Prospect: ${prospectName} at ${prospectCompany}
+${proposalTitle ? `Proposal title: ${proposalTitle}\n` : ""}Prospect: ${addressee}
 Proposal date: ${proposalDate}
 Valid until: ${validUntil}
 Scope level: ${scopeLevel} (${scopeAgents})
@@ -88,9 +104,9 @@ ${agencyContext || "Marketing agency preparing this proposal."}
 Call notes:
 ${callNotes || "No call notes provided. Infer a realistic prospect situation."}
 ${rateCardSection}
-
+${customInstructions ? `\nCustom instructions (follow these):\n${customInstructions}\n` : ""}
 Write a proposal that:
-1. Opens with an executive summary that names the specific problems ${prospectName} mentioned
+1. Opens with an executive summary that names the specific problems ${prospectName || addresseeCompany} mentioned
 2. Shows you listened — reference exact pain points from the call notes
 3. Proposes a concrete scope with named agents and delivery cadence
 4. Makes the investment feel like a no-brainer relative to the problem being solved
@@ -99,8 +115,10 @@ Write a proposal that:
 Return this exact JSON structure:
 ${JSON.stringify({
   proposal: {
-    prospectName: "",
-    prospectCompany: "",
+    title: proposalTitle,
+    audienceType,
+    prospectName,
+    prospectCompany,
     preparedBy: businessProfile?.businessName ?? "Your Agency",
     date: proposalDate,
     validUntil,
@@ -137,13 +155,18 @@ ${JSON.stringify({
       },
     ],
     callNotesSummary: "string",
+    ...(includeCompetitorAnalysis
+      ? { competitiveLandscape: { summary: "string", competitors: [{ name: "string", positioning: "string", howWeDiffer: "string" }] } }
+      : {}),
+    ...(includeProjectedKPIs
+      ? { projectedKpis: [{ kpi: "string", baseline: "string", target: "string", timeframe: "string", assumption: "string" }] }
+      : {}),
   },
-  trackingNote: trackOpens
-    ? "Proposal open tracking enabled. You will be notified when this proposal is viewed."
-    : null,
 })}
 
-Make the executive summary and situation analysis specific to ${prospectCompany}'s situation from the call notes.
+Make the executive summary and situation analysis specific to ${addresseeCompany}'s situation from the call notes.
+${includeCompetitorAnalysis ? "Fill competitiveLandscape from the known competitors and call notes only — name no competitor you weren't given." : "Do not include a competitive landscape section."}
+${includeProjectedKPIs ? "Fill projectedKpis with 3-5 realistic targets; state the assumption behind each, and use \"unknown\" for any baseline you weren't given rather than inventing one." : "Do not include projected KPIs."}
 Include 5-8 agents in proposedScope.agentsIncluded with realistic cadences.
 Write 4-6 deliverables, 4-6 inclusions, 3-4 exclusions.
 Write 4-5 next steps with specific owners (prospect vs agency) and timelines.

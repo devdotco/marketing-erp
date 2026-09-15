@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface GbpLocalPost {
@@ -28,6 +28,9 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
   const postFrequency = String(config.postFrequency ?? "Weekly");
   const reviewResponseStyle = String(config.reviewResponseStyle ?? "Professional");
   const citationCheckUrls = String(config.citationCheckUrls ?? "");
+  const targetKeywords = lines(config, "targetKeywords", 25);
+  const serviceArea = str(config, "serviceArea");
+  const postImageUrl = str(config, "postImageUrl");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -180,6 +183,11 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
   const userPrompt = [
     `Generate a Google Business Profile content plan for: ${gbpLocation || "the client location"}`,
     businessCategory ? `Business category: ${businessCategory}` : "",
+    serviceArea ? `Primary service area: ${serviceArea} — ground posts and Q&A answers in this area by name where it reads naturally` : "",
+    targetKeywords.length > 0
+      ? `Target local keywords (work these naturally into post copy and Q&A answers — never stuff): ${targetKeywords.join(", ")}`
+      : "",
+    postImageUrl ? "Posts will carry a supplied default photo, so imageNote may simply confirm the default image fits." : "",
     `Post frequency: ${postFrequency} (generate ${postCount} posts)`,
     `Review response tone: ${effectiveBrandVoice}`,
     liveContext ? `\nLive GBP data:${liveContext}` : "",
@@ -234,6 +242,7 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
+  if (postImageUrl) output.defaultPostImageUrl = postImageUrl;
   // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
   const costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
@@ -265,6 +274,9 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
         };
         if (post.cta?.url) {
           payload.callToAction = { actionType: "LEARN_MORE", url: post.cta.url };
+        }
+        if (postImageUrl) {
+          payload.media = [{ mediaFormat: "PHOTO", sourceUrl: postImageUrl }];
         }
         const res = await fetch(`${baseUrl}/localPosts`, {
           method: "POST",

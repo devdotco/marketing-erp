@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const videoScriptHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,20 @@ export const videoScriptHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, {
+    desiredLengthMinutes: "durationMinutes",
+    toneOfVoice: "videoStyle",
+    targetAudienceDescription: "audienceLevel",
+  });
   const videoTopic = String(config.videoTopic ?? "");
-  const durationMinutes = Number(config.durationMinutes ?? 10);
-  const videoStyle = String(config.videoStyle ?? "Educational");
+  const durationMinutes = num(config, "desiredLengthMinutes", 5, { min: 0.25, max: 60 });
+  const toneOfVoice = str(config, "toneOfVoice", "Conversational");
   const targetPlatform = String(config.targetPlatform ?? "YouTube");
-  const audienceLevel = String(config.audienceLevel ?? "Beginner");
+  const targetAudience = str(config, "targetAudienceDescription");
+  const videoGoal = str(config, "videoGoal");
+  const keyMessages = str(config, "keyMessages");
+  const callToAction = str(config, "callToAction");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -48,16 +58,20 @@ export const videoScriptHandler: AgentHandler = async (run, updateStatus) => {
   const userPrompt = [
     `Write a complete ${durationMinutes}-minute video script.`,
     videoTopic ? `Topic: ${videoTopic}` : "",
-    `Style: ${videoStyle}`,
+    `Tone of voice: ${toneOfVoice} (overrides the brand voice above where they differ)`,
     `Target platform: ${targetPlatform}`,
-    `Audience level: ${audienceLevel}`,
+    targetAudience ? `Target audience: ${targetAudience} — match their vocabulary, depth and awareness level.` : "",
+    videoGoal ? `Video goal: ${videoGoal} — shape the narrative arc, proof placement and CTA around it.` : "",
+    keyMessages ? `Key messages that must appear in the script, stated as given (never invent figures beyond these):\n${keyMessages}` : "",
     "",
     "Requirements:",
     "- Cold open must hook viewers within the first 15 seconds",
     "- Divide the video into logical chapters",
     `- Write approximately ${sceneCount} scenes spread across the chapters`,
     "- Each scene should include full spoken script, b-roll notes, on-screen text, and camera direction",
-    "- Include a strong CTA at the end",
+    callToAction
+      ? `- End with this call to action, and place it mid-roll too if the length allows: ${callToAction}`
+      : "- Include a strong CTA at the end",
     "- Suggest 3 thumbnail concepts",
     "",
     "Return this exact JSON structure:",

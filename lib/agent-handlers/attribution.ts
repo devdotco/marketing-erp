@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 interface Ga4Row {
@@ -27,9 +27,10 @@ export const attributionHandler: AgentHandler = async (run, updateStatus) => {
   const config = resolveInputs(run);
 
   const ga4Property = String(config.ga4Property ?? "");
-  const crmIntegration = String(config.crmIntegration ?? "Manual");
-  const attributionWindow = String(config.attributionWindow ?? "30 days");
-  const revenueMetric = String(config.revenueMetric ?? "");
+  const conversionEvents = lines(config, "conversionEventNames", 20);
+  const attributionModel = str(config, "attributionModel", "All models compared");
+  const currencyCode = str(config, "currencyCode", "USD").toUpperCase();
+  const excludeDirectTraffic = bool(config, "excludeDirectTraffic", false);
   const darkSocialEstimate = config.darkSocialEstimate !== false;
 
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -60,7 +61,7 @@ export const attributionHandler: AgentHandler = async (run, updateStatus) => {
     : "";
 
   const today = new Date();
-  const windowDays = parseInt(attributionWindow.split(" ")[0], 10) || 30;
+  const windowDays = num(config, "lookbackWindowDays", 30, { min: 1, max: 365 });
   const startDate = new Date(today);
   startDate.setDate(startDate.getDate() - windowDays);
   const reportPeriod = `${startDate.toISOString().split("T")[0]} to ${today.toISOString().split("T")[0]}`;
@@ -115,11 +116,14 @@ export const attributionHandler: AgentHandler = async (run, updateStatus) => {
       }
 
       const ga4Data = (await ga4Res.json()) as Ga4Response;
-      const channelRows = (ga4Data.rows ?? []).map((row) => ({
-        channel: row.dimensionValues[0]?.value ?? "Unknown",
-        sessions: Number(row.metricValues[0]?.value ?? 0),
-        conversions: Number(row.metricValues[1]?.value ?? 0),
-      }));
+      const channelRows = (ga4Data.rows ?? [])
+        .map((row) => ({
+          channel: row.dimensionValues[0]?.value ?? "Unknown",
+          sessions: Number(row.metricValues[0]?.value ?? 0),
+          conversions: Number(row.metricValues[1]?.value ?? 0),
+        }))
+        // GA4's default channel group labels these "Direct" ("(none)" on older properties).
+        .filter((r) => !excludeDirectTraffic || !/^(direct|\(none\))$/i.test(r.channel.trim()));
 
       const totalSessions = channelRows.reduce((s, r) => s + r.sessions, 0);
       const totalConversions = channelRows.reduce((s, r) => s + r.conversions, 0);
@@ -150,9 +154,11 @@ Be specific about channel names and percentages. Return ONLY valid JSON — no m
 
   const userPrompt = `Generate a multi-touch attribution analysis for:
 - GA4 Property: ${ga4Property}
-- CRM Integration: ${crmIntegration}
-- Attribution Window: ${attributionWindow}
-- Revenue Metric: ${revenueMetric || "Not specified"}
+- Conversion Events Modelled: ${conversionEvents.length > 0 ? conversionEvents.join(", ") : "All key events"}
+- Attribution Lookback Window: ${windowDays} days
+- Primary Model: ${attributionModel}${attributionModel === "All models compared" ? "" : ` — lead insights with this model's view and explain where the other models disagree with it${["Data-driven", "Time-decay"].includes(attributionModel) ? `; also return models.primaryModelView (same shape as linearAssisted) estimating ${attributionModel} credit` : ""}`}
+- Revenue Currency: ${currencyCode} (express every revenue figure in ${currencyCode})
+- Direct / None Traffic: ${excludeDirectTraffic ? "EXCLUDED — leave Direct out of every model and note the exclusion in blindSpots" : "included"}
 - Report Period: ${reportPeriod}
 - Include Dark Social Estimate: ${darkSocialEstimate}
 
@@ -165,6 +171,9 @@ Generate realistic attribution data appropriate for a ${businessProfile?.industr
 Return this exact JSON structure:
 ${JSON.stringify({
   reportPeriod,
+  primaryModel: attributionModel,
+  currencyCode,
+  conversionEvents,
   totalRevenue: null as number | null,
   models: {
     firstTouch: [

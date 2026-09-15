@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,16 +14,19 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const offerDescription =
-    typeof config.offerDescription === "string" ? config.offerDescription : "";
-  const targetBuyer =
-    typeof config.targetBuyer === "string" ? config.targetBuyer : "";
-  const mainObjections =
-    typeof config.mainObjections === "string" ? config.mainObjections : "";
-  const socialProofCount =
-    typeof config.socialProofCount === "number" ? config.socialProofCount : 3;
-  const pageGoal =
-    typeof config.pageGoal === "string" ? config.pageGoal : "Lead Gen";
+  // Renamed to the Run form's key on 2026-09-14; a saved targetBuyer still works.
+  applyRenamedInputs(run, config, { audienceDescription: "targetBuyer" });
+
+  const offerDescription = str(config, "offerDescription");
+  const audienceDescription = str(config, "audienceDescription");
+  const mainObjections = str(config, "mainObjections");
+  const socialProofCount = num(config, "socialProofCount", 3, { min: 0, max: 6 });
+  const pageGoal = str(config, "pageGoal", "Lead generation");
+  const targetKeyword = str(config, "targetKeyword");
+  const competitorUrls = lines(config, "competitorUrls", 3);
+  const ctaButtonText = str(config, "ctaButtonText");
+  const wordCountTarget = num(config, "wordCountTarget", 600, { min: 150, max: 3000 });
+  const toneOverride = str(config, "toneOverride", "Use Brand Profile default");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -65,26 +69,45 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
     .filter(Boolean)
     .join("\n");
 
+  // Keyed by the form's Page Goal options (this map used to use labels the form never offered,
+  // so every goal fell through to the Lead Gen CTAs).
+  const leadGen = { primary: "Get Your Free Consultation", secondary: "See How It Works" };
+  const demo = { primary: "Book a Live Demo", secondary: "Watch a 2-Minute Overview" };
+  const purchase = { primary: "Buy Now", secondary: "See Pricing" };
+  const signup = { primary: "Start Free", secondary: "Learn More" };
   const ctaByGoal: Record<string, { primary: string; secondary: string }> = {
-    "Lead Gen": { primary: "Get Your Free Consultation", secondary: "See How It Works" },
-    "Demo Request": { primary: "Book a Live Demo", secondary: "Watch a 2-Minute Overview" },
-    Purchase: { primary: "Buy Now", secondary: "See Pricing" },
-    Signup: { primary: "Start Free", secondary: "Learn More" },
+    "Lead generation": leadGen,
+    "Demo booking": demo,
+    "Free trial signup": signup,
+    "Direct purchase": purchase,
+    "Content download": { primary: "Download the Guide", secondary: "See What's Inside" },
   };
-  const defaultCta = ctaByGoal[pageGoal] ?? ctaByGoal["Lead Gen"];
+  const goalCta = ctaByGoal[pageGoal] ?? leadGen;
+  const defaultCta = ctaButtonText ? { primary: ctaButtonText, secondary: goalCta.secondary } : goalCta;
+  const toneLine = toneOverride && toneOverride !== "Use Brand Profile default"
+    ? `Tone for this page (overrides the brand voice): ${toneOverride}`
+    : "";
 
   const userPrompt = [
     `Write 3 complete, substantially different landing page copy variants for the following offer.`,
     `Page goal: ${pageGoal}`,
+    targetKeyword ? `Target keyword: ${targetKeyword} — use it in every variant's H1 or subheadline, the meta title, and the first sentence of the hero body.` : "",
+    `Aim for about ${wordCountTarget} words of page copy per variant, all sections combined.`,
+    toneLine,
     "",
     offerDescription ? `Offer description:\n${offerDescription}` : "",
-    targetBuyer ? `\nTarget buyer:\n${targetBuyer}` : "",
+    audienceDescription ? `\nTarget audience:\n${audienceDescription}` : "",
     mainObjections ? `\nMain objections to overcome:\n${mainObjections}` : "",
+    competitorUrls.length > 0
+      ? `\nCompetitor landing pages to differentiate from (you have the URLs only, not the page content — do not claim to know what they say):\n${competitorUrls.join("\n")}`
+      : "",
     `\nInclude ${socialProofCount} social proof testimonials per variant (invent plausible ones if none are provided — mark invented ones with sourceUrl: null).`,
     "",
     "Variant names must be exactly: pain-led, outcome-led, proof-led.",
     "Each variant needs all fields populated — no placeholders, no 'TBD'.",
-    `Default CTA if not naturally implied by the copy: primary="${defaultCta.primary}", secondary="${defaultCta.secondary}"`,
+    ctaButtonText
+      ? `Preferred primary CTA button label: "${ctaButtonText}". Use it as the primary CTA in one variant and write two alternative labels for the other two, for A/B testing. Secondary CTA default: "${defaultCta.secondary}"`
+      : `Default CTA if not naturally implied by the copy: primary="${defaultCta.primary}", secondary="${defaultCta.secondary}"`,
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -119,6 +142,7 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
             secondary: "Secondary CTA link text",
           },
           closingStatement: "Final sentence before the CTA — creates urgency or reassurance",
+          seo: { metaTitle: "Meta title under 60 characters", metaDescription: "Meta description under 155 characters" },
         },
         {
           name: "outcome-led",
@@ -130,6 +154,7 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
           objectionHandlers: [],
           cta: { primary: "", secondary: "" },
           closingStatement: "",
+          seo: { metaTitle: "", metaDescription: "" },
         },
         {
           name: "proof-led",
@@ -141,6 +166,7 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
           objectionHandlers: [],
           cta: { primary: "", secondary: "" },
           closingStatement: "",
+          seo: { metaTitle: "", metaDescription: "" },
         },
       ],
     }),

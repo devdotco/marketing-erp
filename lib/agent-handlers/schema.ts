@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const schemaHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,14 @@ export const schemaHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
+  // Schema Types replaced the old customSchemaTypes field on 2026-09-14; a saved value still works.
+  applyRenamedInputs(run, config, { schemaTypes: "customSchemaTypes" });
   const siteUrl = String(config.siteUrl ?? "");
-  const pageTypes = String(config.pageTypes ?? "All");
-  const validationStrictness = String(config.validationStrictness ?? "Standard");
+  const validationStrictness = str(config, "validationStrictness", "Standard");
   const cmsTarget = String(config.cmsTarget ?? "HTML");
-  const customSchemaTypes = String(config.customSchemaTypes ?? "");
+  const schemaTypes = lines(config, "schemaTypes", 20);
+  const organisationName = str(config, "organisationName");
+  const organisationUrl = str(config, "organisationUrl");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -43,19 +47,17 @@ export const schemaHandler: AgentHandler = async (run, updateStatus) => {
     brandContext ? `\nClient context:\n${brandContext}` : "",
   ].filter(Boolean).join("\n");
 
-  const resolvedPageTypes =
-    pageTypes === "All"
-      ? ["Homepage", "Blog Post", "FAQ", "Product/Service", "Breadcrumb", "Organization"]
-      : pageTypes === "Blog only"
-        ? ["Blog Post", "Breadcrumb"]
-        : [pageTypes];
+  const resolvedSchemaTypes = schemaTypes.length > 0 ? schemaTypes : ["Article", "BreadcrumbList", "FAQ"];
+  const orgName = organisationName || businessProfile?.businessName || "";
+  const orgUrl = organisationUrl || businessProfile?.websiteUrl || siteUrl;
 
   const userPrompt = [
     `Generate Schema.org structured data for: ${siteUrl || "the client website"}`,
-    `Page types to cover: ${resolvedPageTypes.join(", ")}`,
+    `Schema types to generate (only these, plus the Organization entity they reference): ${resolvedSchemaTypes.join(", ")}`,
+    orgName ? `Organisation name for every Organization / publisher entity: ${orgName}` : "",
+    orgUrl ? `Organisation URL for the Organization url and publisher fields: ${orgUrl}` : "",
     `Validation strictness: ${validationStrictness} — ${validationStrictness === "Strict" ? "only include properties with confirmed Google support" : "include recommended properties even if not all are verified by Google"}`,
     `CMS target: ${cmsTarget} — provide implementation notes specific to this platform`,
-    customSchemaTypes ? `Also include these custom schema types: ${customSchemaTypes}` : "",
     "",
     "For each schema:",
     "- Provide complete, valid JSON-LD ready to paste",
@@ -79,8 +81,8 @@ export const schemaHandler: AgentHandler = async (run, updateStatus) => {
           jsonLd: {
             "@context": "https://schema.org",
             "@type": "Organization",
-            name: "Business Name",
-            url: siteUrl || "https://example.com",
+            name: orgName || "Business Name",
+            url: orgUrl || "https://example.com",
           },
           implementationNote:
             "Place in <head> on every page. Replace placeholder values with real data.",

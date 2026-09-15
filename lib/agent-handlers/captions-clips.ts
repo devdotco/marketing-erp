@@ -3,8 +3,19 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+
+// The handler's old free-text platform names, mapped onto the form's Target Platforms options.
+const OLD_PLATFORM_NAMES: Record<string, string> = {
+  Reels: "TikTok / Reels (9:16)",
+  TikTok: "TikTok / Reels (9:16)",
+  Shorts: "YouTube Shorts (9:16)",
+  LinkedIn: "LinkedIn (1:1)",
+  YouTube: "YouTube (16:9)",
+  All: "All Platforms",
+};
 
 export const captionsClipsHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -13,12 +24,27 @@ export const captionsClipsHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const videoUrl = String(config.videoUrl ?? "");
-  const clipCount = Number(config.clipCount ?? 5);
-  const captionStyle = String(config.captionStyle ?? "Auto");
-  const targetPlatform = String(config.targetPlatform ?? "Reels");
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, {
+    mediaFileUrl: "videoUrl",
+    targetPlatforms: {
+      from: "targetPlatform",
+      map: (v: unknown) => OLD_PLATFORM_NAMES[String(v)] ?? v,
+    },
+    clipsPerHour: "clipCount",
+  });
+
+  const mediaFileUrl = str(config, "mediaFileUrl");
+  const clipsPerHour = num(config, "clipsPerHour", 4, { min: 1, max: 20 });
+  const minClipSeconds = num(config, "minimumClipLengthSeconds", 30, { min: 5, max: 600 });
+  const maxClipSeconds = Math.max(minClipSeconds, num(config, "maximumClipLengthSeconds", 90, { min: 5, max: 600 }));
+  const captionStyle = str(config, "captionStyle", "Bold White + Black Outline");
+  const targetPlatform = str(config, "targetPlatforms", "All Platforms");
+  // The form collects speaker names; an older saved config stored a plain on/off flag.
+  const speakerNames = typeof config.speakerLabels === "string" ? lines(config, "speakerLabels") : [];
   const speakerLabels = config.speakerLabels !== false;
-  const videoTranscript = String(config.videoTranscript ?? "");
+  const videoTranscript = str(config, "videoTranscript");
+  const transcriptOnly = bool(config, "transcriptOnly", false);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -45,19 +71,23 @@ export const captionsClipsHandler: AgentHandler = async (run, updateStatus) => {
   const hasTranscript = videoTranscript.trim().length > 0;
 
   const userPrompt = [
-    `Analyse the following and suggest ${clipCount} short-form clips optimised for ${targetPlatform}.`,
-    videoUrl ? `Video URL: ${videoUrl}` : "",
+    `Analyse the following and suggest short-form clips optimised for ${targetPlatform}: about ${clipsPerHour} clip(s) per hour of source content (at least 1), keeping only the highest-scoring candidates.`,
+    mediaFileUrl ? `Source media URL (for reference only — this agent cannot download or transcribe it): ${mediaFileUrl}` : "",
     hasTranscript
       ? `Transcript:\n${videoTranscript}`
       : "No transcript provided — generate example clips based on the business context above.",
-    `Caption style: ${captionStyle}`,
-    speakerLabels ? "Include speaker labels in the transcript where identifiable." : "No speaker labels needed.",
+    transcriptOnly ? "" : `Caption style: ${captionStyle}`,
+    speakerNames.length > 0
+      ? `Speakers, in the order they first speak: ${speakerNames.join(", ")}. Use these names as speaker labels.`
+      : speakerLabels ? "Include speaker labels in the transcript where identifiable." : "No speaker labels needed.",
     "",
     "For each clip:",
     "- Pick the most engaging, self-contained moment",
     "- Identify the exact hook moment within the clip",
-    "- Suggest platform-native captions and hashtags",
-    `- Keep clips between 15–90 seconds for ${targetPlatform}`,
+    transcriptOnly
+      ? "- Transcript and timestamps only: leave caption empty and hashtags as an empty array"
+      : "- Suggest platform-native captions and hashtags",
+    `- Keep every clip between ${minClipSeconds} and ${maxClipSeconds} seconds; discard candidates outside that range`,
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -77,14 +107,14 @@ export const captionsClipsHandler: AgentHandler = async (run, updateStatus) => {
           durationSeconds: 30,
           reason: "Why this moment works as a standalone clip...",
           hookMoment: "The exact sentence or moment that serves as the hook...",
-          caption: "Short punchy caption text for the clip...",
+          caption: transcriptOnly ? "" : "Short punchy caption text for the clip...",
           platform: targetPlatform,
-          hashtags: ["#hashtag1", "#hashtag2", "#hashtag3"],
+          hashtags: transcriptOnly ? [] : ["#hashtag1", "#hashtag2", "#hashtag3"],
         },
       ],
-      captionStyle,
+      captionStyle: transcriptOnly ? null : captionStyle,
       simulationNote:
-        "Provide a video transcript or connect a video processing integration to generate clips from real footage",
+        "Paste a transcript to select clips from real footage — this agent does not download, transcribe, or render media.",
     }),
   ].filter(Boolean).join("\n");
 

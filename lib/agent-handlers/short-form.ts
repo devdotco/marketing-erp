@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,21 @@ export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const platform = String(config.platform ?? "All");
-  const durationSeconds = Number(config.durationSeconds ?? 60);
-  const hook = String(config.hook ?? "");
-  const topic = String(config.topic ?? "");
-  const batchSize = Number(config.batchSize ?? 5);
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, {
+    targetPlatforms: { from: "platform", map: (v: unknown) => (v === "All" ? "All (Reels + TikTok + Shorts)" : v) },
+    maxClips: "batchSize",
+    topicPriorities: "topic",
+    hookStyle: "hook",
+  });
+  const platform = str(config, "targetPlatforms", "All (Reels + TikTok + Shorts)");
+  const minClipDuration = num(config, "minClipDuration", 30, { min: 5, max: 180 });
+  const maxClipDuration = Math.max(minClipDuration, num(config, "maxClipDuration", 90, { min: 5, max: 180 }));
+  const hookStyle = str(config, "hookStyle", "Bold statement");
+  const topicPriorities = str(config, "topicPriorities");
+  const batchSize = num(config, "maxClips", 5, { min: 1, max: 10 });
+  const sourceVideoUrl = str(config, "sourceVideoUrl");
+  const rawTranscript = str(config, "rawTranscript");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -45,21 +56,36 @@ export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
     brandContext ? `\nClient context:\n${brandContext}` : "",
   ].filter(Boolean).join("\n");
 
-  const platformLine = platform === "All"
-    ? "TikTok, Instagram Reels, and YouTube Shorts"
-    : platform;
+  const platformsByOption: Record<string, string> = {
+    "All (Reels + TikTok + Shorts)": "TikTok, Instagram Reels, and YouTube Shorts",
+    "Reels only": "Instagram Reels",
+    "TikTok only": "TikTok",
+    "YouTube Shorts only": "YouTube Shorts",
+    "Reels + TikTok": "Instagram Reels and TikTok",
+  };
+  const platformLine = platformsByOption[platform] ?? platform;
+  const hasTranscript = rawTranscript.length > 0;
 
   const userPrompt = [
-    `Generate ${batchSize} short-form video script(s) for ${platformLine}.`,
-    `Each script should be approximately ${durationSeconds} seconds long.`,
-    topic ? `Topic: ${topic}` : "",
-    hook ? `Use this hook concept as inspiration: ${hook}` : "Craft original pattern-interrupt hooks for each script.",
+    hasTranscript
+      ? `From the long-form transcript below, select up to ${batchSize} clip window(s) with the highest short-form potential (emotional intensity, quotability, standalone coherence) and write one script per clip for each of ${platformLine}.`
+      : `Generate ${batchSize} short-form video concept(s), with one script per concept for each of ${platformLine}.`,
+    `Every clip must run between ${minClipDuration} and ${maxClipDuration} seconds; exclude any moment that can't stand alone within that range.`,
+    topicPriorities ? `Topic priorities — favour moments and angles on these themes: ${topicPriorities}` : "",
+    `Hook style for every script's opening: ${hookStyle}`,
+    sourceVideoUrl ? `Source video URL (for reference only — this agent cannot fetch or transcribe it): ${sourceVideoUrl}` : "",
+    hasTranscript
+      ? `\nTranscript:\n${rawTranscript}`
+      : "No transcript was provided, so there are no real clip windows to select: write original scripts from the topic priorities and client context, and set sourceStartTimestamp and sourceEndTimestamp to null.",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
       scripts: [
         {
           platform: "TikTok | Instagram Reels | YouTube Shorts",
+          sourceStartTimestamp: "00:12:04 or null",
+          sourceEndTimestamp: "00:13:02 or null",
+          selectionRationale: "Why this window scores highly, or null",
           durationSeconds: 0,
           hook: "Opening hook text (first 2 seconds)",
           scenes: [
@@ -82,7 +108,8 @@ export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
 
   const message = await client.messages.create({
     model: MODELS.standard,
-    max_tokens: 8096,
+    // One script per clip per platform — the form defaults (5 clips × 3 platforms) outgrow 8096.
+    max_tokens: 16000,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
   });
@@ -96,6 +123,10 @@ export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
     output = { result: rawText };
   }
 
+  output.source = hasTranscript ? "transcript" : "simulation";
+  if (!hasTranscript) {
+    output.simulationNote = "No transcript was pasted, so these are original scripts rather than clips cut from your recording. Paste the Raw Transcript to select real clip windows.";
+  }
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
 

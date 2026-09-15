@@ -6,7 +6,7 @@ import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 function formatDate(d: Date): string {
@@ -24,7 +24,9 @@ export const technicalAuditHandler: AgentHandler = async (run, updateStatus) => 
   const gscProperty = String(config.gscProperty ?? "");
   const focusArea = String(config.focusArea ?? "Full audit");
   const includePerformance = config.includePerformance !== false;
+  const includeExternalLinks = config.includeExternalLinks === true;
   const maxPages = Number(config.maxPages ?? 500);
+  const focusKeywords = lines(config, "focusKeywords", 25);
 
   // Fetch business profile for website URL and context
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -156,7 +158,15 @@ ${JSON.stringify(topPages.map((r) => ({ url: r.keys[0], clicks: r.clicks, impres
       ? `Google Search Console property: ${gscProperty || "Connected"}`
       : "GSC: not connected — note this as a setup recommendation",
     `Audit scope: ${auditScope}`,
-    includePerformance ? "Include Core Web Vitals and page speed analysis." : "",
+    includePerformance
+      ? "Include Core Web Vitals and page speed analysis."
+      : "Skip Core Web Vitals and page speed analysis; set performanceMetrics to null.",
+    includeExternalLinks
+      ? "Include outbound external links in the broken-link check (4xx/5xx), not just internal links."
+      : "Limit the broken-link check to internal links; do not report on outbound external links.",
+    focusKeywords.length > 0
+      ? `Priority keywords: ${focusKeywords.join(", ")}. Flag thin-content (<300 words) or poorly optimised pages that target or rank for these terms as higher priority${isGscLive ? ", using the real GSC page data below to identify them" : ""}.`
+      : "",
     "",
     isGscLive
       ? `IMPORTANT: Use the real GSC indexability data below to inform your audit findings. Identify actual pages with CTR problems, flag zero-click pages with high impressions as indexability/metadata candidates, and reference real URLs in your criticalIssues and warnings.

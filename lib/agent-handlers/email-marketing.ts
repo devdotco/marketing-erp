@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { createKlaviyoDraft, createMailchimpDraft, resolveEspLiveData } from "./esp-providers";
@@ -24,9 +25,15 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const campaignType = (config.campaignType as string) ?? "Broadcast";
-  const segmentCondition = (config.segmentCondition as string) ?? "";
-  const numberOfEmails = (config.numberOfEmails as number) ?? 5;
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, { campaignGoal: "campaignType" });
+  const campaignType = str(config, "campaignGoal", "Nurture");
+  const segmentCondition = str(config, "segmentCondition");
+  const numberOfEmails = Math.round(num(config, "numberOfEmails", 5, { min: 1, max: 10 }));
+  const offerOrCta = str(config, "offerOrCta");
+  const brandVoiceNotes = str(config, "brandVoice");
+  const segmentByLifecycle = bool(config, "segmentByLifecycle", true);
+  const abTestSubjectLines = bool(config, "abTestSubjectLines", true);
   // The metadata field is "platform" (required: Mailchimp, Klaviyo, Instantly, Apollo, or erp.io
   // CRM) — this handler used to read a field named "espTarget" that doesn't exist on this agent's
   // config schema at all, so it silently always fell back to its "Draft" default and never
@@ -43,8 +50,8 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
   const espTarget = platform || "Draft";
   const configuredAudienceId = (config.audienceId as string) ?? "";
   const senderAccountId = (config.senderAccountId as string) ?? "";
-  const ctaUrl = (config.ctaUrl as string) ?? "";
-  const rewriteUnderperformers = (config.rewriteUnderperformers as boolean) ?? false;
+  const ctaUrl = str(config, "ctaUrl");
+  const rewriteUnderperformers = bool(config, "rewriteUnderperformers", false);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -105,15 +112,18 @@ Business Context:
 - Industry: ${businessProfile?.industry ?? "SaaS"}
 - Target Audience: ${businessProfile?.targetAudience ?? "B2B decision-makers"}
 - Value Proposition: ${businessProfile?.uniqueValueProp ?? "productivity and growth"}
-- Brand Voice: ${businessProfile?.brandVoice ?? "Professional yet approachable"}
+- Brand Voice: ${brandVoiceNotes || (businessProfile?.brandVoice ?? "Professional yet approachable")}
 - Website: ${businessProfile?.websiteUrl ?? ""}
 
 Campaign Configuration:
-- Campaign Type: ${campaignType}
+- Campaign Goal: ${campaignType}
 - Number of Emails in Sequence: ${numberOfEmails}
 - Segment Condition: ${segmentCondition || "All active subscribers"}
 - ESP Target: ${espTarget}
+- Offer / Call to Action: ${offerOrCta || "Choose the most natural next step for this goal"}
 - Primary CTA URL: ${ctaUrl || "https://example.com/get-started"}
+- Segment by Lifecycle Stage: ${segmentByLifecycle ? "yes — define segments by lifecycle stage (cold, nurturing, active, at-risk, lapsed) and tailor each email's copy to the stage it targets" : "no — one audience, one version of each email"}
+- A/B Test Subject Lines: ${abTestSubjectLines ? "yes — two subject-line variants per email" : "no — leave abVariants as an empty array"}
 - Rewrite Underperformers: ${rewriteUnderperformers}
 ${liveContext ? `\nReal ESP Account Data (use this to inform targeting recommendations and benchmark performance against existing campaigns):\n${liveContext}` : ""}
 

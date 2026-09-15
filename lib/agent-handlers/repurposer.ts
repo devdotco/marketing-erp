@@ -3,7 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,11 +14,20 @@ export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const sourceUrl = typeof config.sourceUrl === "string" ? config.sourceUrl : "";
-  const sourceContent = typeof config.sourceContent === "string" ? config.sourceContent : "";
-  const targetFormats = typeof config.targetFormats === "string" ? config.targetFormats : "All";
-  const platformPriority = typeof config.platformPriority === "string" ? config.platformPriority : "All";
-  const toneOverride = typeof config.toneOverride === "string" ? config.toneOverride : "";
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, {
+    sourceArticleUrl: "sourceUrl",
+    sourceArticleText: "sourceContent",
+    targetPlatforms: { from: "targetFormats", map: (v: unknown) => (v === "All" ? "All platforms" : v === "X Thread" ? "X only" : v) },
+  });
+
+  const sourceUrl = str(config, "sourceArticleUrl");
+  const sourceContent = str(config, "sourceArticleText");
+  const targetPlatforms = str(config, "targetPlatforms", "All platforms");
+  const toneOverride = str(config, "toneOverride", "Use Brand Profile default");
+  const linkedInAuthorName = str(config, "linkedInAuthorName");
+  const videoHookDurationSeconds = num(config, "videoHookDurationSeconds", 30, { min: 5, max: 180 });
+  const brandHashtags = str(config, "brandHashtags");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -41,13 +51,13 @@ export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
     : "";
 
   const effectiveTone =
-    toneOverride.trim()
-      ? toneOverride.trim()
+    toneOverride && toneOverride !== "Use Brand Profile default"
+      ? toneOverride
       : brandVoiceStr || "professional and engaging";
 
   const systemPrompt = [
     "You are an expert content repurposing specialist who adapts brand voice and tone for each platform's unique format, length constraints, and audience expectations.",
-    "You understand that X/Twitter demands punchy hooks under 280 characters, carousels need scannable visual-first slides, video scripts require verbal rhythm and scene transitions, and newsletters need editorial depth.",
+    "You understand that X/Twitter demands punchy hooks under 280 characters, carousels need scannable visual-first slides, video scripts require verbal rhythm and scene transitions, and LinkedIn articles need a professional narrative with real depth.",
     "You preserve the source content's core insights while making each format feel native to its platform — never just copy-pasted from the original.",
     "Return ONLY valid JSON — no markdown fences, no preamble, no trailing commentary.",
     brandContext ? `\nClient context:\n${brandContext}` : "",
@@ -56,21 +66,23 @@ export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
     .join("\n");
 
   const sourceDescription = [
-    sourceUrl ? `Source URL: ${sourceUrl}` : "",
+    sourceUrl
+      ? `Source URL: ${sourceUrl}${sourceContent ? "" : " (you have the URL only, not the article — do not invent what it says; work from the title the URL implies and say so in sourceTitle)"}`
+      : "",
     sourceContent ? `Source content:\n${sourceContent}` : "",
   ]
     .filter(Boolean)
     .join("\n");
 
-  const formatInstructions =
-    targetFormats === "All"
-      ? "Generate all four formats: X Thread, Carousel Outline, Video Script, and Newsletter Section."
-      : `Generate only the following format: ${targetFormats}.`;
+  const formatsByPlatform: Record<string, string> = {
+    "All platforms": "all four formats: LinkedIn Article, X Thread, Carousel Outline (Instagram), and Video Script",
+    "LinkedIn only": "only the LinkedIn Article",
+    "X only": "only the X Thread",
+    "Instagram + Video only": "only the Carousel Outline (Instagram) and the Video Script",
+  };
+  const formatInstructions = `Generate ${formatsByPlatform[targetPlatforms] ?? formatsByPlatform["All platforms"]}.`;
 
-  const platformNote =
-    platformPriority !== "All"
-      ? `Primary platform priority: ${platformPriority}. Optimise tone, hashtags, and CTAs for this platform's culture first.`
-      : "Optimise each format for its native platform.";
+  const platformNote = "Optimise each format for its native platform.";
 
   const userPrompt = [
     "Repurpose the following published content into platform-native formats.",
@@ -80,11 +92,14 @@ export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
     formatInstructions,
     platformNote,
     `Tone: ${effectiveTone}`,
+    brandHashtags
+      ? `Brand hashtags — include these on every social format, and add contextual tags alongside them: ${brandHashtags}`
+      : "",
     "",
+    `LinkedIn Article rules: professional narrative structure with a strong opening and subheadings, written in the first person${linkedInAuthorName ? ` as ${linkedInAuthorName}` : ""}.`,
     "X Thread rules: each post ≤ 280 chars, first post is the hook, last post has a CTA.",
     "Carousel rules: 6–10 slides, slide 1 = hook, slide 2–N = value points, final slide = CTA.",
-    "Video Script rules: 60–90 second short-form script, include b-roll notes, write as spoken word.",
-    "Newsletter Section rules: written for email, include a compelling subject line and preview text.",
+    `Video Script rules: a ${videoHookDurationSeconds}-second short-form hook script (totalSeconds must be ${videoHookDurationSeconds}), include b-roll notes, write as spoken word.`,
     "",
     "Return this exact JSON structure (use empty arrays/strings for formats not requested):",
     JSON.stringify({
@@ -120,11 +135,11 @@ export const repurposerHandler: AgentHandler = async (run, updateStatus) => {
           },
         ],
       },
-      newsletterSection: {
-        subjectLine: "Email subject line",
-        previewText: "Preview text shown in inbox (90 chars max)",
-        body: "Full email body text in HTML",
-        cta: "Call to action text and link placeholder",
+      linkedInArticle: {
+        authorName: linkedInAuthorName || null,
+        headline: "Article headline",
+        body: "Full article body in Markdown",
+        hashtags: ["#tag"],
       },
     }),
   ]

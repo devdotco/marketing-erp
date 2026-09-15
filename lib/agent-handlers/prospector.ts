@@ -2,7 +2,8 @@ import type { AgentHandler } from "./index";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, lines, num, resolveInputs } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { decryptCredentials } from "@/lib/crypto";
@@ -40,12 +41,27 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
       );
     }
   }
-  const targetTopics = String(config.targetTopics ?? "");
-  const domainRatingMin = Number(config.domainRatingMin ?? 30);
-  const trafficMin = Number(config.trafficMin ?? 1000);
-  const prospectCount = Number(config.prospectCount ?? 30);
-  const excludeDomains = String(config.excludeDomains ?? "");
-  const linkType = String(config.linkType ?? "Any");
+  // Old names from before the form and handler were reconciled — see renamed-inputs.ts.
+  applyRenamedInputs(run, config, {
+    topicalKeywords: "targetTopics",
+    minimumDa: "domainRatingMin",
+    maxProspects: "prospectCount",
+  });
+  const targetTopics = lines(config, "topicalKeywords", 30).join(", ");
+  const targetUrls = lines(config, "targetUrls", 20);
+  const domainRatingMin = num(config, "minimumDa", 20, { min: 0, max: 100 });
+  const trafficMin = num(config, "trafficMin", 1000, { min: 0 });
+  // Capped so the whole list fits the 4096-token response below — a longer list truncates the JSON
+  // and the run loses every prospect, not just the tail.
+  const prospectCount = Math.round(num(config, "maxProspects", 25, { min: 1, max: 30 }));
+  const excludeDomains = lines(config, "excludeDomains", 100).join(", ");
+  const includeResourcePages = bool(config, "includeResourcePages", true);
+  const includeBrokenLinks = bool(config, "includeBrokenLinks", true);
+  const opportunityTypes = [
+    "Editorial (a contextual link inside an existing article)",
+    includeResourcePages ? "Resource page (a curated links/resources page that accepts additions)" : "",
+    includeBrokenLinks ? "Broken link replacement (a dead outbound link one of our pages could replace)" : "",
+  ].filter(Boolean);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -65,7 +81,10 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
   // --- Live API: Ahrefs → Semrush ---
   // Use competitor domains from business profile as backlink targets to surface real prospects
   let liveDataSection = "";
-  const competitorTargets = businessProfile?.competitors ?? [];
+  // The form's Competitor Domains first; the Business Profile's competitors when it's blank. Only
+  // the first two are pulled live — one backlink call per competitor, per provider.
+  const formCompetitors = lines(config, "competitorDomains", 20);
+  const competitorTargets = formCompetitors.length > 0 ? formCompetitors : businessProfile?.competitors ?? [];
   const competitorDomains = competitorTargets.slice(0, 2).map(bareDomain).filter(Boolean);
 
   const liveResult = competitorDomains.length === 0
@@ -107,7 +126,11 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
     targetTopics ? `Target topics / niche: ${targetTopics}` : "",
     `Minimum estimated Domain Rating: ${domainRatingMin}`,
     `Minimum estimated monthly traffic: ${trafficMin}`,
-    `Preferred link type: ${linkType}`,
+    `Only these opportunity types: ${opportunityTypes.join("; ")}`,
+    targetUrls.length > 0
+      ? `Our pages that need links (every prospect's placement must fit one of these, named in targetUrl):\n${targetUrls.join("\n")}`
+      : "",
+    formCompetitors.length > 0 ? `Competitors whose backlink profiles define the gap: ${formCompetitors.join(", ")}` : "",
     excludeDomains ? `Exclude these domains (and any close variants): ${excludeDomains}` : "",
     "",
     "For each prospect, identify a specific page and placement opportunity. Estimate DR and monthly traffic realistically based on the site's niche and typical metrics.",
@@ -124,7 +147,8 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
           pageTitle: "Page title",
           estimatedDR: 0,
           estimatedMonthlyTraffic: 0,
-          linkType: "Editorial",
+          linkType: "Editorial | Resource page | Broken link replacement",
+          targetUrl: targetUrls[0] ?? "Which of our pages this link would point to",
           topicalRelevance: "high",
           contactEmail: null,
           contactName: null,

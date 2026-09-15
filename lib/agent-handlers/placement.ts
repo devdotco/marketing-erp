@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const placementHandler: AgentHandler = async (run, updateStatus) => {
@@ -14,7 +14,15 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
 
   const config = resolveInputs(run);
   const targetTopics = String(config.targetTopics ?? "");
-  const wordCount = Number(config.wordCount ?? 800);
+  const campaignName = str(config, "campaignName", "Placement campaign");
+  const targetPlacements = num(config, "targetPlacements", 10, { min: 1 });
+  // One run drafts a batch, not the whole campaign: three full articles is what
+  // an 8k-token reply holds. The campaign target is carried through for tracking.
+  const articlesThisRun = Math.min(targetPlacements, 3);
+  const targetPages = lines(config, "targetPages", 20);
+  const anchorTexts = lines(config, "defaultAnchorText", 20);
+  const wordCount = num(config, "articleLengthTarget", 1200, { min: 300, max: 3000 });
+  const requireGuidelineCheck = config.requireGuidelineCheck !== false;
   const budgetUsd = Number(config.budgetUsd ?? 300);
   const targetDa = Number(config.targetDa ?? 40);
   const preferredPublishers = String(config.preferredPublishers ?? "");
@@ -46,17 +54,26 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
   ].filter(Boolean).join("\n");
 
   const userPrompt = [
-    `Write editorial placement articles for the following campaign.`,
+    `Write editorial placement articles for the campaign "${campaignName}" (campaign target: ${targetPlacements} live placements; this batch: ${articlesThisRun}).`,
     targetTopics ? `Topics to cover: ${targetTopics}` : "",
+    targetPages.length > 0
+      ? `Destination URLs — every linkPlacements.targetUrl must be one of these, exactly as written:\n${targetPages.join("\n")}`
+      : "",
+    anchorTexts.length > 0
+      ? `Preferred anchor text variations (use these where they read naturally; vary them across articles): ${anchorTexts.join(" | ")}`
+      : "",
     `Article style: ${articleStyle}`,
     `Target word count per article: ${wordCount} words`,
     `Target Domain Authority: ${targetDa}+`,
     `Budget per article: $${budgetUsd}`,
     preferredPublishers ? `Preferred publishers / niches: ${preferredPublishers}` : "",
     "",
-    "Write at least 3 complete articles, each targeting a different realistic publication in the relevant niche.",
+    `Write ${articlesThisRun} complete article${articlesThisRun === 1 ? "" : "s"}, each targeting a different realistic publication in the relevant niche.`,
     "Each article must include a full content field — not just an outline. Link placements must feel natural to a reader, not forced.",
     "The submissionNote for each article should mention specific editorial guidelines or what the publisher typically accepts.",
+    requireGuidelineCheck
+      ? "Before finalising each article, check it against that publication's typical contributor guidelines (length, link policy, promotional tone, formatting) and record the result in guidelineCheck. Fix anything non-compliant in the article itself rather than only noting it."
+      : "Set guidelineCheck to null.",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -83,9 +100,14 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
             },
           ],
           submissionNote: "Notes on how to submit and what to expect from this publisher",
+          guidelineCheck: requireGuidelineCheck
+            ? { compliant: true, checkedAgainst: ["Guideline checked"], fixesApplied: ["Change made to comply"] }
+            : null,
           estimatedCost: budgetUsd,
         },
       ],
+      campaignName,
+      targetPlacements,
       totalArticles: 0,
       simulationNote:
         "These articles are ready to submit to publishers in our vetted marketplace (1,100+ publishers at members-only rates).",
@@ -108,6 +130,8 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
     output = { rawText };
   }
 
+  output.campaignName = campaignName;
+  output.targetPlacements = targetPlacements;
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
   // Priced from lib/ai/models.ts — Sonnet 5 is $2/M input, $10/M output.

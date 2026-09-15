@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const podcastHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,10 +14,14 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
 
   const config = resolveInputs(run);
-  const episodeLength = Number(config.episodeLength ?? 15);
+  // Renamed to the Run form's keys on 2026-09-14; the old names still work from a saved config.
+  applyRenamedInputs(run, config, { episodeLengthMinutes: "episodeLength", targetAudience: "audienceLevel" });
+  const episodeLength = num(config, "episodeLengthMinutes", 10, { min: 1, max: 60 });
   const episodeTopic = String(config.episodeTopic ?? "");
-  const audienceLevel = String(config.audienceLevel ?? "intermediate");
-  const hostStyle = String(config.hostStyle ?? "Solo host");
+  const targetAudience = str(config, "targetAudience");
+  const hostStyle = str(config, "hostStyle", "Solo host");
+  const brandKeywords = lines(config, "brandKeywords", 30);
+  const additionalContext = str(config, "additionalContext");
   // Despite the field's label ("Cartesia Voice Model ID"), the placeholder and
   // hint describe a Cartesia *voice* ID (a UUID from the customer's Cartesia
   // dashboard) — the old default "sonic-2" was neither a valid voice ID nor a
@@ -24,7 +29,7 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   // Cartesia's public demo voice so an unconfigured run still produces audio.
   const DEMO_VOICE_ID = "a0e99841-438c-4a64-b679-ae501e7d6091";
   const voiceId = String(config.voiceId ?? "") || DEMO_VOICE_ID;
-  const showName = String(config.showName ?? "");
+  const showName = str(config, "showName");
 
   // Fetch business profile for show context
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -51,8 +56,14 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   const userPrompt = [
     `Write a ${episodeLength}-minute podcast episode script.`,
     episodeTopic ? `Topic: ${episodeTopic}` : "Choose a relevant topic for the industry.",
-    `Audience knowledge level: ${audienceLevel}`,
+    targetAudience ? `Target audience: ${targetAudience} — calibrate tone, vocabulary depth and examples to them.` : "",
     `Format: ${hostStyle}`,
+    brandKeywords.length > 0
+      ? `Brand keywords to weave naturally into the script and show notes (never force one in): ${brandKeywords.join(", ")}`
+      : "",
+    additionalContext
+      ? `Additional context to incorporate (guest details, sponsor reads, proprietary data — use it as given, do not embellish):\n${additionalContext}`
+      : "",
     "",
     "Script structure:",
     "1. Cold open hook (30-60 sec) — a surprising fact, bold claim, or short story",

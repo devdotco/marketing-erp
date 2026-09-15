@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { apolloMatchPerson } from "@/lib/integrations/apollo";
@@ -16,11 +16,21 @@ export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => 
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const leadEmail = (config.leadEmail as string) ?? "";
-  const leadName = (config.leadName as string) ?? "";
-  const leadCompany = (config.leadCompany as string) ?? "";
-  const icpCriteria = (config.icpCriteria as string) ?? "";
-  const flagHighPriority = (config.flagHighPriority as boolean) ?? true;
+  const leadEmail = str(config, "leadEmail");
+  const leadName = str(config, "leadName");
+  const leadCompany = str(config, "leadCompany");
+  const icpCriteria = str(config, "icpCriteria");
+  const flagHighPriority = bool(config, "flagHighPriority", true);
+  // A lead scoring below this is never marked high priority, whatever its role.
+  const minimumLeadScore = num(config, "minimumLeadScore", 50, { min: 0, max: 100 });
+
+  if (!leadEmail) {
+    throw new AgentInputError(
+      "Lead Enrichment needs the lead's email address.",
+      "Fill in Lead Email on the Run form — it's what Apollo.io matches the person on.",
+      "lead_email_missing",
+    );
+  }
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -152,6 +162,7 @@ export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => 
       source: "Apollo",
     }));
     const techNames = org.technology_names ?? [];
+    const overallScore = decisionPower === "high" && empCount >= 50 ? 80 : decisionPower === "medium" ? 60 : 40;
     const techInferred = techNames
       .filter((n) => !techConfirmed.find((c) => c.tool === n))
       .slice(0, 5)
@@ -204,7 +215,7 @@ export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => 
         relevantToUs: [],
       },
       icpScoring: {
-        overallScore: decisionPower === "high" && empCount >= 50 ? 80 : decisionPower === "medium" ? 60 : 40,
+        overallScore,
         maxScore: 100,
         grade: decisionPower === "high" && empCount >= 50 ? "A" : decisionPower === "medium" ? "B" : "C",
         breakdown: [
@@ -223,8 +234,12 @@ export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => 
         estimatedTimelineToDecision: "Unknown",
       },
       prioritisation: {
-        isHighPriority: flagHighPriority && decisionPower !== "low",
-        priorityReason: decisionPower === "high" ? "Decision-maker at a qualified company" : "Influencer role",
+        isHighPriority: flagHighPriority && decisionPower !== "low" && overallScore >= minimumLeadScore,
+        minimumLeadScore,
+        belowMinimumScore: overallScore < minimumLeadScore,
+        priorityReason: overallScore < minimumLeadScore
+          ? `ICP score ${overallScore} is below the routing minimum of ${minimumLeadScore}`
+          : decisionPower === "high" ? "Decision-maker at a qualified company" : "Influencer role",
         recommendedNextAction: decisionPower === "high" ? "Prioritise AE outreach within 24h" : "Enrol in SDR sequence",
         suggestedOwner: decisionPower === "high" ? "AE" : "SDR",
         outreachPersonalisation: {
@@ -263,6 +278,7 @@ ICP Criteria:
 ${icpCriteria || "Company size 50-500 employees, SaaS or tech sector, decision-maker or influencer role, English-speaking market, growth-stage company with marketing budget."}
 
 Flag as High Priority: ${flagHighPriority}
+Minimum ICP score to route: ${minimumLeadScore} — a lead whose overallScore is below this must have isHighPriority false and suggestedOwner "Marketing Nurture" or "No Action".
 
 Return JSON matching this exact shape (no markdown, no code fences):
 {
@@ -295,6 +311,15 @@ Return JSON matching this exact shape (no markdown, no code fences):
     } catch {
       output = { result: rawText };
     }
+  }
+
+  // Enforce the routing minimum on the simulated profile too, rather than trusting the model to.
+  const prioritisation = output.prioritisation as Record<string, unknown> | undefined;
+  const scoring = output.icpScoring as Record<string, unknown> | undefined;
+  if (!isLive && prioritisation && typeof scoring?.overallScore === "number") {
+    prioritisation.minimumLeadScore = minimumLeadScore;
+    prioritisation.belowMinimumScore = scoring.overallScore < minimumLeadScore;
+    if (scoring.overallScore < minimumLeadScore) prioritisation.isHighPriority = false;
   }
 
   output.generatedAt = new Date().toISOString();

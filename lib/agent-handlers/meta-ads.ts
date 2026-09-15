@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { resolveInputs } from "@/lib/agents/inputs";
+import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 
 export const metaAdsHandler: AgentHandler = async (run, updateStatus) => {
@@ -13,10 +13,18 @@ export const metaAdsHandler: AgentHandler = async (run, updateStatus) => {
   const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
   const config = resolveInputs(run);
 
-  const campaignObjective = (config.campaignObjective as string) ?? "Leads";
-  const audienceTemp = (config.audienceTemp as string) ?? "All";
-  const creativeBatchSize = (config.creativeBatchSize as number) ?? 3;
-  const budgetUsd = (config.budgetUsd as number) ?? 1000;
+  const campaignObjective = str(config, "campaignObjective", "Leads");
+  const audienceTemp = str(config, "audienceTemp", "All");
+  const creativeBatchSize = num(config, "creativeBatchSize", 3, { min: 1, max: 5 });
+  const budgetUsd = num(config, "budgetUsd", 1000, { min: 0 });
+  // No Meta ad account is connected to this agent, so these are the rules the
+  // plan hands the media buyer — not thresholds checked against live data.
+  const attributionWindow = str(config, "optimizationWindow", "7-day click");
+  const fatigueFrequency = num(config, "fatigueFrequencyThreshold", 3.5, { min: 1 });
+  const roasDropPct = num(config, "roasDropThreshold", 15, { min: 1, max: 100 });
+  const reallocationCapPct = num(config, "budgetReallocationCap", 30, { min: 1, max: 100 });
+  const brandVoiceNotes = str(config, "brandVoiceNotes");
+  const includeReels = bool(config, "includeReelsPlacements", true);
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -33,14 +41,22 @@ Industry: ${businessProfile?.industry ?? "General"}
 Value Proposition: ${businessProfile?.uniqueValueProp ?? "Not specified"}
 Target Audience: ${businessProfile?.targetAudience ?? "Not specified"}
 Brand Voice: ${businessProfile?.brandVoice ?? "Not specified"}
-
+${brandVoiceNotes ? `Copy Guardrails (follow these in every line of copy): ${brandVoiceNotes}\n` : ""}
 Campaign Configuration:
 - Objective: ${campaignObjective}
 - Audience Temperature Focus: ${audienceTemp}
 - Creative Variants Per Format: ${creativeBatchSize}
 - Total Budget: $${budgetUsd}
+- Attribution Window for judging results: ${attributionWindow}
 
 Generate ${creativeBatchSize} creative variants per format (static, video, carousel, story), calibrated to the audience temperature. If audienceTemp is "All", generate variants for each temperature within each format.
+${includeReels ? "The story variants must also work as Reels: hook in the first second, vertical 9:16, and a Reels-specific primary text; set reelsReady to true on each." : "Story variants are for Stories only; set reelsReady to false."}
+
+Optimization rules the plan must state in testingFramework.optimizationRules, using exactly these thresholds:
+- Refresh creative when an ad's frequency exceeds ${fatigueFrequency}.
+- Flag an ad set for creative refresh when week-over-week ROAS drops by ${roasDropPct}% or more, regardless of frequency.
+- Never shift more than ${reallocationCapPct}% of an ad set's budget in a single reallocation.
+- Judge test winners on the ${attributionWindow} attribution window.
 
 Return a JSON object with this structure:
 {
@@ -120,7 +136,8 @@ Return a JSON object with this structure:
         "frame2": { "visual": string, "text": string, "duration": string },
         "frame3": { "visual": string, "text": string, "duration": string },
         "swipeUpCta": string,
-        "tapTarget": string
+        "tapTarget": string,
+        "reelsReady": boolean
       }
     ]
   },
@@ -141,7 +158,8 @@ Return a JSON object with this structure:
       "duration": string,
       "winnerCriteria": string
     },
-    "scalingPlaybook": string
+    "scalingPlaybook": string,
+    "optimizationRules": [{ "rule": string, "threshold": string, "action": string }]
   }
 }`;
 

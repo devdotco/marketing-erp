@@ -14,10 +14,12 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
 
   const config = resolveInputs(run);
   const competitorDomains = String(config.competitorDomains ?? "");
-  const trackNewPages = config.trackNewPages !== false;
+  const trackNewPages = config.contentMonitoring !== false;
   const trackKeywords = config.trackKeywords !== false;
   const trackLinks = config.trackLinks !== false;
+  const trackSerpFeatures = config.trackSerpFeatures !== false;
   const responseFormat = String(config.responseFormat ?? "Both");
+  const yourDomain = String(config.yourDomain ?? "");
 
   const businessProfile = await prisma.businessProfile.findFirst({
     where: { workspaceId: run.agentConfig.workspaceId },
@@ -41,7 +43,8 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
     .slice(0, 3);
 
   // --- Live API: Ahrefs → Semrush → SearchAtlas ---
-  const primaryDomain = bareDomain(businessProfile?.websiteUrl ?? "");
+  // The form's "Your Domain" wins; the Business Profile website is the fallback.
+  const primaryDomain = bareDomain(yourDomain || businessProfile?.websiteUrl || "");
   let liveDataSection = "";
   const liveResult = domains.length === 0
     ? ({ source: "simulation" } as const)
@@ -81,10 +84,12 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
     trackNewPages ? "new pages and content" : "",
     trackKeywords ? "keyword opportunities" : "",
     trackLinks ? "link-building activity" : "",
+    trackSerpFeatures ? "SERP feature captures" : "",
   ].filter(Boolean).join(", ");
 
   const userPrompt = [
     `Produce a competitive intelligence report for these domains: ${domains.join(", ")}`,
+    primaryDomain ? `Client domain (compare every finding against it): ${primaryDomain}` : "",
     `Tracking scope: ${trackingScope}`,
     `Report format: ${responseFormat}`,
     liveDataSection,
@@ -99,6 +104,9 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
       : "",
     trackLinks
       ? "- Link-building patterns (guest posts, press, directory submissions, partnerships)"
+      : "",
+    trackSerpFeatures
+      ? "- SERP features they appear to hold or be targeting (featured snippets, People Also Ask, local pack, image packs), listed in serpFeatures"
       : "",
     "",
     responseFormat !== "Action Items"
@@ -143,6 +151,17 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
               significance: "Why this link matters strategically",
             },
           ],
+          ...(trackSerpFeatures
+            ? {
+                serpFeatures: [
+                  {
+                    keyword: "keyword phrase",
+                    feature: "featured snippet | people also ask | local pack | image pack",
+                    implication: "What holding this feature gives them and how the client could contest it",
+                  },
+                ],
+              }
+            : {}),
         },
       ],
       strategicInsights: [
