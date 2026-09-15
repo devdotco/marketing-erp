@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { randomBytes } from "crypto";
+import { canInviteRole, INVITABLE_ROLES } from "@/lib/security/invite-roles";
 
 export const dynamic = "force-dynamic";
 
@@ -10,14 +11,27 @@ export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json();
-  const { workspaceId, email, role } = body as { workspaceId: string; email: string; role: string };
+  const body = await req.json().catch(() => ({}));
+  const { workspaceId, email, role } = body as { workspaceId?: unknown; email?: unknown; role?: unknown };
 
-  if (!workspaceId || !email || !role) {
+  if (typeof workspaceId !== "string" || !workspaceId || typeof email !== "string" || !email || !role) {
     return NextResponse.json({ error: "workspaceId, email, role required" }, { status: 400 });
   }
 
-  await requireWorkspaceAccess(workspaceId, "WORKSPACE_ADMIN");
+  // Only a WORKSPACE_ADMIN of THIS workspace (or a platform super admin) may invite.
+  let access: Awaited<ReturnType<typeof requireWorkspaceAccess>>;
+  try {
+    access = await requireWorkspaceAccess(workspaceId, "WORKSPACE_ADMIN");
+  } catch {
+    return NextResponse.json({ error: "Only workspace admins can invite members" }, { status: 403 });
+  }
+
+  // The role used to be stored verbatim — SUPER_ADMIN included, and a SUPER_ADMIN membership
+  // anywhere makes a user a platform operator (lib/auth.ts). Allowlist it, capped at the
+  // inviter's own role.
+  if (!canInviteRole(role, { role: access.member?.role, isSuperAdmin: Boolean(access.session.user.isSuperAdmin) })) {
+    return NextResponse.json({ error: `role must be one of ${INVITABLE_ROLES.join(", ")}, and no higher than your own` }, { status: 400 });
+  }
 
   // Check if already a member
   const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -37,7 +51,7 @@ export async function POST(req: NextRequest) {
     data: {
       workspaceId,
       email,
-      role: role as never,
+      role,
       token,
       expiresAt,
       invitedById: session.user.id!,

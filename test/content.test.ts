@@ -89,6 +89,7 @@ import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { constantTimeEqual } from "@/lib/security/compare";
 import { adminSeedGate } from "@/lib/security/admin-seed";
+import { canInviteRole } from "@/lib/security/invite-roles";
 import {
   allowUnsignedWebhooks,
   generateWebhookToken,
@@ -2037,6 +2038,19 @@ check(
   check("adminSeedGate: wrong secret is 403", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, strong + "y") === "forbidden");
   check("adminSeedGate: missing header is 403", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, null) === "forbidden");
   check("adminSeedGate: right secret outside production is ok", adminSeedGate({ NODE_ENV: "development", ADMIN_SEED_SECRET: strong }, strong) === "ok");
+}
+
+// ─── Security hotfix: invitation roles (any string, SUPER_ADMIN included, was stored) ───
+{
+  const admin = { role: "WORKSPACE_ADMIN", isSuperAdmin: false };
+  check("canInviteRole: an admin may invite VIEWER, OPERATOR and WORKSPACE_ADMIN", canInviteRole("VIEWER", admin) && canInviteRole("OPERATOR", admin) && canInviteRole("WORKSPACE_ADMIN", admin));
+  check("canInviteRole: nobody may invite SUPER_ADMIN — not an admin", !canInviteRole("SUPER_ADMIN", admin));
+  check("canInviteRole: nobody may invite SUPER_ADMIN — not even a platform super admin", !canInviteRole("SUPER_ADMIN", { role: "SUPER_ADMIN", isSuperAdmin: true }));
+  check("canInviteRole: unknown / lowercase / non-string roles are refused", !canInviteRole("OWNER", admin) && !canInviteRole("viewer", admin) && !canInviteRole(["VIEWER"], admin) && !canInviteRole(undefined, admin));
+  check("canInviteRole: an OPERATOR cannot invite at all", !canInviteRole("VIEWER", { role: "OPERATOR", isSuperAdmin: false }));
+  check("canInviteRole: a VIEWER cannot invite at all", !canInviteRole("VIEWER", { role: "VIEWER", isSuperAdmin: false }));
+  check("canInviteRole: a non-member cannot invite", !canInviteRole("VIEWER", { role: null, isSuperAdmin: false }));
+  check("canInviteRole: a platform super admin with no membership may invite up to WORKSPACE_ADMIN", canInviteRole("WORKSPACE_ADMIN", { role: null, isSuperAdmin: true }));
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
