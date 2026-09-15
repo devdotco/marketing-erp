@@ -1979,5 +1979,51 @@ check(
   check("isWebhookProvider: Instantly and Aimfox only", isWebhookProvider("INSTANTLY") && isWebhookProvider("AIMFOX") && !isWebhookProvider("APOLLO"));
 }
 
+// ─── Security hotfix: every OutboundProspect query is workspace-scoped ───
+// outbound-revenue and on-approve looked prospects up (and wrote them) by id alone, and the id
+// arrives in run.input, which any OPERATOR controls. This scans every call site's `where` for a
+// workspaceId so a new unscoped lookup fails here rather than in another tenant's data.
+{
+  const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const SKIP_DIRS = new Set(["node_modules", ".next", "dist", ".git", "coverage", "test"]);
+  const callRe = /outboundProspect\s*\.\s*(findUnique|findFirst|findMany|update|updateMany|delete|deleteMany|upsert|count|groupBy)\s*\(/g;
+  const unscoped: string[] = [];
+  let scanned = 0;
+  function whereOf(text: string, from: number): string | null {
+    const w = text.indexOf("where:", from);
+    if (w === -1 || w - from > 400) return null;
+    const open = text.indexOf("{", w);
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}" && --depth === 0) return text.slice(open, i + 1);
+    }
+    return null;
+  }
+  function walk(dir: string) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (![".ts", ".tsx"].includes(path.extname(entry.name))) continue;
+      const text = readFileSync(full, "utf8");
+      for (const m of text.matchAll(callRe)) {
+        scanned++;
+        const where = whereOf(text, m.index! + m[0].length);
+        if (!where || !/workspaceId/.test(where)) {
+          unscoped.push(`${path.relative(repoRoot, full)}:${text.slice(0, m.index).split("\n").length}`);
+        }
+      }
+    }
+  }
+  walk(path.join(repoRoot, "lib"));
+  walk(path.join(repoRoot, "app"));
+  check("prospect scoping: the scan found the outbound call sites", scanned >= 15, scanned);
+  check("prospect scoping: every OutboundProspect query/write filters by workspaceId", unscoped.length === 0, unscoped);
+}
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

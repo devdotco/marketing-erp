@@ -187,7 +187,10 @@ async function outboundEmailOnApprove(
       // from completing. The approve route's own retry loop is what durably persists `activated`
       // onto run.output (see app/api/runs/[runId]/approve/route.ts).
       await prisma.outboundProspect
-        .update({ where: { id: activated.prospectId }, data: { instantlyLeadId: activated.instantlyLeadId, status: "IN_SEQUENCE" } })
+        .updateMany({
+          where: { id: activated.prospectId, workspaceId: run.agentConfig.workspaceId },
+          data: { instantlyLeadId: activated.instantlyLeadId, status: "IN_SEQUENCE" },
+        })
         .catch((err) => console.error(`[on-approve] outbound-email: could not update prospect ${activated.prospectId}:`, err));
     } catch (err) {
       if (!anyActivatedThisCall) throw err; // nothing sent yet — safe to abort and let the admin retry.
@@ -242,7 +245,7 @@ async function outboundLinkedinOnApprove(
       anyActivatedThisCall = true;
 
       await prisma.outboundProspect
-        .update({ where: { id: activated.prospectId }, data: { aimfoxLeadId: activated.aimfoxLeadId } })
+        .updateMany({ where: { id: activated.prospectId, workspaceId: run.agentConfig.workspaceId }, data: { aimfoxLeadId: activated.aimfoxLeadId } })
         .catch((err) => console.error(`[on-approve] outbound-linkedin: could not update prospect ${activated.prospectId}:`, err));
     } catch (err) {
       if (!anyActivatedThisCall) throw err;
@@ -282,8 +285,9 @@ async function outboundRevenueOnApprove(
   // Read fresh, not from this run's own staged output — an opportunity may have been created
   // for this prospect by a different run (a second reply event) since this one was staged.
   // Opportunity creation is not idempotent on GHL's side, so this is what stops a duplicate.
-  const prospect = await prisma.outboundProspect.findUnique({
-    where: { id: delivery.prospectId },
+  // Workspace-scoped: delivery.prospectId comes from the run's stored output, never trusted as an id alone.
+  const prospect = await prisma.outboundProspect.findFirst({
+    where: { id: delivery.prospectId, workspaceId: run.agentConfig.workspaceId },
     select: { ghlOpportunityId: true },
   });
 
@@ -293,7 +297,7 @@ async function outboundRevenueOnApprove(
   if (activated.ghlContactId) updateData.ghlContactId = activated.ghlContactId;
   if (activated.ghlOpportunityId) updateData.ghlOpportunityId = activated.ghlOpportunityId;
   await prisma.outboundProspect
-    .update({ where: { id: delivery.prospectId }, data: updateData })
+    .updateMany({ where: { id: delivery.prospectId, workspaceId: run.agentConfig.workspaceId }, data: updateData })
     .catch((err) => console.error(`[on-approve] outbound-revenue: could not update prospect ${delivery.prospectId}:`, err));
 
   return { ...output, delivery: activated };

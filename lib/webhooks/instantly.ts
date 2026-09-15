@@ -61,16 +61,16 @@ export async function handleInstantlyWebhook(req: NextRequest, token: string | n
   if (event === "reply_received" || event === "interested" || event === "meeting_booked") {
     if (prospect.aimfoxLeadId) {
       // In production: call Aimfox API to pause the lead's sequence
-      await prisma.outboundProspect.update({
-        where: { id: prospect.id },
+      await prisma.outboundProspect.updateMany({
+        where: { id: prospect.id, workspaceId: prospect.workspaceId },
         data: { status: "REPLIED" },
       });
     }
   }
 
   if (event === "not_interested") {
-    await prisma.outboundProspect.update({
-      where: { id: prospect.id },
+    await prisma.outboundProspect.updateMany({
+      where: { id: prospect.id, workspaceId: prospect.workspaceId },
       data: {
         status: "NOT_INTERESTED",
         excludedAt: new Date(),

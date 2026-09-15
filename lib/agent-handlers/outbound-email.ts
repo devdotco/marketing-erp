@@ -323,7 +323,7 @@ export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
         // generateVariables below needs workingProspect.play.
         workingProspect = { ...prospect, apolloEnrichment: JSON.parse(JSON.stringify(enrichment)) };
         await prisma.outboundProspect
-          .update({ where: { id: prospect.id }, data: { apolloEnrichment: workingProspect.apolloEnrichment as object } })
+          .updateMany({ where: { id: prospect.id, workspaceId: run.agentConfig.workspaceId }, data: { apolloEnrichment: workingProspect.apolloEnrichment as object } })
           .catch((err) => console.error(`[outbound-email] could not persist backfilled enrichment for ${prospect.id}:`, err));
       }
     }

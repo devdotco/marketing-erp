@@ -55,8 +55,8 @@ export async function handleAimfoxWebhook(req: NextRequest, token: string | null
 
   if (event === "connection_declined") {
     // Don't retry LinkedIn for 90 days — email sequence continues unaffected
-    await prisma.outboundProspect.update({
-      where: { id: prospect.id },
+    await prisma.outboundProspect.updateMany({
+      where: { id: prospect.id, workspaceId: prospect.workspaceId },
       data: {
         excludeUntil: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
       },
@@ -65,8 +65,8 @@ export async function handleAimfoxWebhook(req: NextRequest, token: string | null
   }
 
   if (event === "connection_accepted") {
-    await prisma.outboundProspect.update({
-      where: { id: prospect.id },
+    await prisma.outboundProspect.updateMany({
+      where: { id: prospect.id, workspaceId: prospect.workspaceId },
       data: { status: "IN_SEQUENCE" },
     });
     return NextResponse.json({ received: true });
@@ -74,8 +74,8 @@ export async function handleAimfoxWebhook(req: NextRequest, token: string | null
 
   // new_reply: pause Instantly email sequence + trigger Revenue agent
   if (event === "new_reply") {
-    await prisma.outboundProspect.update({
-      where: { id: prospect.id },
+    await prisma.outboundProspect.updateMany({
+      where: { id: prospect.id, workspaceId: prospect.workspaceId },
       data: { linkedInRepliedAt: new Date(), status: "REPLIED" },
     });
 

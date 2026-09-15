@@ -139,8 +139,10 @@ export const outboundRevenueHandler: AgentHandler = async (run, updateStatus) =>
     return { output, costUsd: 0 };
   }
 
-  const prospect = await prisma.outboundProspect.findUnique({
-    where: { id: prospectId },
+  // Scoped to this run's workspace: prospectId arrives in run.input, which any OPERATOR can set
+  // via POST /api/runs — unscoped, it read (into the run output) and wrote another tenant's prospect.
+  const prospect = await prisma.outboundProspect.findFirst({
+    where: { id: prospectId, workspaceId: run.agentConfig.workspaceId },
     include: { play: true },
   });
 
@@ -284,7 +286,7 @@ Return exactly this JSON structure:
     statusUpdate.status = "MEETING_BOOKED";
   }
   if (event === "email_reply" || event === "linkedin_reply") statusUpdate.status = "REPLIED";
-  await prisma.outboundProspect.update({ where: { id: prospectId }, data: statusUpdate });
+  await prisma.outboundProspect.updateMany({ where: { id: prospectId, workspaceId: run.agentConfig.workspaceId }, data: statusUpdate });
 
   const delivery: OutboundRevenueDelivery = {
     status: "staged",
