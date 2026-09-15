@@ -232,7 +232,8 @@ export const AGENTS: Agent[] = [
     suiteName: "Audio & Video",
     status: "ACTIVE",
     description: "Blog or topic to script to show notes to voiced audio, hosted. TTS voicing and draft upload to Transistor with approval before publishing.",
-    integrations: ["Cartesia", "Transistor"],
+    // Cartesia and Google are alternatives — one voice provider is enough.
+    integrations: ["Cartesia or Google Text-to-Speech", "Transistor"],
     companions: ["blog-writer", "video-script"],
     cadence: "On demand",
   },

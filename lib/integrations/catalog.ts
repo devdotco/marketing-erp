@@ -85,6 +85,15 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
   },
   CARTESIA: { name: "Cartesia", method: { kind: "key", fields: apiKey() } },
   TRANSISTOR: { name: "Transistor", method: { kind: "key", fields: apiKey() } },
+  GOOGLE_TTS: {
+    name: "Google Text-to-Speech (Gemini)",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "A Gemini API key from Google AI Studio (aistudio.google.com/apikey) — not a Google Cloud service account. The Podcast agent uses it only to voice episode scripts, as an alternative to Cartesia. The same key you use for Google Images works here too.",
+      ),
+    },
+  },
   AHREFS: { name: "Ahrefs", method: { kind: "key", fields: apiKey() } },
   SEMRUSH: { name: "Semrush", method: { kind: "key", fields: apiKey() } },
   SEARCH_ATLAS: {

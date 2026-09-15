@@ -5,6 +5,7 @@ import { VERIFIERS as SEARCH_ATLAS } from "./searchatlas";
 import { VERIFIERS as PAYLOAD } from "./payload";
 import { VERIFIERS as CRM } from "./crm";
 import { VERIFIERS as IMAGES } from "./images";
+import { VERIFIERS as VOICE } from "./voice";
 
 /** Every key verifier, by provider. Anthropic's lives in lib/ai/client.ts. */
-export const KEY_VERIFIERS: Partial<Record<string, KeyVerifier>> = { ...SEO_CONTENT, ...OUTBOUND, ...SEARCH_ATLAS, ...PAYLOAD, ...CRM, ...IMAGES };
+export const KEY_VERIFIERS: Partial<Record<string, KeyVerifier>> = { ...SEO_CONTENT, ...OUTBOUND, ...SEARCH_ATLAS, ...PAYLOAD, ...CRM, ...IMAGES, ...VOICE };

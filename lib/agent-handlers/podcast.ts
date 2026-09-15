@@ -6,6 +6,17 @@ import { textFrom } from "@/lib/ai/extract";
 import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import {
+  dialogueSpeakers,
+  googleTtsModelId,
+  googleVoiceName,
+  GOOGLE_DEFAULT_SECOND_VOICE,
+  GOOGLE_DEFAULT_VOICE,
+  synthesizeGoogleSpeech,
+  type GoogleSpeechMode,
+} from "@/lib/voice/google-tts";
+import { encodeMp3 } from "@/lib/voice/mp3";
+import { scriptForSpeech, selectVoiceProvider, voiceProviderChoice, VOICE_PROVIDER_NAMES } from "@/lib/voice/provider";
 
 export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -22,14 +33,31 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   const hostStyle = str(config, "hostStyle", "Solo host");
   const brandKeywords = lines(config, "brandKeywords", 30);
   const additionalContext = str(config, "additionalContext");
-  // Despite the field's label ("Cartesia Voice Model ID"), the placeholder and
-  // hint describe a Cartesia *voice* ID (a UUID from the customer's Cartesia
-  // dashboard) — the old default "sonic-2" was neither a valid voice ID nor a
-  // current model ID and was never actually sent to Cartesia. Falls back to
-  // Cartesia's public demo voice so an unconfigured run still produces audio.
+  // A Cartesia *voice* ID (a UUID from the customer's Cartesia dashboard) —
+  // the field was once labelled "Cartesia Voice Model ID" and defaulted to
+  // "sonic-2", which was neither a valid voice ID nor a current model ID.
+  // Falls back to Cartesia's public demo voice so an unconfigured run still
+  // produces audio. Ignored when the run voices with Google.
   const DEMO_VOICE_ID = "a0e99841-438c-4a64-b679-ae501e7d6091";
   const voiceId = String(config.voiceId ?? "") || DEMO_VOICE_ID;
   const showName = str(config, "showName");
+  const voiceProviderInput = str(config, "voiceProvider");
+  const googleVoice = googleVoiceName(str(config, "googleVoice"), GOOGLE_DEFAULT_VOICE);
+  const googleSecondVoice = googleVoiceName(str(config, "googleSecondVoice"), GOOGLE_DEFAULT_SECOND_VOICE);
+  const googleModel = googleTtsModelId(str(config, "googleTtsModel"));
+
+  // Which voice provider this run uses — decided before the script is written,
+  // because a two-voice Google episode needs the writer to label each turn.
+  const { workspaceId } = run.agentConfig;
+  const [cartesiaIntegration, googleTtsIntegration] = await Promise.all([
+    prisma.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider: "CARTESIA" } } }),
+    prisma.integration.findUnique({ where: { workspaceId_provider: { workspaceId, provider: "GOOGLE_TTS" } } }),
+  ]);
+  const voiceSelection = selectVoiceProvider(voiceProviderChoice(voiceProviderInput), {
+    cartesia: Boolean(cartesiaIntegration?.encryptedCredentials),
+    google: Boolean(googleTtsIntegration?.encryptedCredentials),
+  });
+  const speakerLabels = voiceSelection.provider === "google" ? dialogueSpeakers(hostStyle) : null;
 
   // Fetch business profile for show context
   const businessProfile = await prisma.businessProfile.findFirst({
@@ -73,6 +101,9 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
     "5. Call-to-action close (30 sec)",
     "",
     "Mark speaker cues, pauses, and emphasis: [PAUSE], [EMPHASIS], [TRANSITION]",
+    speakerLabels
+      ? `This episode is voiced by two different voices. In fullScript, put every spoken turn on its own line starting with exactly "${speakerLabels[0]}:" or "${speakerLabels[1]}:" — no other speaker names before the colon, and no stage directions outside a turn.`
+      : "",
     "",
     "Return this exact JSON structure:",
     JSON.stringify({
@@ -109,35 +140,26 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
     output = { script: rawText };
   }
 
-  output.voiceId = voiceId;
   output.generatedAt = new Date().toISOString();
   // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
+  let costUsd = estimateCostUsd(MODELS.fast, message.usage);
 
-  // --- Live Cartesia TTS ---
-  // Cartesia-Version is a snapshot date, not a semver — 2024-06-10 was nearly
-  // 2.5 years stale, and "sonic-english"/"sonic-2" are not current model ids
-  // (current family is sonic-3.x). https://docs.cartesia.ai/api-reference/tts/bytes
-  let cartesiaLive = false;
-  let cartesiaConnected = false;
+  // --- Live TTS: Cartesia or Google (Gemini TTS), whichever this run selected ---
+  let ttsLive = false;
   let audioBytesFull: Buffer | null = null;
+  if (voiceSelection.provider) output.ttsProvider = voiceSelection.provider;
   try {
-    const cartesiaIntegration = await prisma.integration.findUnique({
-      where: {
-        workspaceId_provider: {
-          workspaceId: run.agentConfig.workspaceId,
-          provider: "CARTESIA",
-        },
-      },
-    });
-
-    if (cartesiaIntegration?.encryptedCredentials) {
-      cartesiaConnected = true;
+    if (voiceSelection.provider === "cartesia" && cartesiaIntegration?.encryptedCredentials) {
+      // Cartesia-Version is a snapshot date, not a semver — 2024-06-10 was nearly
+      // 2.5 years stale, and "sonic-english"/"sonic-2" are not current model ids
+      // (current family is sonic-3.x). https://docs.cartesia.ai/api-reference/tts/bytes
+      output.voiceId = voiceId;
       const creds = await decryptCredentials<{ apiKey: string }>(
         cartesiaIntegration.encryptedCredentials
       );
 
-      const fullScript = String(output.fullScript ?? "");
+      const fullScript = scriptForSpeech(output);
+      if (!fullScript) throw new Error("The script came back empty, so there was nothing to voice.");
       const ttsRes = await fetch("https://api.cartesia.ai/tts/bytes", {
         method: "POST",
         headers: {
@@ -158,23 +180,54 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
         throw new Error(`Cartesia TTS error ${ttsRes.status}: ${(await ttsRes.text()).slice(0, 300)}`);
       }
 
-      const audioBuffer = await ttsRes.arrayBuffer();
-      const audioBytes = Buffer.from(audioBuffer);
-      audioBytesFull = audioBytes;
+      audioBytesFull = Buffer.from(await ttsRes.arrayBuffer());
+    } else if (voiceSelection.provider === "google" && googleTtsIntegration?.encryptedCredentials) {
+      // Gemini API TTS — see lib/voice/google-tts.ts for the contract, limits and
+      // why this Google product. Returns PCM; encoded to MP3 once, here.
+      const creds = await decryptCredentials<{ apiKey: string }>(
+        googleTtsIntegration.encryptedCredentials
+      );
+      const mode: GoogleSpeechMode = speakerLabels
+        ? { kind: "dialogue", speakers: [{ label: speakerLabels[0], voice: googleVoice }, { label: speakerLabels[1], voice: googleSecondVoice }] }
+        : { kind: "single", voice: googleVoice };
+
+      const speech = await synthesizeGoogleSpeech({
+        apiKey: creds.apiKey,
+        modelId: googleModel,
+        script: scriptForSpeech(output),
+        mode,
+      });
+      audioBytesFull = await encodeMp3(speech.pcm, speech.sampleRate);
+
+      output.googleTtsModel = googleModel;
+      output.googleVoices = speech.mode === "dialogue"
+        ? { [speakerLabels![0]]: googleVoice, [speakerLabels![1]]: googleSecondVoice }
+        : { narrator: googleVoice };
+      output.ttsMode = speech.mode;
+      if (speakerLabels && speech.mode === "single") {
+        output.ttsModeNote = "The script didn't label two speakers, so it was voiced with the host voice only.";
+      }
+      output.ttsSections = speech.chunks;
+      output.audioDurationSeconds = Math.round(speech.pcm.length / speech.sampleRate);
+      output.ttsCostUsd = speech.costUsd;
+      costUsd += speech.costUsd;
+    }
+
+    if (audioBytesFull) {
       const maxBytes = 100 * 1024; // 100 KB cap on run output
-      output.audioBase64 = audioBytes.slice(0, maxBytes).toString("base64");
-      output.audioSizeBytes = audioBytes.length;
-      output.audioTruncated = audioBytes.length > maxBytes;
+      output.audioBase64 = audioBytesFull.subarray(0, maxBytes).toString("base64");
+      output.audioSizeBytes = audioBytesFull.length;
+      output.audioTruncated = audioBytesFull.length > maxBytes;
       output.ttsStatus = "complete";
       output.source = "live";
-      cartesiaLive = true;
+      ttsLive = true;
     }
   } catch (err) {
     output.ttsError = err instanceof Error ? err.message : String(err);
   }
 
   // --- Live Transistor Episode ---
-  // If Cartesia produced audio above, upload it via authorize_upload → PUT →
+  // If a voice provider produced audio above, upload it via authorize_upload → PUT →
   // create episode with the resulting audio_url, instead of leaving a bare
   // draft the customer has to attach audio to by hand.
   // https://developers.transistor.fm/#tag/episodes
@@ -232,7 +285,8 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
             method: "PUT",
             headers: { "Content-Type": content_type ?? "audio/mpeg" },
             body: new Uint8Array(audioBytesFull),
-            signal: AbortSignal.timeout(30_000),
+            // A long episode is several MB; 30s was tight for the upload.
+            signal: AbortSignal.timeout(120_000),
           });
           if (!putRes.ok) throw new Error(`Transistor audio upload ${putRes.status}: ${(await putRes.text()).slice(0, 300)}`);
           audioUrl = audio_url;
@@ -277,12 +331,12 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   }
 
   // --- Status/notes, distinguishing "not connected" from "connected but failed" ---
-  if (!cartesiaConnected) {
+  if (!voiceSelection.provider) {
     output.ttsStatus = "pending";
-    output.ttsNote = "Connect Cartesia in Settings → Integrations to generate audio for this script.";
-  } else if (!cartesiaLive) {
+    output.ttsNote = voiceSelection.note;
+  } else if (!ttsLive) {
     output.ttsStatus = "failed";
-    output.ttsNote = "Cartesia is connected but the TTS call failed — see ttsError. The script above is still real; only audio generation didn't run.";
+    output.ttsNote = `${VOICE_PROVIDER_NAMES[voiceSelection.provider]} is connected but the TTS call failed — see ttsError. The script above is still real; only audio generation didn't run.`;
   }
   if (!transistorConnected) {
     output.transistorStatus = "pending";
@@ -291,7 +345,7 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
     output.transistorStatus = "failed";
     output.transistorNote = "Transistor is connected but episode creation failed — see transistorError.";
   }
-  if (!cartesiaConnected && !transistorConnected) output.source = "simulation";
+  if (!voiceSelection.provider && !transistorConnected) output.source = "simulation";
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

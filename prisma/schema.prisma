@@ -246,6 +246,9 @@ enum IntegrationProvider {
   /// image blocks. See lib/images/*.
   OPENAI_IMAGES
   GOOGLE_IMAGES
+  /// Google's Gemini API text-to-speech — the Podcast agent's alternative
+  /// voice provider to Cartesia. AI Studio API key. See lib/voice/google-tts.ts.
+  GOOGLE_TTS
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────

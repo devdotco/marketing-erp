@@ -70,6 +70,14 @@ const INTEGRATIONS = [
     docsUrl: "#",
   },
   {
+    provider: "GOOGLE_TTS",
+    name: "Google Text-to-Speech (Gemini)",
+    description: "Voice podcast episodes with Google's Gemini TTS voices, including two-host dialogue — an alternative to Cartesia",
+    agents: ["Podcast"],
+    color: "#4285F4",
+    docsUrl: "https://ai.google.dev/gemini-api/docs/generate-content/speech-generation",
+  },
+  {
     provider: "GOOGLE_ADS",
     name: "Google Ads",
     description: "Campaign management and performance reporting",

@@ -128,6 +128,28 @@ import {
   type ProspectUpdate,
   type WebhookDeps,
 } from "@/lib/webhooks/outbound-events";
+import {
+  buildGoogleTtsRequest,
+  chunkDialogue,
+  chunkNarration,
+  cleanScriptForSpeech,
+  concatPcm,
+  describeGoogleError,
+  dialogueSpeakers,
+  googleTtsCostUsd,
+  googleTtsModelId,
+  googleVoiceName,
+  GOOGLE_TTS_MODEL_OPTIONS,
+  GOOGLE_VOICE_OPTIONS,
+  parseDialogue,
+  parseGoogleTtsResponse,
+  planGoogleTtsChunks,
+  synthesizeGoogleSpeech,
+  verifyGoogleTtsKey,
+} from "@/lib/voice/google-tts";
+import { encodeMp3 } from "@/lib/voice/mp3";
+import { scriptForSpeech, selectVoiceProvider, voiceProviderChoice, VOICE_PROVIDER_OPTIONS } from "@/lib/voice/provider";
+import { KEY_VERIFIERS } from "@/lib/integrations/verify";
 
 let failures = 0;
 const check = (name: string, cond: boolean, got?: unknown) => {
@@ -2714,6 +2736,196 @@ check(
     const res = await processWebhook(bounced, "ws1", m.deps);
     check("flow: a bounce suppresses the prospect and starts no run", res.outcome === "updated" && rows[0]!.status === "SUPPRESSED" && m.runs.length === 0, { res, row: rows[0] });
   }
+}
+
+// Podcast voice providers: Google Gemini TTS as the alternative to Cartesia
+// (lib/voice/*). Pure, with every network call injected.
+{
+  // --- form values → safe request values ---
+  check("google voice: form label parses to the voice name", googleVoiceName("Kore — Firm") === "Kore");
+  check("google voice: bare lower-case name is accepted", googleVoiceName("puck") === "Puck");
+  check("google voice: an unknown voice falls back to the default", googleVoiceName("Robert'); DROP", "Aoede — Breezy") === "Aoede");
+  check("google voice: every form option maps to itself", GOOGLE_VOICE_OPTIONS.every((o) => googleVoiceName(o) === o.split(" ")[0]) && GOOGLE_VOICE_OPTIONS.length === 30);
+  check("google model: labels and ids map to allowlisted ids", googleTtsModelId(GOOGLE_TTS_MODEL_OPTIONS[1]) === "gemini-2.5-pro-preview-tts" && googleTtsModelId("gemini-2.5-flash-preview-tts") === "gemini-2.5-flash-preview-tts");
+  check("google model: anything else is the default, never interpolated into the URL", googleTtsModelId("../../evil") === "gemini-3.1-flash-tts-preview");
+
+  // --- request building ---
+  const single = buildGoogleTtsRequest("gemini-3.1-flash-tts-preview", { kind: "narration", text: "Hello there." }, { kind: "single", voice: "Kore" });
+  const sBody = single.body as { contents: Array<{ parts: Array<{ text: string }> }>; generationConfig: { responseModalities: string[]; speechConfig: { voiceConfig?: { prebuiltVoiceConfig: { voiceName: string } }; multiSpeakerVoiceConfig?: unknown } } };
+  check("google request: generateContent URL for the model, key not in the URL", single.url === "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent" && !single.url.includes("key="), single.url);
+  check("google request: single voice uses voiceConfig.prebuiltVoiceConfig and AUDIO modality",
+    sBody.generationConfig.responseModalities[0] === "AUDIO" && sBody.generationConfig.speechConfig.voiceConfig?.prebuiltVoiceConfig.voiceName === "Kore" && !sBody.generationConfig.speechConfig.multiSpeakerVoiceConfig, sBody);
+  check("google request: narration text is sent after a style direction", sBody.contents[0].parts[0].text.endsWith("\n\nHello there."), sBody.contents[0].parts[0].text);
+
+  const duo = buildGoogleTtsRequest(
+    "gemini-2.5-pro-preview-tts",
+    { kind: "dialogue", lines: [{ speaker: "Host", text: "Welcome back." }, { speaker: "Guest", text: "Glad to be here." }] },
+    { kind: "dialogue", speakers: [{ label: "Host", voice: "Charon" }, { label: "Guest", voice: "Aoede" }] },
+  );
+  const dBody = duo.body as { contents: Array<{ parts: Array<{ text: string }> }>; generationConfig: { speechConfig: { voiceConfig?: unknown; multiSpeakerVoiceConfig?: { speakerVoiceConfigs: Array<{ speaker: string; voiceConfig: { prebuiltVoiceConfig: { voiceName: string } } }> } } } };
+  const svc = dBody.generationConfig.speechConfig.multiSpeakerVoiceConfig?.speakerVoiceConfigs ?? [];
+  check("google request: dialogue uses multiSpeakerVoiceConfig with exactly two speakers mapped to voices",
+    svc.length === 2 && svc[0].speaker === "Host" && svc[0].voiceConfig.prebuiltVoiceConfig.voiceName === "Charon" && svc[1].speaker === "Guest" && svc[1].voiceConfig.prebuiltVoiceConfig.voiceName === "Aoede" && !dBody.generationConfig.speechConfig.voiceConfig, svc);
+  check("google request: dialogue prompt names both speakers and keeps labelled turns",
+    dBody.contents[0].parts[0].text.includes("between Host and Guest") && dBody.contents[0].parts[0].text.includes("\nHost: Welcome back.\nGuest: Glad to be here."), dBody.contents[0].parts[0].text);
+
+  // --- script cleanup ---
+  check("speech cleanup: cue markers never reach the voice", cleanScriptForSpeech("Big news. [PAUSE] It's **here**. [EMPHASIS]Really.[TRANSITION]\n## Segment 2\nNext.") === "Big news. … It's here. Really.\nSegment 2\nNext.", cleanScriptForSpeech("Big news. [PAUSE] It's **here**. [EMPHASIS]Really.[TRANSITION]\n## Segment 2\nNext."));
+
+  // --- chunking ---
+  const para = (n: number, words: number) => Array.from({ length: words }, (_, i) => `word${n}_${i}.`).join(" ");
+  const longScript = [para(1, 300), para(2, 300), para(3, 300)].join("\n\n");
+  const chunks = chunkNarration(longScript, 3000);
+  const words = (t: string) => t.split(/\s+/).filter(Boolean);
+  check("chunkNarration: every chunk is within the limit", chunks.every((c) => c.length <= 3000), chunks.map((c) => c.length));
+  check("chunkNarration: splits a long script into several chunks", chunks.length > 1, chunks.length);
+  check("chunkNarration: no words are lost, duplicated or reordered", words(chunks.join(" ")).join(" ") === words(longScript).join(" "));
+  const giantSentence = "a".repeat(50) + " " + "b".repeat(7000);
+  const gChunks = chunkNarration(giantSentence, 3000);
+  check("chunkNarration: an unbreakable run of text is hard-split within the limit", gChunks.every((c) => c.length <= 3000) && gChunks.join("").replace(/\s/g, "") === giantSentence.replace(/\s/g, ""), gChunks.map((c) => c.length));
+  check("chunkNarration: a short script is one chunk, an empty one is none", chunkNarration("Hi.").length === 1 && chunkNarration("   ").length === 0);
+
+  // --- dialogue ---
+  check("dialogueSpeakers: solo has none, two-voice formats have two labels", dialogueSpeakers("Solo host") === null && dialogueSpeakers("Interview")?.[1] === "Guest" && dialogueSpeakers("Two co-hosts")?.[1] === "CoHost");
+  const parsed = parseDialogue("Host: Welcome.\n**Guest:** Thanks for having me.\nIt's great.\nhost: Let's start.", ["Host", "Guest"]);
+  check("parseDialogue: labelled turns, markdown-bold labels, case-insensitive, unlabelled lines continue the turn",
+    parsed?.length === 3 && parsed[1].speaker === "Guest" && parsed[1].text === "Thanks for having me. It's great." && parsed[2].speaker === "Host", parsed);
+  check("parseDialogue: a script where only one speaker talks is not a dialogue", parseDialogue("Host: one\nHost: two", ["Host", "Guest"]) === null);
+  const turns = Array.from({ length: 40 }, (_, i) => ({ speaker: i % 2 ? "Guest" : "Host", text: para(i, 30) }));
+  const dChunks = chunkDialogue(turns, 3000);
+  check("chunkDialogue: whole turns packed in order within the limit",
+    dChunks.length > 1 && dChunks.every((c) => c.reduce((n, l) => n + l.speaker.length + 2 + l.text.length + 1, 0) <= 3000) && dChunks.flat().map((l) => l.text).join("|") === turns.map((l) => l.text).join("|"), dChunks.map((c) => c.length));
+  const hugeTurn = chunkDialogue([{ speaker: "Host", text: para(9, 1200) }], 3000);
+  check("chunkDialogue: one over-long turn becomes several turns by the same speaker", hugeTurn.length > 1 && hugeTurn.flat().every((l) => l.speaker === "Host"), hugeTurn.length);
+  const duoMode = { kind: "dialogue" as const, speakers: [{ label: "Host", voice: "Charon" }, { label: "CoHost", voice: "Aoede" }] as [{ label: string; voice: string }, { label: string; voice: string }] };
+  const unlabelledPlan = planGoogleTtsChunks("Just one narrator talking.\n\nNo labels at all.", duoMode);
+  check("planGoogleTtsChunks: an unlabelled two-host script falls back to the host voice alone",
+    unlabelledPlan.mode.kind === "single" && unlabelledPlan.mode.voice === "Charon" && unlabelledPlan.chunks.every((c) => c.kind === "narration"), unlabelledPlan);
+  const labelledPlan = planGoogleTtsChunks("Host: Hi [PAUSE] there.\nCoHost: Hello.", duoMode);
+  check("planGoogleTtsChunks: a labelled script stays a dialogue, cleaned", labelledPlan.mode.kind === "dialogue" && labelledPlan.chunks[0].kind === "dialogue" && JSON.stringify(labelledPlan.chunks[0]).includes("Hi … there."), labelledPlan);
+
+  // --- provider selection ---
+  check("voiceProviderChoice: form labels and API shorthands", voiceProviderChoice(VOICE_PROVIDER_OPTIONS[0]) === "auto" && voiceProviderChoice("Cartesia") === "cartesia" && voiceProviderChoice("Google (Gemini TTS)") === "google" && voiceProviderChoice("gemini") === "google" && voiceProviderChoice("") === "auto");
+  check("selectVoiceProvider: auto with only Google connected uses Google", selectVoiceProvider("auto", { cartesia: false, google: true }).provider === "google");
+  check("selectVoiceProvider: auto with both connected keeps Cartesia", selectVoiceProvider("auto", { cartesia: true, google: true }).provider === "cartesia");
+  check("selectVoiceProvider: explicit Google is honoured when both are connected", selectVoiceProvider("google", { cartesia: true, google: true }).provider === "google");
+  const wrongPick = selectVoiceProvider("cartesia", { cartesia: false, google: true });
+  check("selectVoiceProvider: an explicit choice that isn't connected never silently switches, and points at the one that is",
+    wrongPick.provider === null && wrongPick.note.includes("Google Text-to-Speech"), wrongPick);
+  const noneConnected = selectVoiceProvider("auto", { cartesia: false, google: false });
+  check("selectVoiceProvider: nothing connected names both alternatives", noneConnected.provider === null && noneConnected.note.includes("Cartesia or Google"), noneConnected);
+  check("scriptForSpeech: fullScript first, then segment scripts, never the raw reply",
+    scriptForSpeech({ fullScript: " Full. ", segments: [{ script: "x" }] }) === "Full." &&
+    scriptForSpeech({ segments: [{ script: "One." }, { name: "no script" }, { script: "Two." }] }) === "One.\n\nTwo." &&
+    scriptForSpeech({ script: "{\"episodeTitle\": ..." }) === "");
+
+  // --- podcast form and listing ---
+  const podcastInputs = AGENT_META["podcast"].inputs;
+  const field = (key: string) => podcastInputs.find((i) => i.key === key);
+  check("podcast form: voice provider, Google voices and model are selects whose defaults are real options",
+    ["voiceProvider", "googleVoice", "googleSecondVoice", "googleTtsModel"].every((k) => field(k)?.type === "select" && field(k)!.options!.includes(field(k)!.defaultValue ?? "")));
+  check("podcast form: the Cartesia voice ID is no longer required (a Google-only workspace must be able to run)", field("voiceId")?.required !== true);
+  check("podcast listing: Cartesia and Google are shown as alternatives, not both required",
+    AGENTS.find((a) => a.slug === "podcast")!.integrations.some((i) => i.includes("Cartesia or Google")));
+  check("GOOGLE_TTS: catalog key form, verifier and setup guide all exist",
+    CONNECT_METHODS.GOOGLE_TTS?.method.kind === "key" && typeof KEY_VERIFIERS.GOOGLE_TTS === "function" && SETUP_GUIDES.GOOGLE_TTS?.provider === "GOOGLE_TTS");
+
+  // --- response parsing ---
+  const pcmBytes = Buffer.from([1, 0, 2, 0, 3, 0]);
+  const okParsed = parseGoogleTtsResponse({ candidates: [{ content: { parts: [{ inlineData: { mimeType: "audio/L16;codec=pcm;rate=24000", data: pcmBytes.toString("base64") } }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 250 } });
+  check("parseGoogleTtsResponse: PCM, sample rate and usage come out", okParsed.ok && okParsed.sampleRate === 24000 && okParsed.pcm.equals(pcmBytes) && okParsed.outputTokens === 250, okParsed);
+  const textOnly = parseGoogleTtsResponse({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: "hello" }] } }] });
+  check("parseGoogleTtsResponse: a 200 with text instead of audio is retryable", !textOnly.ok && textOnly.retryable, textOnly);
+  const blocked = parseGoogleTtsResponse({ promptFeedback: { blockReason: "SAFETY" } });
+  check("parseGoogleTtsResponse: a blocked prompt is not retried", !blocked.ok && !blocked.retryable, blocked);
+  check("googleTtsCostUsd: priced per 1M tokens", Math.abs(googleTtsCostUsd("gemini-3.1-flash-tts-preview", 1_000_000, 1_000_000) - 21) < 1e-9);
+
+  // --- verifier, with injected fetch ---
+  const SECRET = "AIzaSy-test-secret-key-000";
+  const gErr = (status: number, reason?: string, message = "boom") =>
+    new Response(JSON.stringify({ error: { code: status, message, status: "X", details: reason ? [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason }] : [] } }), { status, headers: { "content-type": "application/json" } });
+  const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+  const verifyWith = (res: () => Response | Promise<Response>) =>
+    verifyGoogleTtsKey(SECRET, async (url, init) => {
+      seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+      return res();
+    });
+
+  const vOk = await verifyWith(() => new Response(JSON.stringify({ name: "models/gemini-3.1-flash-tts-preview" }), { status: 200 }));
+  check("verifyGoogleTtsKey: 200 from models.get is ok", vOk.ok, vOk);
+  check("verifyGoogleTtsKey: one GET of the TTS model, key in the x-goog-api-key header, not the URL",
+    seen[0].url.endsWith("/models/gemini-3.1-flash-tts-preview") && seen[0].headers["x-goog-api-key"] === SECRET && !seen[0].url.includes(SECRET), seen[0]);
+  const vBad = await verifyWith(() => gErr(400, "API_KEY_INVALID", "API key not valid. Please pass a valid API key."));
+  check("verifyGoogleTtsKey: API_KEY_INVALID says the key was rejected", !vBad.ok && vBad.reason.includes("rejected that API key"), vBad);
+  const vDisabled = await verifyWith(() => gErr(403, "SERVICE_DISABLED", "Generative Language API has not been used in project 123 before or it is disabled."));
+  check("verifyGoogleTtsKey: SERVICE_DISABLED says to enable the API", !vDisabled.ok && vDisabled.reason.includes("isn't enabled"), vDisabled);
+  const vBlocked = await verifyWith(() => gErr(403, "API_KEY_SERVICE_BLOCKED"));
+  check("verifyGoogleTtsKey: a key restricted to other APIs says to fix its restrictions", !vBlocked.ok && vBlocked.reason.includes("restricted to other Google APIs"), vBlocked);
+  const vReferrer = await verifyWith(() => gErr(403, "API_KEY_HTTP_REFERRER_BLOCKED"));
+  check("verifyGoogleTtsKey: a website/IP restriction says to remove the application restriction", !vReferrer.ok && vReferrer.reason.includes("application restriction"), vReferrer);
+  const vQuota = await verifyWith(() => gErr(429, undefined, "Resource has been exhausted"));
+  check("verifyGoogleTtsKey: 429 explains the quota", !vQuota.ok && vQuota.reason.includes("rate limit"), vQuota);
+  const vHtml = await verifyWith(() => new Response("<html>bad gateway</html>", { status: 502 }));
+  check("verifyGoogleTtsKey: a non-JSON 5xx still yields a reason", !vHtml.ok && vHtml.reason.includes("502"), vHtml);
+  const vNet = await verifyGoogleTtsKey(SECRET, async () => { throw new TypeError("fetch failed"); });
+  check("verifyGoogleTtsKey: a network error is reported, not thrown", !vNet.ok && vNet.reason.includes("Couldn't reach Google"), vNet);
+  const vTimeout = await verifyGoogleTtsKey(SECRET, async () => { throw Object.assign(new Error("timed out"), { name: "TimeoutError" }); });
+  check("verifyGoogleTtsKey: a timeout says try again", !vTimeout.ok && vTimeout.reason.includes("in time"), vTimeout);
+  check("verifyGoogleTtsKey: no reason ever contains the key", [vBad, vDisabled, vBlocked, vReferrer, vQuota, vHtml, vNet, vTimeout].every((r) => !r.ok && !r.reason.includes(SECRET)));
+  check("describeGoogleError: 5xx is retryable, 4xx key problems are not", describeGoogleError(503, null).retryable && !describeGoogleError(400, null).retryable && describeGoogleError(429, null).retryable);
+
+  // --- synthesis end to end, with injected fetch and sleep ---
+  const pcmResponse = (samples: number[]) => {
+    const buf = Buffer.alloc(samples.length * 2);
+    samples.forEach((v, i) => buf.writeInt16LE(v, i * 2));
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ inlineData: { mimeType: "audio/L16;codec=pcm;rate=24000", data: buf.toString("base64") } }] } }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 1000 },
+    }), { status: 200 });
+  };
+  let calls = 0;
+  const slept: number[] = [];
+  const synth = await synthesizeGoogleSpeech({
+    apiKey: SECRET,
+    modelId: "gemini-3.1-flash-tts-preview",
+    script: `${para(1, 20)}\n\n${para(2, 20)}`,
+    mode: { kind: "single", voice: "Kore" },
+    maxChunkChars: 250,
+    sleep: async (ms) => { slept.push(ms); },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return new Response(JSON.stringify({ error: { code: 429, message: "slow down", details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "3s" }] } }), { status: 429 });
+      return pcmResponse(calls === 2 ? [1000, -1000] : [7, 8, 9]);
+    },
+  });
+  check("synthesizeGoogleSpeech: a 429 is retried after Google's retryDelay", slept[0] === 3000 && calls === 3, { slept, calls });
+  check("synthesizeGoogleSpeech: chunks are joined as PCM with a silence gap between them",
+    synth.chunks === 2 && synth.sampleRate === 24000 && synth.pcm.length === 2 + 6000 + 3 && synth.pcm[0] === 1000 && synth.pcm[1] === -1000 && synth.pcm[2] === 0 && synth.pcm[6002] === 7 && synth.pcm[6004] === 9, { chunks: synth.chunks, len: synth.pcm.length });
+  check("synthesizeGoogleSpeech: token usage and cost are summed across chunks", synth.outputTokens === 2000 && Math.abs(synth.costUsd - (200 * 1 + 2000 * 20) / 1e6) < 1e-12, synth);
+
+  let failedMessage = "";
+  try {
+    await synthesizeGoogleSpeech({ apiKey: SECRET, modelId: "gemini-3.1-flash-tts-preview", script: "Hello.", mode: { kind: "single", voice: "Kore" }, sleep: async () => {}, fetchImpl: async () => gErr(403, "SERVICE_DISABLED") });
+  } catch (err) {
+    failedMessage = (err as Error).message;
+  }
+  check("synthesizeGoogleSpeech: a non-retryable error fails at once with the actionable reason, key-free", failedMessage.includes("isn't enabled") && !failedMessage.includes(SECRET), failedMessage);
+  let emptyMessage = "";
+  try {
+    await synthesizeGoogleSpeech({ apiKey: SECRET, modelId: "gemini-3.1-flash-tts-preview", script: "  ", mode: { kind: "single", voice: "Kore" }, fetchImpl: async () => { throw new Error("must not be called"); } });
+  } catch (err) {
+    emptyMessage = (err as Error).message;
+  }
+  check("synthesizeGoogleSpeech: an empty script never calls Google", emptyMessage.includes("empty"), emptyMessage);
+
+  check("concatPcm: odd trailing bytes are dropped, gap is silence", concatPcm([Buffer.from([1, 0, 9]), Buffer.from([2, 0])], 1000, 2).join(",") === "1,0,0,2");
+
+  // --- MP3 encoding (real encoder, no network) ---
+  const tone = new Int16Array(24000);
+  for (let i = 0; i < tone.length; i++) tone[i] = Math.round(8000 * Math.sin((2 * Math.PI * 440 * i) / 24000));
+  const mp3 = await encodeMp3(tone, 24000);
+  check("encodeMp3: one second of 24 kHz PCM becomes an MPEG audio stream of plausible size",
+    mp3.length > 5000 && mp3.length < 12000 && mp3[0] === 0xff && (mp3[1] & 0xe0) === 0xe0, { length: mp3.length, head: [...mp3.subarray(0, 4)] });
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

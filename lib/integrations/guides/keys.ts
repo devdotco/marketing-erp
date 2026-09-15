@@ -1,6 +1,6 @@
 /**
  * Setup guides for the API-key providers (Apollo, Instantly, Aimfox,
- * GoHighLevel, Cartesia, Transistor, Ahrefs, Semrush, SearchAtlas, Mailchimp,
+ * GoHighLevel, Cartesia, Google Text-to-Speech, Transistor, Ahrefs, Semrush, SearchAtlas, Mailchimp,
  * erp.io CRM, Klaviyo). Owned separately from oauth-cms.ts so the two can be
  * filled in concurrently — merged in lib/integrations/guides/index.ts.
  *
@@ -607,6 +607,90 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     ],
     privacy: "Read-only against your account settings, but every live Podcast run sends your script's text to Cartesia and generates real audio, which spends Cartesia credits from your plan's balance. marketing-erp never publishes or shares that audio anywhere on its own — it's attached to the run's output (and, if Transistor is also connected, uploaded there as a draft episode — see the Transistor guide). Disconnect any time from Settings → Integrations → Cartesia → Disconnect, or revoke the key in Cartesia under API Keys.",
     docs: [{ label: "Cartesia: TTS bytes API reference", url: "https://docs.cartesia.ai/api-reference/tts/bytes" }],
+  },
+
+  GOOGLE_TTS: {
+    provider: "GOOGLE_TTS",
+    summary:
+      "Connecting Google Text-to-Speech lets the Podcast agent voice its scripts with Google's Gemini voices instead of Cartesia — including two-host and interview episodes read by two different voices. You need Cartesia or Google, not both.",
+    timeMinutes: 10,
+    youWillNeed: [
+      "A Google account. A personal Gmail account works; a company Google Workspace account may need your Workspace admin to allow Google AI Studio.",
+      "For a real podcast cadence, a payment method to attach to the key's Google Cloud project. The free tier is enough to test one short episode, but its request limits are low, and the Gemini 2.5 Pro TTS model is paid-only.",
+      "About ten minutes. No Google Cloud service account, JSON key file, or command line is needed.",
+    ],
+    steps: [
+      {
+        title: "Open Google AI Studio",
+        body: "Go to **[aistudio.google.com](https://aistudio.google.com)** and sign in with the Google account that should own (and pay for) your podcast's voice usage. Accept the terms if this is your first visit.",
+      },
+      {
+        title: "Create an API key",
+        body: "Open the **[API Keys page](https://aistudio.google.com/apikey)** and click **Create API key**. Pick an existing Google Cloud project or let AI Studio create one for you — either is fine. If a project you expected isn't listed, go to **Dashboard → Projects → Import projects**, import it, then come back to API Keys.",
+      },
+      {
+        title: "Turn on billing for that project (recommended)",
+        body: "Still in AI Studio, find the project on the **API Keys** or **Projects** page and click **Set up billing**. Create or choose a Google Cloud billing account and pick Prepay or Postpay. Without billing the key stays on the free tier: a few requests a minute, which a long episode (voiced in several sections) can hit. On a paid project Google also does not use your scripts to improve its products.",
+      },
+      {
+        title: "Restrict the key to the Gemini API",
+        body: "On the **API Keys** page, a new key may show as **Unrestricted**. Click it, choose **Add restrictions → Restrict to Gemini API only**, then **Restrict key**. Do **not** add a website, IP address, or app restriction: our servers make the calls, so those restrictions would block them.",
+      },
+      {
+        title: "Check the Gemini API is enabled (only if you made the key in Google Cloud Console)",
+        body: "Keys created in AI Studio have it enabled already, so skip this step if you used AI Studio. If you created the key in **[Google Cloud Console](https://console.cloud.google.com)** instead, go to **APIs & Services → Library**, search for **Generative Language API**, and click **Enable**.",
+      },
+      {
+        title: "Copy the key",
+        body: "Click the copy icon next to the key. Keep it somewhere private; anyone with it can spend against your Google account.",
+      },
+      {
+        title: "Paste it into marketing-erp",
+        body: "Go to **Settings → Integrations → Google Text-to-Speech (Gemini) → Connect**, paste the key into **API key**, and click **Connect**.",
+      },
+      {
+        title: "Choose Google in the Podcast agent",
+        body: "Open **Agents → Podcast → Configure** (or the Run form). Set **Voice Provider** to **Google (Gemini TTS)**, or leave it on **Auto** if Cartesia isn't connected. Pick a **Google Voice (host)**. For two voices, set **Host Format** to **Two co-hosts** or **Interview** and pick a contrasting **Google Voice (co-host / guest)**.",
+      },
+      {
+        title: "Optional: set a spending alert",
+        body: "In Google Cloud Console, open **Billing → Budgets & alerts** for the billing account you attached and create a budget, so Google emails you before usage gets larger than you expect.",
+      },
+    ],
+    verify: [
+      "The connect form asks Google for the details of its Gemini text-to-speech model. That call is free and read-only and generates no audio. It confirms the key is valid, the Gemini API is enabled, and the key's restrictions allow it.",
+      "A green \"Connected\" badge appears next to Google Text-to-Speech in Settings → Integrations once it checks out.",
+      "Run the Podcast agent once with a short episode length (2–3 minutes). The run's output should show ttsProvider \"google\" and ttsStatus \"complete\", and the Transistor draft episode (if Transistor is connected) should have audio attached.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "\"Google rejected that API key — check it was copied whole from Google AI Studio and hasn't been deleted or expired.\"",
+        fix: "Copy the key again from aistudio.google.com/apikey. A partial paste is the usual cause. If the key was deleted, or Google disabled it because it looked leaked, create a new one.",
+      },
+      {
+        symptom: "\"The Gemini API (Generative Language API) isn't enabled on this key's Google Cloud project…\"",
+        fix: "In Google Cloud Console, select the key's project, go to APIs & Services → Library → Generative Language API, and click Enable. Wait a minute, then connect again.",
+      },
+      {
+        symptom: "\"This key is restricted to other Google APIs…\" or \"This key has an application restriction…\"",
+        fix: "In AI Studio's API Keys page (or Cloud Console → APIs & Services → Credentials → the key), set the API restriction to the Gemini API / Generative Language API, and set Application restrictions to None.",
+      },
+      {
+        symptom: "Connects fine, but a Podcast run's audio fails with \"over its rate limit or quota\"",
+        fix: "The free tier allows only a few requests a minute, and a long episode is voiced in several sections. Click Set up billing for the key's project in AI Studio. Paid limits apply almost immediately.",
+      },
+      {
+        symptom: "A Two co-hosts or Interview episode came out in one voice",
+        fix: "Check that Voice Provider is Google, since Cartesia always uses one voice. If the run output has ttsModeNote, the script writer didn't label the two speakers that time, so the host voice read it all. Run it again.",
+      },
+    ],
+    privacy: "marketing-erp sends Google only the episode script's text, and only to Google's Gemini text-to-speech endpoint. It never reads anything else from your Google account. Voicing is billed to your own Google account: one request per script section of roughly three minutes. The audio is attached to the run and, if Transistor is connected, uploaded there as a draft episode. On Google's free tier, Google may use the text you send to improve its products. On a project with billing set up, it doesn't. Disconnect any time from Settings → Integrations → Google Text-to-Speech (Gemini) → Disconnect, or delete the key on AI Studio's API Keys page. Either one stops access immediately.",
+    docs: [
+      { label: "Google: Gemini API text-to-speech", url: "https://ai.google.dev/gemini-api/docs/generate-content/speech-generation" },
+      { label: "Google: Gemini API keys", url: "https://ai.google.dev/gemini-api/docs/api-key" },
+      { label: "Google: Gemini API billing", url: "https://ai.google.dev/gemini-api/docs/billing" },
+      { label: "Google: Gemini API rate limits", url: "https://ai.google.dev/gemini-api/docs/rate-limits" },
+    ],
   },
 
   TRANSISTOR: {
