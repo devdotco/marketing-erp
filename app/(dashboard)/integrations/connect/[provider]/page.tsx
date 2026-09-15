@@ -8,6 +8,7 @@ import { CONNECT_METHODS, providerFromSlug, type CredentialField } from "@/lib/i
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { SetupGuide } from "@/components/integrations/SetupGuide";
 import { WebhookUrl } from "@/components/integrations/WebhookUrl";
+import { PayloadConnect } from "@/components/integrations/PayloadConnect";
 
 const panel: React.CSSProperties = {
   padding: "20px 20px 24px",
@@ -50,7 +51,9 @@ export default function ConnectProviderPage() {
           <h1 style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em", marginBottom: 6 }}>
             Connect {entry.name}
           </h1>
-          {entry.method.kind === "key" ? (
+          {provider === "PAYLOAD" ? (
+            <PayloadConnect name={entry.name} />
+          ) : entry.method.kind === "key" ? (
             <>
               <KeyForm provider={provider} name={entry.name} fields={entry.method.fields} />
               {(provider === "INSTANTLY" || provider === "AIMFOX") && <WebhookUrl provider={provider} name={entry.name} />}

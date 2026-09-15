@@ -12,6 +12,20 @@ import { buildResearchAsk } from "@/lib/content/research";
 import { domainList } from "@/lib/content/domains";
 import { isPrivateAddress } from "@/lib/integrations/public-url";
 import { payloadPostUrl, rankInternalLinkCandidates } from "@/lib/integrations/payload";
+import {
+  collectionNameProblem,
+  elevatedRole,
+  mediaCollectionOptions,
+  normalisePayloadBaseUrl,
+  parseAccessCollections,
+  postsCollectionOptions,
+  sniffBodyFormat,
+  suggestMediaCollection,
+  suggestPostsCollection,
+  tenantOptions,
+  tenantOptionsFromUser,
+} from "@/lib/integrations/payload-discovery";
+import { discoverPayload } from "@/lib/integrations/payload-discover";
 import { getPreset, resolveProfile, NEUTRAL_PROFILE } from "@/lib/content/editorial";
 import { isDesignatedForPlatformKey, platformKeyEligibility } from "@/lib/ai/client";
 import { normaliseArticle, renderHtml, replaceImageSrc, SUBMIT_ARTICLE_TOOL, submittedFields } from "@/lib/content/article";
@@ -2076,6 +2090,177 @@ check(
   check("canInviteRole: a VIEWER cannot invite at all", !canInviteRole("VIEWER", { role: "VIEWER", isSuperAdmin: false }));
   check("canInviteRole: a non-member cannot invite", !canInviteRole("VIEWER", { role: null, isSuperAdmin: false }));
   check("canInviteRole: a platform super admin with no membership may invite up to WORKSPACE_ADMIN", canInviteRole("WORKSPACE_ADMIN", { role: null, isSuperAdmin: true }));
+}
+
+// Payload two-step connect: discovery parsing, no network (fake fetch, stubbed DNS guard).
+{
+  // /api/access as Payload 3 actually sends it: sanitizePermissions turns
+  // { permission: true } into `true`, deletes denied operations, and keeps a
+  // `where` for query-constrained (tenant-scoped) access.
+  const accessBody = {
+    canAccessAdmin: true,
+    collections: {
+      posts: { create: true, read: true, update: true, delete: true, fields: true },
+      tenants: { read: { permission: true, where: { id: { in: [3] } } } },
+      users: { read: true, update: true },
+      media: { read: true, create: true },
+      secrets: { fields: { name: true } },
+      legacy: { read: { permission: false } },
+      "payload-preferences": { read: true, create: true },
+    },
+  };
+  const collections = parseAccessCollections(accessBody) ?? [];
+  check(
+    "parseAccessCollections: only readable, non-internal collections survive",
+    collections.map((c) => c.slug).join(",") === "media,posts,tenants,users",
+    collections.map((c) => c.slug),
+  );
+  check("parseAccessCollections: a `where` constraint is readable but marked scoped", collections.find((c) => c.slug === "tenants")?.scoped === true);
+  check("parseAccessCollections: create permission is carried through", collections.find((c) => c.slug === "posts")?.create === true);
+  check("parseAccessCollections: a body that isn't an access map is null (fall back to free text)", parseAccessCollections({ message: "Not Found" }) === null);
+  check("parseAccessCollections: an access map with nothing allowed is an empty list, not null", parseAccessCollections({ canAccessAdmin: true })?.length === 0);
+
+  const postsOptions = postsCollectionOptions(collections, "users");
+  check("postsCollectionOptions: excludes the auth and tenants collections", !postsOptions.includes("users") && !postsOptions.includes("tenants"), postsOptions);
+  check("suggestPostsCollection: defaults to posts", suggestPostsCollection(postsOptions) === "posts");
+  check("suggestPostsCollection: falls back to a post-like name", suggestPostsCollection(["pages", "blog-articles"]) === "blog-articles");
+  check("suggestPostsCollection: nothing post-like → no guess", suggestPostsCollection(["pages"]) === null);
+  const mediaOptions = mediaCollectionOptions(collections, "users");
+  check("mediaCollectionOptions: only collections the key can create in", mediaOptions.join(",") === "media,posts", mediaOptions);
+  check("suggestMediaCollection: defaults to media", suggestMediaCollection(mediaOptions) === "media");
+
+  const tenants = tenantOptions([
+    { id: 12, name: "Investment Bank", slug: "ib", primaryDomain: "investmentbank.com" },
+    { id: 3, name: "DEV.co", slug: "dev-co", siteUrl: "https://dev.co/" },
+    { id: "7", slug: "no-domain" },
+    { name: "no id" },
+  ]);
+  check("tenantOptions: docs without an id are dropped", tenants.length === 3, tenants);
+  check("tenantOptions: label is \"Name — domain\" and value is the id", tenants.some((t) => t.id === "12" && t.label === "Investment Bank — investmentbank.com"), tenants);
+  check("tenantOptions: a bare domain becomes an https site URL", tenants.find((t) => t.id === "12")?.siteUrl === "https://investmentbank.com");
+  check("tenantOptions: an explicit siteUrl is used and its trailing slash dropped", tenants.find((t) => t.id === "3")?.siteUrl === "https://dev.co" && tenants.find((t) => t.id === "3")?.label === "DEV.co — dev.co", tenants.find((t) => t.id === "3"));
+  check("tenantOptions: no name or domain falls back to the slug, with no site URL", tenants.find((t) => t.id === "7")?.label === "no-domain" && tenants.find((t) => t.id === "7")?.siteUrl === null, tenants.find((t) => t.id === "7"));
+
+  const htmlSniff = sniffBodyFormat({ id: 1, bodyHtml: "<p>Hello</p>", content: { root: { children: [] } } });
+  check("sniffBodyFormat: populated bodyHtml string → html, even alongside Lexical", htmlSniff.bodyFormat === "html" && htmlSniff.bodyField === "bodyHtml" && htmlSniff.source === "content", htmlSniff);
+  const emptyHtml = sniffBodyFormat({ id: 1, bodyHtml: null, content: { root: { children: [] } } });
+  check("sniffBodyFormat: an empty bodyHtml field still wins (only HTML can be published into)", emptyHtml.bodyFormat === "html" && emptyHtml.bodyField === "bodyHtml" && emptyHtml.source === "field", emptyHtml);
+  const lexical = sniffBodyFormat({ id: 1, title: "x", content: { root: { type: "root", children: [] } } });
+  check("sniffBodyFormat: a {root} object → lexical in that field", lexical.bodyFormat === "lexical" && lexical.bodyField === "content", lexical);
+  const htmlContent = sniffBodyFormat({ id: 1, content: "<p>Hi</p>" });
+  check("sniffBodyFormat: a string `content` field → html content", htmlContent.bodyFormat === "html" && htmlContent.bodyField === "content", htmlContent);
+  const nothing = sniffBodyFormat(undefined);
+  check("sniffBodyFormat: no post → html/bodyHtml default, flagged as a default", nothing.bodyFormat === "html" && nothing.bodyField === "bodyHtml" && nothing.source === "default", nothing);
+
+  check("collectionNameProblem: a post slug is called out as one", /post slug/.test(collectionNameProblem("ai-virtual-data-room") ?? ""), collectionNameProblem("ai-virtual-data-room"));
+  check("collectionNameProblem: posts is fine", collectionNameProblem("posts") === null);
+  check("collectionNameProblem: a single-hyphen collection name isn't flagged without a list", collectionNameProblem("reusable-blocks") === null);
+  check("collectionNameProblem: a pasted URL is called out", /URL/.test(collectionNameProblem("https://payload.dev.co/api/posts") ?? ""));
+  check("collectionNameProblem: against a known list, an unknown name lists what's readable", /posts, pages/.test(collectionNameProblem("articles", ["posts", "pages"]) ?? ""), collectionNameProblem("articles", ["posts", "pages"]));
+
+  const adminUrl = normalisePayloadBaseUrl("https://payload.dev.co/admin");
+  check("normalisePayloadBaseUrl: /admin is stripped to the origin", adminUrl.ok && adminUrl.url === "https://payload.dev.co" && adminUrl.changed, adminUrl);
+  const bare = normalisePayloadBaseUrl("payload.dev.co");
+  check("normalisePayloadBaseUrl: a missing scheme becomes https", bare.ok && bare.url === "https://payload.dev.co", bare);
+  check("normalisePayloadBaseUrl: http is refused", !normalisePayloadBaseUrl("http://payload.dev.co").ok);
+  check("elevatedRole: super-admin is flagged", elevatedRole({ globalRole: "super-admin" }) === "super-admin");
+  check("elevatedRole: a standard user isn't", elevatedRole({ globalRole: "standard-user" }) === null);
+  const fromUser = tenantOptionsFromUser({
+    tenantAssignments: [
+      { tenant: { id: 12, name: "Investment Bank", primaryDomain: "investmentbank.com" }, roles: ["publisher"] },
+      { tenant: 5, roles: ["editor"] },
+      { tenant: 12, roles: ["editor"] },
+    ],
+  });
+  check(
+    "tenantOptionsFromUser: populated and bare-id assignments both become options, deduped",
+    fromUser.length === 2 && fromUser.some((t) => t.id === "12" && t.siteUrl === "https://investmentbank.com") && fromUser.some((t) => t.id === "5" && t.label === "Tenant 5"),
+    fromUser,
+  );
+  check("tenantOptionsFromUser: the plugin's default tenants[].tenant shape works too", tenantOptionsFromUser({ tenants: [{ tenant: "abc" }] })[0]?.id === "abc");
+
+  // The whole discover flow against canned responses.
+  const secretKey = "sk-test-not-a-real-key-123";
+  const seen: { url: string; headers: Record<string, string>; redirect?: string }[] = [];
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+  const makeFetch = (routes: Record<string, () => Response>) =>
+    (async (input: string, init?: RequestInit) => {
+      seen.push({ url: input, headers: init?.headers as Record<string, string>, redirect: init?.redirect });
+      const path = new URL(input).pathname;
+      return (routes[path] ?? (() => json({ errors: [{ message: "Not Found" }] }, 404)))();
+    }) as unknown as typeof fetch;
+  const noDns = async () => {};
+
+  const happy = await discoverPayload(
+    { baseUrl: "https://payload.dev.co/admin", authCollection: "", apiKey: secretKey },
+    {
+      assertPublicUrl: noDns,
+      fetch: makeFetch({
+        "/api/users/me": () => json({ user: { id: 9, email: "api@dev.co", globalRole: "standard-user" }, collection: "users", strategy: "api-key" }),
+        "/api/access": () => json(accessBody),
+        "/api/tenants": () => json({ docs: [{ id: 12, name: "Investment Bank", primaryDomain: "investmentbank.com" }], totalDocs: 1 }),
+        "/api/posts": () => json({ docs: [{ id: 1, tenant: 12, bodyHtml: "<p>x</p>" }], totalDocs: 40 }),
+      }),
+    },
+  );
+  check("discoverPayload: happy path resolves", happy.ok, happy);
+  if (happy.ok) {
+    check("discoverPayload: base URL normalised and auth collection defaulted", happy.baseUrl === "https://payload.dev.co" && happy.authCollection === "users");
+    check("discoverPayload: posts + media suggested, tenant listed, multi-tenant detected", happy.postsCollection === "posts" && happy.mediaCollection === "media" && happy.multiTenant && happy.tenants.available && happy.tenants.options[0]?.id === "12", happy);
+    check("discoverPayload: body sniffed from the post", happy.body.bodyField === "bodyHtml" && happy.body.bodyFormat === "html");
+  }
+  check("discoverPayload: the API key never appears in the result", !JSON.stringify(happy).includes(secretKey));
+  check("discoverPayload: every call sends the API-Key header, a browser UA and redirect: error", seen.length === 4 && seen.every((s) => s.headers.Authorization === `users API-Key ${secretKey}` && /Mozilla/.test(s.headers["User-Agent"]) && s.redirect === "error"), seen.map((s) => s.url));
+
+  const badKey = await discoverPayload(
+    { baseUrl: "https://payload.dev.co", authCollection: "users", apiKey: secretKey },
+    { assertPublicUrl: noDns, fetch: makeFetch({ "/api/users/me": () => json({ user: null }) }) },
+  );
+  check("discoverPayload: /me with user:null (Payload's answer to an unknown key) is a key error that explains the API tab", !badKey.ok && badKey.step === "auth" && /JSON viewer/.test(badKey.error), badKey);
+
+  const wrongHost = await discoverPayload(
+    { baseUrl: "https://investmentbank.com", authCollection: "users", apiKey: secretKey },
+    { assertPublicUrl: noDns, fetch: (async () => new Response("<html>404</html>", { status: 404, headers: { "content-type": "text/html" } })) as unknown as typeof fetch },
+  );
+  check("discoverPayload: an HTML 404 means the Base URL isn't Payload", !wrongHost.ok && wrongHost.step === "url", wrongHost);
+
+  const noAccess = await discoverPayload(
+    { baseUrl: "https://payload.example.com", authCollection: "users", apiKey: secretKey },
+    {
+      assertPublicUrl: noDns,
+      fetch: makeFetch({
+        "/api/users/me": () => json({ user: { id: 1, email: "a@b.co" } }),
+        "/api/posts": () => json({ docs: [{ id: 1, content: { root: { children: [] } } }] }),
+      }),
+    },
+  );
+  check(
+    "discoverPayload: no /api/access → free-text fallback with posts defaulted and Lexical sniffed",
+    noAccess.ok && !noAccess.access.available && noAccess.postsCollection === "posts" && noAccess.body.bodyFormat === "lexical" && !noAccess.multiTenant,
+    noAccess,
+  );
+
+  // payload.dev.co's recommended setup: a tenant-scoped user whose /api/tenants
+  // read errors (its access `where` targets a field tenants don't have).
+  const scoped = await discoverPayload(
+    { baseUrl: "https://payload.dev.co", authCollection: "users", apiKey: secretKey },
+    {
+      assertPublicUrl: noDns,
+      fetch: makeFetch({
+        "/api/users/me": () =>
+          json({ user: { id: 2, email: "api-ib@dev.co", globalRole: "standard-user", tenantAssignments: [{ tenant: { id: 12, name: "Investment Bank", primaryDomain: "investmentbank.com" }, roles: ["publisher"] }] } }),
+        "/api/access": () => json(accessBody),
+        "/api/tenants": () => json({ errors: [{ message: "The following path cannot be queried: tenant" }] }, 400),
+        "/api/posts": () => json({ docs: [] }),
+      }),
+    },
+  );
+  check(
+    "discoverPayload: when tenants can't be listed, the user's own tenant assignments fill the dropdown",
+    scoped.ok && scoped.multiTenant && scoped.tenants.available && scoped.tenants.options.length === 1 && scoped.tenants.options[0]!.label === "Investment Bank — investmentbank.com",
+    scoped,
+  );
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

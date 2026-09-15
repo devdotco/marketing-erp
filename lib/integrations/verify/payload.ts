@@ -39,7 +39,7 @@ const payload: KeyVerifier = async (credentials) => {
     if (res.status === 401) {
       return {
         ok: false,
-        reason: "Payload rejected that API key — check it was copied whole and hasn't been revoked, and that the Auth collection slug matches the collection it was generated on (default: users).",
+        reason: "Payload rejected that API key. Check it was copied whole and hasn't been revoked, and that the Auth collection slug matches the collection it was generated on (default: users). Note: the \"API\" tab on a user's page in the Payload admin is a JSON viewer, not a key — a key comes from the user's edit form (\"Enable API Key\", then \"Generate new API key\"), which only exists once API keys are enabled on that collection.",
       };
     }
     if (res.status === 403) {
@@ -50,7 +50,11 @@ const payload: KeyVerifier = async (credentials) => {
       return { ok: false, reason: "Payload accepted the key but refused this request — it may lack read access to that collection, or the Tenant ID may be wrong." };
     }
     if (res.status === 404) {
-      return { ok: false, reason: `Payload couldn't find a "${postsCollection}" collection at that Base URL — check the Posts collection slug.` };
+      const looksLikePostSlug = postsCollection !== "posts" && postsCollection.includes("-");
+      return {
+        ok: false,
+        reason: `Payload has no "${postsCollection}" collection at that Base URL.${looksLikePostSlug ? " That looks like a single post's slug — this field wants the collection's name, which is usually \"posts\"." : " The collection name is usually \"posts\"."}`,
+      };
     }
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("application/json")) {

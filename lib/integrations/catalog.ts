@@ -228,7 +228,7 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
           label: "API key",
           placeholder: "Paste your API key…",
           secret: true,
-          hint: "Generate it on a user document in the Auth collection below (that collection's admin page → API Key tab). Requires useAPIKey enabled on it.",
+          hint: "On the API user's edit form in Payload, tick Enable API Key and copy the key (the \"API\" tab on a user's page is a JSON viewer, not the key). Requires useAPIKey enabled on the Auth collection.",
         },
         {
           key: "authCollection",

@@ -550,36 +550,32 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     timeMinutes: 10,
     youWillNeed: [
       "Access to your Payload admin panel, and a developer able to make a one-line config change if API keys aren't already enabled",
-      "The collection names Payload uses for auth and posts (defaults: users, posts) if this instance uses different ones",
+      "Permission to create a dedicated API user in Payload — the connect form discovers collections and tenants from its key, so you don't need to look them up",
     ],
     steps: [
       {
         title: "Enable API keys on the auth collection (developer step)",
-        body: "Payload's API keys are opt-in per collection. In your Payload config, the auth collection (usually Users) needs `auth: { useAPIKey: true }` — for example:\n\n```ts\nexport const Users: CollectionConfig = {\n  slug: \"users\",\n  auth: { useAPIKey: true },\n  // …\n};\n```\n\nDeploy that change before continuing — without it, there's no API Key tab to generate a key from.",
+        body: "Payload's API keys are opt-in per collection. In your Payload config, the auth collection (usually Users) needs `auth: { useAPIKey: true }` — for example:\n\n```ts\nexport const Users: CollectionConfig = {\n  slug: \"users\",\n  auth: { useAPIKey: true },\n  // …\n};\n```\n\nDeploy that change before continuing — until it's live, the user edit form has no **Enable API Key** option to generate a key from.",
       },
       {
         title: "Create a dedicated API user",
-        body: "In the Payload admin, create a new user in the auth collection specifically for this connection, rather than reusing a real person's login. This makes it easy to see what the connection can do, and to revoke it later without affecting anyone's own account.",
+        body: "In the Payload admin, create a new user in the auth collection just for this connection, rather than reusing a real person's login. Give it only the access it needs — read (and, for publishing, create) on your posts and media collections, and on a multi-tenant instance only the one site's tenant. Not an admin: whatever this user can reach, the connection can reach.",
       },
       {
         title: "Generate the API key",
-        body: "Open that user's document in the Payload admin, find the **API Key** tab, and generate a key. Copy it immediately — depending on your Payload version it may not be shown again.",
+        body: "Open that user's edit form in the Payload admin, tick **Enable API Key**, copy the key it generates, then **Save** the user. The **API** tab at the top of a user's page is not the key — it's Payload's JSON view of that user document, which is why it shows data rather than something to copy. If there's no Enable API Key option, step 1 hasn't been deployed.",
       },
       {
-        title: "Gather the connection details",
-        body: "You'll need: the Payload **base URL** (the origin your Payload instance is hosted at, no trailing slash or path — this is the CMS host, which is often different from your public site); the **auth collection slug** (defaults to `users`); the **posts collection slug** (defaults to `posts`); and, only if this instance uses the multi-tenant plugin, the **tenant ID** posts should be scoped to.",
+        title: "Check the connection",
+        body: "On this app's Payload CMS connect page, enter the Payload **base URL** (pasting the /admin address is fine — the form shows the origin it will actually use), the **auth collection** (usually `users`) and the key, then click **Check connection**. Nothing is saved yet: the app asks Payload who the key belongs to and which collections and tenants it can read.",
       },
       {
-        title: "Set the public site URL and body format",
-        body: "If your site renders posts at a different origin than the Payload base URL (common — e.g. the CMS lives at payload.example.com but posts render at example.com), fill in **Public site URL** so internal links resolve correctly. For **Body format**, choose `html` if the post body field stores raw HTML — publishing works fully. Choose `lexical` only if you just want Internal Linking to read your existing pages; publishing new posts isn't supported yet for Lexical fields, since there's no automatic HTML→Lexical converter.",
+        title: "Pick from the dropdowns and connect",
+        body: "Choose the **Posts collection** (only collections the key can read are listed — it's the collection, such as `posts`, never a single post's slug), the **Site (tenant)** on a multi-tenant instance, and the **Media collection**. **Public site URL** fills in from the tenant's domain when it has one — it's where posts are published, which is usually not the Payload host. The body field and format are detected from an existing post; check them under **Advanced** (`html` publishes; `lexical` supports internal linking only). Click **Connect** — the key is checked once more before it's stored.",
       },
       {
-        title: "Confirm the body field name",
-        body: "The field on your posts collection that holds the article body defaults to `bodyHtml` for HTML format or `content` for Lexical — override it if your schema uses a different field name.",
-      },
-      {
-        title: "Fill in the connect form and submit",
-        body: "Enter everything above on this app's Payload CMS connect page and click **Connect**. A success message confirms the key was accepted.",
+        title: "Using payload.dev.co (erp.io's hosted Payload)",
+        body: "Base URL `https://payload.dev.co`, auth collection `users`. Use a dedicated API user assigned to only that site's tenant — not a super-admin, whose key would reach every site on the instance. Then pick that tenant and `posts` from the dropdowns.",
       },
     ],
     verify: [
@@ -589,8 +585,8 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     ],
     troubleshooting: [
       {
-        symptom: "\"useAPIKey\" isn't available / no API Key tab on the user",
-        fix: "The auth collection's config needs `auth: { useAPIKey: true }` set and deployed — this is a developer-side change to your Payload instance, not something fixable from the connect form.",
+        symptom: "No \"Enable API Key\" option on the user — only an \"API\" tab",
+        fix: "The API tab is Payload's JSON view of the user, not a key. The Enable API Key option only appears once the auth collection's config has `auth: { useAPIKey: true }` set and deployed — a developer-side change to your Payload instance, not something fixable from the connect form.",
       },
       {
         symptom: "Connection fails with a 401/403",
@@ -609,14 +605,15 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         fix: "This connection's Body format is set to Lexical, which isn't supported for automatic publishing — HTML→Lexical conversion isn't implemented. Switch Body format to `html` under this integration's settings (the field must accept raw HTML), or publish that draft manually.",
       },
       {
-        symptom: "I can't find my tenant ID",
-        fix: "Only relevant if this Payload instance uses the multi-tenant plugin. Check the tenants collection in the Payload admin, or ask whoever manages the instance — it's whatever tenant your posts collection scopes content to.",
+        symptom: "No tenant dropdown, or the wrong sites are listed",
+        fix: "The dropdown lists the tenants the key's user can read. If your site is missing, assign that user to its tenant in Payload and click Check connection again. If Payload won't let the key list tenants, the form asks for a Tenant ID instead — it's the number at the end of the address bar when you open that tenant in the Payload admin.",
       },
     ],
     privacy:
       "Reads published posts (for internal linking) and creates draft posts (never publishes live) via the API key you generate, scoped to the user you create it for. To revoke, delete or regenerate the API key on that user in the Payload admin, or click Disconnect on this app's Integrations page.",
     docs: [
       { label: "Payload: API Keys", url: "https://payloadcms.com/docs/authentication/api-keys" },
+      { label: "Payload: Me and Access operations", url: "https://payloadcms.com/docs/authentication/operations" },
       { label: "Payload: multi-tenant plugin", url: "https://payloadcms.com/docs/plugins/multi-tenant" },
     ],
   },
