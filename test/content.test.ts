@@ -8,6 +8,7 @@ import { resolveInputs, missingRequiredInputs } from "@/lib/agents/inputs";
 import { textFrom, jsonFrom } from "@/lib/ai/extract";
 import { runQc } from "@/lib/content/qc";
 import { buildBrief } from "@/lib/content/brief";
+import { googleProofAction } from "@/lib/security/google-proof";
 import { buildResearchAsk } from "@/lib/content/research";
 import { domainList } from "@/lib/content/domains";
 import { isPrivateAddress } from "@/lib/integrations/public-url";
@@ -2289,6 +2290,16 @@ check(
     scoped.ok && scoped.multiTenant && scoped.tenants.available && scoped.tenants.options.length === 1 && scoped.tenants.options[0]!.label === "Investment Bank — investmentbank.com",
     scoped,
   );
+}
+
+// Google sign-in as proof of the inbox (lib/security/google-proof.ts).
+{
+  const base = { provider: "google", profileEmail: "Tim@Dev.co", profileEmailVerified: true, accountEmail: "tim@dev.co", alreadyVerified: false };
+  check("google: verified matching address verifies an unverified account", googleProofAction(base) === "verify");
+  check("google: already verified account is left alone", googleProofAction({ ...base, alreadyVerified: true }) === "none");
+  check("google: unverified google email proves nothing", googleProofAction({ ...base, profileEmailVerified: false }) === "none");
+  check("google: a different address proves nothing", googleProofAction({ ...base, profileEmail: "other@dev.co" }) === "none");
+  check("google: other providers are ignored", googleProofAction({ ...base, provider: "sendgrid" }) === "none");
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

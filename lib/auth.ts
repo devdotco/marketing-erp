@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
+import { googleProofAction } from "@/lib/security/google-proof";
 import SendGridProvider from "next-auth/providers/sendgrid";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
@@ -159,6 +160,37 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         }
       }
       return session;
+    },
+  },
+
+  events: {
+    // A Google sign-in with a verified matching address proves the inbox: mark
+    // the account verified and void any password set before it was proven.
+    // See lib/security/google-proof.ts. Never blocks the sign-in itself.
+    async signIn({ user, account, profile }) {
+      try {
+        if (!user?.id) return;
+        const current = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: { email: true, emailVerified: true },
+        });
+        if (!current) return;
+        const action = googleProofAction({
+          provider: account?.provider,
+          profileEmail: profile?.email,
+          profileEmailVerified: (profile as { email_verified?: unknown } | undefined)?.email_verified,
+          accountEmail: current.email,
+          alreadyVerified: Boolean(current.emailVerified),
+        });
+        if (action === "verify") {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { emailVerified: new Date(), passwordHash: null },
+          });
+        }
+      } catch (err) {
+        console.error("[auth] google proof update failed:", (err as Error).message);
+      }
     },
   },
 
