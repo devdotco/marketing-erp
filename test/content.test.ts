@@ -114,6 +114,20 @@ import {
   parseWebhookToken,
   webhookAuthMode,
 } from "@/lib/security/webhook-token";
+import {
+  dedupeKey,
+  linkedInSlug,
+  parseAimfoxPayload,
+  parseInstantlyPayload,
+  pickProspect,
+  processWebhook,
+  prospectUpdatesFor,
+  type OutboundStatus,
+  type ParsedWebhook,
+  type ProspectCandidate,
+  type ProspectUpdate,
+  type WebhookDeps,
+} from "@/lib/webhooks/outbound-events";
 
 let failures = 0;
 const check = (name: string, cond: boolean, got?: unknown) => {
@@ -2300,6 +2314,406 @@ check(
   check("google: unverified google email proves nothing", googleProofAction({ ...base, profileEmailVerified: false }) === "none");
   check("google: a different address proves nothing", googleProofAction({ ...base, profileEmail: "other@dev.co" }) === "none");
   check("google: other providers are ignored", googleProofAction({ ...base, provider: "sendgrid" }) === "none");
+}
+
+// ─── Instantly / Aimfox webhook payloads (2026-09-15) ───
+// The handlers read `event` / `leadId` / `email`; real deliveries send `event_type` and vendor-specific
+// fields, so no real reply, interest or meeting ever reached a prospect. Fixtures below follow the
+// vendors' own docs:
+//  - Instantly: https://developer.instantly.ai/guides/webhook-events — the docs give a field schema,
+//    not a literal example, so these are that schema filled in, field names and casing exactly as
+//    documented.
+//  - Aimfox: https://docs.aimfox.com/webhooks — examples copied from the event catalogue at
+//    https://api.webhooks-external.linkedape.com/api/v1/webhooks/events, with the long `campaign`
+//    object (schedule, flows, metrics) trimmed to id/name/state.
+{
+  const instantlyBase = {
+    timestamp: "2026-09-15T10:37:15.565Z",
+    workspace: "01a0a4a4-71ad-762d-bba9-f38eb6841e2e",
+    campaign_id: "01a0a4a4-71a6-74ab-8215-e965b040335e",
+    campaign_name: "Q3 Outbound — SaaS CTOs",
+    lead_email: "Jane.Doe@Acme.com",
+    email_account: "nate@send.dev.co",
+  };
+  const instantlyReply = {
+    ...instantlyBase,
+    event_type: "reply_received",
+    unibox_url: "https://app.instantly.ai/app/unibox?thread_search=Jane.Doe%40Acme.com",
+    step: 2,
+    variant: 1,
+    is_first: true,
+    email_id: "01a0a4a4-bba8-71d6-9320-c925d0fe1b25",
+    reply_text_snippet: "Sounds interesting — can we talk Thursday?",
+    reply_subject: "Re: Quick question",
+    reply_text: "Sounds interesting — can we talk Thursday?\n\nJane",
+    reply_html: "<p>Sounds interesting — can we talk Thursday?</p>",
+    firstName: "Jane",
+    companyName: "Acme",
+  };
+
+  const r = parseInstantlyPayload(instantlyReply);
+  check(
+    "instantly: reply_received parses to email_reply with the lead's address lower-cased",
+    r.kind === "event" && r.event === "email_reply" && r.identity.emails.join() === "jane.doe@acme.com",
+    r,
+  );
+  check("instantly: the sending mailbox (email_account) is never taken as the lead", r.kind === "event" && !r.identity.emails.includes("nate@send.dev.co"), r);
+  check("instantly: reply text comes from reply_text", r.kind === "event" && r.replyText.startsWith("Sounds interesting") && r.replyText.includes("Jane"), r);
+  check("instantly: the event timestamp is kept for dedupe (Instantly sends no event id)", r.kind === "event" && r.occurredAt === instantlyBase.timestamp && r.eventId === null, r);
+
+  const snippetOnly = parseInstantlyPayload({ ...instantlyBase, event_type: "reply_received", reply_text_snippet: "Yes please" });
+  check("instantly: falls back to reply_text_snippet", snippetOnly.kind === "event" && snippetOnly.replyText === "Yes please", snippetOnly);
+
+  const documented: [string, string][] = [
+    ["lead_interested", "interested"],
+    ["lead_not_interested", "not_interested"],
+    ["lead_meeting_booked", "meeting_booked"],
+    ["email_bounced", "bounced"],
+    ["lead_unsubscribed", "unsubscribed"],
+  ];
+  for (const [vendorEvent, ours] of documented) {
+    const p = parseInstantlyPayload({ ...instantlyBase, event_type: vendorEvent });
+    check(`instantly: ${vendorEvent} → ${ours}`, p.kind === "event" && p.event === ours, p);
+  }
+  check("instantly: event_type is matched case-insensitively", (() => { const p = parseInstantlyPayload({ ...instantlyBase, event_type: "Lead_Meeting_Booked" }); return p.kind === "event" && p.event === "meeting_booked"; })());
+
+  for (const ignored of ["email_sent", "email_opened", "link_clicked", "auto_reply_received", "lead_neutral", "lead_out_of_office", "lead_wrong_person", "lead_meeting_completed", "lead_closed", "account_error", "Positive - Asked for pricing"]) {
+    const p = parseInstantlyPayload({ ...instantlyBase, event_type: ignored });
+    check(`instantly: ${ignored} is ignored`, p.kind === "ignored", p);
+  }
+  const completed = parseInstantlyPayload({ timestamp: instantlyBase.timestamp, event_type: "campaign_completed", workspace: instantlyBase.workspace, campaign_id: instantlyBase.campaign_id, campaign_name: instantlyBase.campaign_name });
+  check("instantly: campaign_completed (no lead) is ignored", completed.kind === "ignored", completed);
+  const noLead = parseInstantlyPayload({ timestamp: instantlyBase.timestamp, event_type: "reply_received", campaign_id: "c" });
+  check("instantly: a handled event with no lead address is ignored, not an error", noLead.kind === "ignored", noLead);
+  check("instantly: a non-object body is invalid", parseInstantlyPayload([instantlyReply]).kind === "invalid" && parseInstantlyPayload("x").kind === "invalid");
+
+  const legacyInstantly = parseInstantlyPayload({ event: "meeting_booked", leadId: "lead_77", email: "SAM@Beta.com", replyText: "Booked", timestamp: "2026-09-01T00:00:00Z" });
+  check(
+    "instantly: the legacy shape (event/leadId/email/replyText) still parses",
+    legacyInstantly.kind === "event" && legacyInstantly.event === "meeting_booked" && legacyInstantly.identity.leadIds.join() === "lead_77" && legacyInstantly.identity.emails.join() === "sam@beta.com" && legacyInstantly.replyText === "Booked",
+    legacyInstantly,
+  );
+  const legacyReply = parseInstantlyPayload({ event: "reply_received", email: "sam@beta.com" });
+  check("instantly: legacy reply_received still parses", legacyReply.kind === "event" && legacyReply.event === "email_reply", legacyReply);
+
+  // ── Aimfox ──
+  const aimfoxWorkspace = { id: "ed0a4291-8866-465a-b62a-6518c56c0693", name: "Jane's workspace", created_at: 1725279327 };
+  const aimfoxCampaignReply = {
+    id: "1e5e930e-c44c-4994-9b85-a6b65423f3e8",
+    event_type: "campaign_reply",
+    event: {
+      conversation_urn: "2-MTBmOGZlNGUtNzZjZS00MjZkLWE0NTAtNGY2NjIyOTNlM2RiXzEwMA==",
+      message_urn: "2-MTc2MTY1OTA0ODIwNGI0NTg0Ny0xMDAmMTBmOGZlNGUtNzZjZS00MjZkLWE0NTAtNGY2NjIyOTNlM2RiXzEwMA==",
+      body: "Hey, can you try once? It will take a maximum of 2-3 minutes and the first 5 prompts are free.",
+      declined: false,
+      message: {
+        urn: "2-MTc2MTY1OTA0ODIwNGI0NTg0Ny0xMDAmMTBmOGZlNGUtNzZjZS00MjZkLWE0NTAtNGY2NjIyOTNlM2RiXzEwMA==",
+        inmail: false,
+        subject: null,
+        body: "Hey, can you try once? It will take a maximum of 2-3 minutes and the first 5 prompts are free.",
+        reactions: [],
+        sender: "1432144979",
+        created_at: 1761659048204,
+        edited: false,
+        deleted: false,
+      },
+      timestamp: "2025-10-28T13:44:08.204Z",
+      sender: {
+        id: 1432144979,
+        urn: "ACoAAFVczFMB65mrY-IofOnkRLexvBVXhT5HcQs",
+        public_identifier: "john-doe-72b75733b",
+        first_name: "John ",
+        last_name: "Doe",
+        email: "johndoe@hotmail.com",
+        picture_url: "https://cdn.constel.co/linkedin-profile/ACoAAFVczFMB65mrY-IofOnkRLexvBVXhT5HcQs.jpg",
+      },
+      recipient: {
+        id: 1033744867,
+        urn: "ACoAAD2dseMBdvw12MyzFvftslnla0_OX5XeBgQ",
+        public_identifier: "jane-doe-b9724724a",
+        first_name: "Jane",
+        last_name: "Doe",
+        email: "janedoe@gmail.com",
+        picture_url: "https://cdn.constel.co/linkedin-profile/ACoAAD2dseMBdvw12MyzFvftslnla0_OX5XeBgQ.jpg",
+      },
+      campaign: { id: "3acad0ac-e95d-4d2a-84ec-896a3562e29d", state: "ACTIVE", name: "LinkedIn search Campaign #25", owners: ["1033744867"] },
+    },
+    workspace: aimfoxWorkspace,
+  };
+  const ac = parseAimfoxPayload(aimfoxCampaignReply);
+  check("aimfox: campaign_reply → linkedin_reply", ac.kind === "event" && ac.event === "linkedin_reply", ac);
+  check(
+    "aimfox: on a message event the lead is the SENDER (the recipient is the campaign's own seat)",
+    ac.kind === "event" && ac.identity.linkedInSlugs.includes("john-doe-72b75733b") && ac.identity.emails.includes("johndoe@hotmail.com") && !ac.identity.emails.includes("janedoe@gmail.com"),
+    ac,
+  );
+  check("aimfox: reply text is the message body", ac.kind === "event" && ac.replyText.startsWith("Hey, can you try once?"), ac);
+  check("aimfox: dedupe id is the message urn", ac.kind === "event" && ac.eventId === `message:${aimfoxCampaignReply.event.message_urn}`, ac);
+
+  // The same LinkedIn message delivered as new_reply too (a different envelope id) must dedupe to one.
+  const asNewReply = parseAimfoxPayload({ ...aimfoxCampaignReply, id: "b9c92988-ae97-418c-a4a1-2b2a0f8417b4", event_type: "new_reply" });
+  check(
+    "aimfox: new_reply and campaign_reply for one message share a dedupe key",
+    ac.kind === "event" && asNewReply.kind === "event" && dedupeKey(ac, "p1") === dedupeKey(asNewReply, "p1"),
+    asNewReply,
+  );
+
+  const aimfoxAccepted = {
+    id: "1399ddcd-dd16-4123-8047-2f01abe0bfba",
+    event_type: "accepted",
+    event: {
+      target_urn: "ACoAAAkpGpYBqjQMr2DBS8q4ht8NNGwbAfE-qtc",
+      prev_state: "withdraw",
+      state: "message",
+      transition: "accepted",
+      flow_id: "9b21f2e1-118b-40ed-8831-deba6f97f9a2",
+      flow_type: "PRIMARY_CONNECT",
+      timestamp: "2024-11-26T02:48:46.332Z",
+      account: {
+        id: 685914315,
+        urn: "ACoAACjiOMsBxN2eyo8LuQz4xK1D54uGND8jCwg",
+        public_identifier: "kengur-kengurovic-1a3865171",
+        first_name: "Kengur",
+        last_name: "Kengurovic",
+        email: "kengur1111@gmail.com",
+        picture_url: "https://cdn.constel.co/linkedin-profile/685914315.jpg",
+      },
+      target: {
+        id: 153688726,
+        urn: "ACoAAAkpGpYBqjQMr2DBS8q4ht8NNGwbAfE-qtc",
+        public_identifier: "nevena-nikolic-hr",
+        first_name: "Nevena",
+        last_name: "Nikolic",
+        email: null,
+        picture_url: "https://cdn.constel.co/linkedin-profile/ACoAAAkpGpYBqjQMr2DBS8q4ht8NNGwbAfE-qtc.jpg",
+      },
+      campaign: { id: "7efc00b5-6e5f-45a1-b150-12b2010425b5", state: "ACTIVE", name: "Search Campaign #1" },
+    },
+    workspace: { id: "94f46bd4-c750-4fde-b53b-9938d4d889ec", name: "Aimfox Workspace", created_at: 1732541078 },
+  };
+  const aa = parseAimfoxPayload(aimfoxAccepted);
+  check("aimfox: accepted → connection_accepted", aa.kind === "event" && aa.event === "connection_accepted", aa);
+  check(
+    "aimfox: on a campaign event the lead is the TARGET, never our own account",
+    aa.kind === "event" && aa.identity.leadIds.includes("153688726") && aa.identity.leadIds.includes("ACoAAAkpGpYBqjQMr2DBS8q4ht8NNGwbAfE-qtc") && aa.identity.linkedInSlugs.includes("nevena-nikolic-hr") && !aa.identity.emails.includes("kengur1111@gmail.com"),
+    aa,
+  );
+  check("aimfox: envelope id is the dedupe id when there is no message urn", aa.kind === "event" && aa.eventId === aimfoxAccepted.id, aa);
+
+  const aimfoxFirstReply = {
+    id: "815e2d1d-6c72-47ae-8185-ecdb76dd929e",
+    event_type: "reply",
+    event: {
+      target_urn: "ACoAACHGAQoBKI-3086W4V3Q58uQQtGMPAUQNZ4",
+      prev_state: "message",
+      state: "done",
+      transition: "reply",
+      flow_id: "0b465ad5-e3b1-4b45-8060-050dc191cb74",
+      flow_type: "PRIMARY_CONNECT",
+      template_id: "4d6446a6-0198-4ae2-9676-b20eea556459",
+      message: "Hi Selena, I hope you’re doing well. I’m Kengur, and I’d love to connect and discuss our shared interests in web development and potential collaboration opportunities.",
+      timestamp: "2024-11-26T14:01:05.787Z",
+      account: { id: 685914315, urn: "ACoAACjiOMsBxN2eyo8LuQz4xK1D54uGND8jCwg", public_identifier: "kengur-kengurovic-1a3865171", first_name: "Kengur", last_name: "Kengurovic", email: "kengur1111@gmail.com", picture_url: "https://cdn.constel.co/linkedin-profile/685914315.jpg" },
+      target: { id: 566624522, urn: "ACoAACHGAQoBKI-3086W4V3Q58uQQtGMPAUQNZ4", public_identifier: "aidan-ashley-jones-862917139", first_name: "Aidan Ashley", last_name: "Jones", email: null, picture_url: "https://cdn.constel.co/linkedin-profile/ACoAACHGAQoBKI-3086W4V3Q58uQQtGMPAUQNZ4.jpg" },
+      campaign: { id: "3e807949-733c-4e0d-a03a-cb6a53822d71", state: "ACTIVE", name: "List Campaign #7" },
+    },
+    workspace: { id: "47973863-0513-4ee6-910a-c5bc55782ed2", name: "Aimfox Workspace", created_at: 1732541078 },
+  };
+  const af = parseAimfoxPayload(aimfoxFirstReply);
+  check("aimfox: reply (first reply) → linkedin_reply for the target", af.kind === "event" && af.event === "linkedin_reply" && af.identity.linkedInSlugs.includes("aidan-ashley-jones-862917139"), af);
+  check("aimfox: our own outbound template (event.message on `reply`) is never passed off as the lead's reply", af.kind === "event" && af.replyText === "", af);
+  check("aimfox: inmail_reply → linkedin_reply", (() => { const p = parseAimfoxPayload({ ...aimfoxFirstReply, event_type: "inmail_reply" }); return p.kind === "event" && p.event === "linkedin_reply"; })());
+
+  for (const ignored of ["new_connection", "view", "connect", "inmail", "message", "lead_label_added", "campaign_ended", "campaign_created", "campaign_started", "inbox_event", "account_logged_in", "account_logged_out"]) {
+    const p = parseAimfoxPayload({ ...aimfoxAccepted, event_type: ignored });
+    check(`aimfox: ${ignored} is ignored`, p.kind === "ignored", p);
+  }
+
+  const legacyAimfox = parseAimfoxPayload({ event: "connection_declined", leadId: "aimfox_1", linkedInUrl: "https://www.linkedin.com/in/Sam-Beta/", timestamp: "2026-09-01T00:00:00Z" });
+  check(
+    "aimfox: the legacy shape (event/leadId/linkedInUrl) still parses",
+    legacyAimfox.kind === "event" && legacyAimfox.event === "connection_declined" && legacyAimfox.identity.leadIds.join() === "aimfox_1" && legacyAimfox.identity.linkedInSlugs.join() === "sam-beta",
+    legacyAimfox,
+  );
+  const legacyAimfoxReply = parseAimfoxPayload({ event: "new_reply", leadId: "aimfox_1", replyText: "Sure" });
+  check("aimfox: legacy new_reply still parses with its reply text", legacyAimfoxReply.kind === "event" && legacyAimfoxReply.event === "linkedin_reply" && legacyAimfoxReply.replyText === "Sure", legacyAimfoxReply);
+
+  check("linkedInSlug: normalises host, case, trailing slash and query", linkedInSlug("http://LinkedIn.com/in/Jane-Doe-123/?utm=x") === "jane-doe-123" && linkedInSlug("https://example.com/in/x") === null);
+
+  // ── Matching ──
+  const cand = (over: Partial<ProspectCandidate>): ProspectCandidate => ({
+    id: "p?",
+    workspaceId: "ws1",
+    email: "x@x.com",
+    linkedInUrl: null,
+    instantlyLeadId: null,
+    aimfoxLeadId: null,
+    status: "IN_SEQUENCE",
+    ...over,
+  });
+  const jane = cand({ id: "p_jane", email: "Jane.Doe@acme.COM" });
+  check(
+    "match: email is case-insensitive",
+    r.kind === "event" && pickProspect("INSTANTLY", r.identity, [jane], true)?.id === "p_jane",
+  );
+  const byId = cand({ id: "p_by_id", email: "other@acme.com", instantlyLeadId: "lead_77" });
+  const byMail = cand({ id: "p_by_mail", email: "sam@beta.com" });
+  check(
+    "match: the stored vendor lead id beats an email match",
+    legacyInstantly.kind === "event" && pickProspect("INSTANTLY", legacyInstantly.identity, [byMail, byId], true)?.id === "p_by_id",
+  );
+  check(
+    "match: an Instantly lead id is never compared with aimfoxLeadId",
+    legacyInstantly.kind === "event" && pickProspect("INSTANTLY", legacyInstantly.identity, [cand({ id: "p_af", email: "no@x.com", aimfoxLeadId: "lead_77" })], true) === null,
+  );
+  const sam = cand({ id: "p_sam", linkedInUrl: "https://linkedin.com/in/sam-beta" });
+  const samantha = cand({ id: "p_samantha", linkedInUrl: "https://linkedin.com/in/sam-beta-2" });
+  check(
+    "match: a LinkedIn handle matches exactly, not by prefix",
+    legacyAimfox.kind === "event" && pickProspect("AIMFOX", { ...legacyAimfox.identity, leadIds: [] }, [samantha, sam], true)?.id === "p_sam",
+  );
+  const twoWs = [cand({ id: "p_a", workspaceId: "wsA", email: "jane.doe@acme.com" }), cand({ id: "p_b", workspaceId: "wsB", email: "jane.doe@acme.com" })];
+  check("match: an unsigned (grace) delivery matching prospects in two workspaces acts on neither", r.kind === "event" && pickProspect("INSTANTLY", r.identity, twoWs, false) === null);
+
+  // ── Guarded writes ──
+  const now = new Date("2026-09-15T12:00:00Z");
+  const replyUpdates = prospectUpdatesFor("email_reply", now);
+  check("updates: a reply sets emailRepliedAt only while unset", replyUpdates.some((u) => u.onlyIfNull === "emailRepliedAt" && u.data.emailRepliedAt === now));
+  check("updates: a reply never moves a prospect past REPLIED back to REPLIED", replyUpdates.every((u) => !u.data.status || (u.onlyIfStatusIn ?? []).every((s) => s === "PENDING" || s === "IN_SEQUENCE")));
+  check("updates: connection accepted only promotes a PENDING prospect", prospectUpdatesFor("connection_accepted", now).every((u) => (u.onlyIfStatusIn ?? []).join() === "PENDING"));
+
+  // ── The whole flow, against an in-memory store ──
+  type Row = ProspectCandidate & { emailRepliedAt: Date | null; linkedInRepliedAt: Date | null; interestedAt: Date | null; meetingBookedAt: Date | null; excludeUntil: Date | null };
+  function memoryDeps(rows: Row[], opts: { revenueEnabled?: boolean; failFirstUpdate?: boolean } = {}) {
+    const receipts = new Set<string>();
+    const runs: Record<string, unknown>[] = [];
+    const enqueued: string[] = [];
+    let calls = 0;
+    let failNext = opts.failFirstUpdate ?? false;
+    const deps: WebhookDeps<Row> = {
+      async findCandidates(_vendor, identity, workspaceId) {
+        calls++;
+        return rows.filter(
+          (row) =>
+            (workspaceId === null || row.workspaceId === workspaceId) &&
+            (identity.emails.includes(row.email.toLowerCase()) ||
+              identity.leadIds.includes(row.instantlyLeadId ?? "") ||
+              identity.leadIds.includes(row.aimfoxLeadId ?? "") ||
+              identity.linkedInSlugs.includes(linkedInSlug(row.linkedInUrl) ?? "")),
+        );
+      },
+      async claim(ws, vendor, key) {
+        const k = `${ws}|${vendor}|${key}`;
+        if (receipts.has(k)) return false;
+        receipts.add(k);
+        return true;
+      },
+      async release(ws, vendor, key) {
+        receipts.delete(`${ws}|${vendor}|${key}`);
+      },
+      async applyUpdate(prospect, update: ProspectUpdate) {
+        if (failNext) {
+          failNext = false;
+          throw new Error("db down");
+        }
+        const row = rows.find((x) => x.id === prospect.id && x.workspaceId === prospect.workspaceId)!;
+        if (update.onlyIfStatusIn && !update.onlyIfStatusIn.includes(row.status)) return;
+        if (update.onlyIfNull && row[update.onlyIfNull] !== null) return;
+        Object.assign(row, update.data);
+      },
+      async revenueAgentId() {
+        return opts.revenueEnabled === false ? null : "cfg_revenue";
+      },
+      async createRevenueRun(args) {
+        runs.push(args.input);
+        return `run_${runs.length}`;
+      },
+      async enqueue(runId) {
+        enqueued.push(runId);
+      },
+      now: () => now,
+      log: () => undefined,
+    };
+    return { deps, runs, enqueued, receipts, calls: () => calls };
+  }
+  const row = (over: Partial<Row>): Row => ({ ...cand({}), emailRepliedAt: null, linkedInRepliedAt: null, interestedAt: null, meetingBookedAt: null, excludeUntil: null, ...over });
+
+  {
+    const rows = [row({ id: "p_jane", workspaceId: "ws1", email: "jane.doe@ACME.com" }), row({ id: "p_other_ws", workspaceId: "ws2", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows);
+    const first = await processWebhook(r, "ws1", m.deps);
+    check("flow: a documented Instantly reply matches the prospect and starts one Outbound Revenue run", first.status === 200 && first.outcome === "run_created" && m.runs.length === 1 && m.enqueued.length === 1, { first, runs: m.runs });
+    check("flow: the run carries the prospect, our event name, the reply and the vendor event", m.runs[0]?.prospectId === "p_jane" && m.runs[0]?.event === "email_reply" && String(m.runs[0]?.replyText).startsWith("Sounds") && m.runs[0]?.sourceEvent === "reply_received", m.runs[0]);
+    check("flow: the reply is recorded on the prospect", rows[0]!.status === "REPLIED" && rows[0]!.emailRepliedAt?.getTime() === now.getTime(), rows[0]);
+    check("flow: a prospect with the same address in ANOTHER workspace is untouched", rows[1]!.status === "IN_SEQUENCE" && rows[1]!.emailRepliedAt === null, rows[1]);
+
+    // Instantly retries the same payload (re-serialised, keys in a different order).
+    const retried = parseInstantlyPayload(Object.fromEntries(Object.entries(instantlyReply).reverse()));
+    const second = await processWebhook(retried, "ws1", m.deps);
+    check("flow: a retried delivery is a 200 duplicate and starts no second run", second.status === 200 && second.outcome === "duplicate" && m.runs.length === 1 && m.enqueued.length === 1, second);
+
+    const later = parseInstantlyPayload({ ...instantlyReply, timestamp: "2026-09-16T09:00:00.000Z", reply_text: "Following up" });
+    const third = await processWebhook(later, "ws1", m.deps);
+    check("flow: a genuinely new reply (new timestamp) is processed", third.outcome === "run_created" && m.runs.length === 2, third);
+    check("flow: …without moving the first-reply timestamp", rows[0]!.emailRepliedAt?.getTime() === now.getTime(), rows[0]);
+
+    const callsBefore = m.calls();
+    const unknown = await processWebhook(parseInstantlyPayload({ ...instantlyBase, event_type: "email_opened" }), "ws1", m.deps);
+    check("flow: an unhandled event is a 200 and never touches the database", unknown.status === 200 && unknown.outcome === "ignored" && m.calls() === callsBefore, unknown);
+
+    const stranger = await processWebhook(parseInstantlyPayload({ ...instantlyReply, lead_email: "nobody@nowhere.com" }), "ws1", m.deps);
+    check("flow: a lead we don't have is a 200 with nothing written", stranger.status === 200 && stranger.outcome === "no_prospect" && m.runs.length === 2, stranger);
+
+    check("flow: an invalid body is a 400", (await processWebhook(parseInstantlyPayload(null), "ws1", m.deps)).status === 400);
+  }
+
+  {
+    const rows = [row({ id: "p_booked", email: "jane.doe@acme.com", status: "MEETING_BOOKED" as OutboundStatus })];
+    const m = memoryDeps(rows);
+    await processWebhook(r, "ws1", m.deps);
+    check("flow: a reply after a booked meeting never drags the status back to REPLIED", rows[0]!.status === "MEETING_BOOKED", rows[0]);
+  }
+
+  {
+    const rows = [row({ id: "p_jane", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows, { revenueEnabled: false });
+    const res = await processWebhook(r, "ws1", m.deps);
+    check("flow: with Outbound Revenue disabled the reply is still recorded, but no run starts", res.outcome === "updated" && m.runs.length === 0 && rows[0]!.status === "REPLIED", res);
+  }
+
+  {
+    const rows = [row({ id: "p_jane", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows, { failFirstUpdate: true });
+    const failed = await processWebhook(r, "ws1", m.deps);
+    check("flow: a database failure is a 500 so the vendor retries, and its claim is released", failed.status === 500 && m.receipts.size === 0 && m.runs.length === 0, failed);
+    const retry = await processWebhook(r, "ws1", m.deps);
+    check("flow: …and the retry then does the work exactly once", retry.outcome === "run_created" && m.runs.length === 1, retry);
+  }
+
+  {
+    const rows = [row({ id: "p_john", email: "johndoe@hotmail.com", linkedInUrl: "https://www.linkedin.com/in/john-doe-72b75733b/" })];
+    const m = memoryDeps(rows);
+    const first = await processWebhook(ac, "ws1", m.deps);
+    const dup = await processWebhook(asNewReply, "ws1", m.deps);
+    check("flow: an Aimfox campaign_reply starts a linkedin_reply run", first.outcome === "run_created" && m.runs[0]?.event === "linkedin_reply", { first, runs: m.runs });
+    check("flow: the same message arriving again as new_reply is a duplicate", dup.outcome === "duplicate" && m.runs.length === 1, dup);
+    check("flow: the LinkedIn reply is recorded", rows[0]!.status === "REPLIED" && rows[0]!.linkedInRepliedAt !== null, rows[0]);
+  }
+
+  {
+    const rows = [row({ id: "p_nevena", status: "PENDING", linkedInUrl: "https://linkedin.com/in/nevena-nikolic-hr" })];
+    const m = memoryDeps(rows);
+    const res = await processWebhook(aa, "ws1", m.deps);
+    check("flow: an Aimfox accepted moves a PENDING prospect to IN_SEQUENCE and starts no run", res.outcome === "updated" && rows[0]!.status === "IN_SEQUENCE" && m.runs.length === 0, res);
+  }
+
+  {
+    const rows = [row({ id: "p_jane", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows);
+    const bounced = parseInstantlyPayload({ ...instantlyBase, event_type: "email_bounced" }) as ParsedWebhook;
+    const res = await processWebhook(bounced, "ws1", m.deps);
+    check("flow: a bounce suppresses the prospect and starts no run", res.outcome === "updated" && rows[0]!.status === "SUPPRESSED" && m.runs.length === 0, { res, row: rows[0] });
+  }
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

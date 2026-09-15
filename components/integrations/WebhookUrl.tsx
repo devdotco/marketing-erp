@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/base-path";
 
 type State =
@@ -8,6 +8,44 @@ type State =
   | { phase: "not-connected" }
   | { phase: "error"; error: string }
   | { phase: "ready"; url: string };
+
+/**
+ * Where to paste the URL and what to tick, per vendor — kept word-for-word in step with the setup
+ * guides in lib/integrations/guides/keys.ts and with the events lib/webhooks/outbound-events.ts
+ * acts on.
+ */
+const VENDOR_STEPS: Record<"INSTANTLY" | "AIMFOX", ReactNode[]> = {
+  INSTANTLY: [
+    <>Click <strong>Copy</strong> above.</>,
+    <>
+      In Instantly, go to <strong>Settings → Integrations</strong> and choose <strong>Webhooks</strong>. (Webhooks need
+      Instantly&apos;s Hyper Growth plan or above.)
+    </>,
+    <>Click <strong>Add Webhook</strong> and paste the URL into <strong>Webhook URL</strong>.</>,
+    <>
+      Event: <strong>All events</strong>. Campaign: <strong>All campaigns</strong>. Leave headers empty.
+    </>,
+    <>Click <strong>Add Webhook</strong>. Delete any older marketing-erp webhook there — its URL no longer works.</>,
+  ],
+  AIMFOX: [
+    <>Click <strong>Copy</strong> above.</>,
+    <>
+      In Aimfox, go to <strong>Workspace settings</strong> and open the <strong>Webhooks</strong> tab.
+    </>,
+    <>
+      Click <strong>Add webhook</strong>. Name it &quot;marketing-erp&quot;, paste the URL into <strong>URL</strong>, and
+      leave <strong>Authentication Header</strong> empty.
+    </>,
+    <>
+      In the events list tick only <strong>Campaign Reply</strong> and <strong>Connect accepted</strong>, then click{" "}
+      <strong>Save</strong>.
+    </>,
+    <>
+      Optional: three-dot menu → <strong>Test webhook</strong>. Delete any older marketing-erp webhook there — its URL no
+      longer works.
+    </>,
+  ],
+};
 
 /**
  * The workspace's own webhook URL for Instantly or Aimfox, to paste into the
@@ -72,9 +110,14 @@ export function WebhookUrl({ provider, name }: { provider: "INSTANTLY" | "AIMFOX
         <>
           <input className="input" readOnly value={state.url} onFocus={(e) => e.currentTarget.select()} style={{ fontFamily: "monospace", fontSize: 12 }} />
           <p className="input-hint" style={{ margin: 0 }}>
-            Paste this into {name}&apos;s webhook settings so replies reach the Outbound Engine. It contains a secret for
-            this workspace only — treat it like a password. Deliveries without it are refused.
+            Add this in {name} so replies reach the Outbound Engine. It contains a secret for this workspace only — treat
+            it like a password. Deliveries without it are refused.
           </p>
+          <ol className="input-hint" style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+            {VENDOR_STEPS[provider].map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"

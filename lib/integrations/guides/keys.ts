@@ -229,12 +229,13 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     provider: "INSTANTLY",
     summary:
       "Connecting Instantly lets Email Outbound (the Outbound Engine's cold-email agent), Email Marketing's Instantly channel, and Prospector's optional outreach step create and send cold email campaigns through your Instantly account.",
-    timeMinutes: 5,
+    timeMinutes: 10,
     youWillNeed: [
       "An Instantly account on the Growth plan or higher — API v2 access is gated to Growth and above.",
       "A v2 API key specifically. v1 keys exist in older Instantly accounts but every endpoint this integration calls rejects them outright.",
       "An existing Lead List in Instantly (Leads → Lists) for Email Marketing's Instantly channel — it moves that list's leads into the campaign it creates.",
       "At least one connected sending mailbox in Instantly (Settings → Email Accounts) if you turn on Prospector's Outreach via Instantly — the addresses you list in its Sending Accounts field are checked against these.",
+      "For reply tracking only: Instantly's Hyper Growth plan or above — Instantly only offers webhooks from that plan up. Everything else here works without it.",
     ],
     steps: [
       {
@@ -254,18 +255,35 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         body: "Go to **Settings → Integrations → Instantly → Connect**, paste it into **API key**, and click **Connect**.",
       },
       {
-        title: "Add the webhook (for reply tracking)",
-        body: "Copy the **Webhook URL** shown under the connect form — it is unique to this workspace and contains a secret. In Instantly, add a webhook (Settings → Integrations → Webhooks) with that URL as the target. Deliveries to any other URL are refused, so replace any older marketing-erp webhook URL with this one.",
+        title: "Copy your webhook URL (for reply tracking)",
+        body: "Back on this page, under the connect form, click **Copy** next to **Webhook URL**. It is unique to this workspace and works like a password, so don't share it. This is what tells marketing-erp when a prospect replies, is marked interested or not interested, books a meeting, bounces, or unsubscribes.",
+      },
+      {
+        title: "Open webhooks in Instantly",
+        body: "In Instantly, go to **Settings → Integrations** ([app.instantly.ai/app/settings/integrations](https://app.instantly.ai/app/settings/integrations)) and choose **Webhooks**. If there is already a marketing-erp webhook there with an older URL, edit it or delete it: marketing-erp refuses deliveries to any URL except the one on this page.",
+      },
+      {
+        title: "Add the webhook",
+        body: "Click **Add Webhook**. Paste the URL into the **Webhook URL** box. For the event, choose **All events**, and for the campaign choose **All campaigns**. Leave the headers section empty — the secret is already in the URL. Click **Add Webhook** to save.",
+      },
+      {
+        title: "Turn on Outbound Revenue (optional)",
+        body: "Replies, interest and bookings are recorded on the prospect automatically. If you also want each one written to GoHighLevel, make sure the **Outbound Revenue** agent is turned on — marketing-erp only starts it for a reply when it is on, and every CRM write still waits for your approval.",
       },
     ],
     verify: [
       "The connect form calls Instantly's campaigns-list endpoint with a limit of 1 — free, and works even with zero campaigns in the account.",
       "A green \"Connected\" badge appears next to Instantly in Settings → Integrations once it checks out.",
+      "Reply tracking: the next time a prospect the Outbound Engine added replies, their status on the Outbound page changes to Replied (or Interested / Meeting booked when you or Instantly's AI label them that way). Instantly's own Webhooks page also shows whether each delivery succeeded.",
     ],
     troubleshooting: [
       {
         symptom: "\"Instantly rejected that key. It must be a v2 key from Settings → Integrations → API Keys ... and v2 access needs Instantly's Growth plan or higher.\"",
         fix: "Regenerate the key from Settings → Integrations → API in Instantly, and confirm the account is on Growth or above — a Hypergrowth-only feature like webhooks is not required here, just Growth-level API access.",
+      },
+      {
+        symptom: "A prospect replied in Instantly but their status on the Outbound page didn't change",
+        fix: "Check four things. (1) The webhook URL in Instantly is exactly the one on this page — if someone clicked Rotate, the old URL stopped working. (2) The webhook's event is All events (or includes Reply received). (3) The person is a prospect the Outbound Engine added in this workspace — replies from other Instantly leads are ignored on purpose. (4) Instantly hasn't paused the webhook: Instantly turns a webhook off after repeated failed deliveries, and you turn it back on from its Webhooks page.",
       },
       {
         symptom: "\"Instantly is selected as the Email Platform, but no Audience or List ID was given.\"",
@@ -292,6 +310,8 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     docs: [
       { label: "Instantly API v2 docs", url: "https://developer.instantly.ai/" },
       { label: "Instantly Help Center: API V2", url: "https://help.instantly.ai/en/articles/10432807-api-v2" },
+      { label: "Instantly Help Center: Webhooks", url: "https://help.instantly.ai/en/articles/6261906-webhooks" },
+      { label: "Instantly webhook events reference", url: "https://developer.instantly.ai/guides/webhook-events" },
     ],
   },
 
@@ -299,7 +319,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     provider: "AIMFOX",
     summary:
       "Connecting Aimfox lets the Outbound Engine's LinkedIn Outbound agent, and the Social suite's LinkedIn Engager agent, add prospects to a live Aimfox campaign and send direct messages — connection requests and follow-up messages go out from your connected LinkedIn seat.",
-    timeMinutes: 5,
+    timeMinutes: 10,
     youWillNeed: [
       "An Aimfox account with a LinkedIn account already connected as a seat.",
       "An API key with \"All\" permission — a Read-only key can look up campaigns but cannot add a lead to one, which is what this agent needs to do.",
@@ -327,15 +347,32 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         body: "Go to **Settings → Integrations → Aimfox → Connect**, paste it into **API key**, and click **Connect**.",
       },
       {
-        title: "Add the webhook (for reply tracking)",
-        body: "Copy the **Webhook URL** shown under the connect form — it is unique to this workspace and contains a secret. In Aimfox, add a webhook (Workspace Settings → Integrations → Webhooks) with that URL. Deliveries to any other URL are refused, so replace any older marketing-erp webhook URL with this one.",
+        title: "Copy your webhook URL (for reply tracking)",
+        body: "Back on this page, under the connect form, click **Copy** next to **Webhook URL**. It is unique to this workspace and works like a password, so don't share it. This is what tells marketing-erp when a prospect replies on LinkedIn or accepts a connection request.",
+      },
+      {
+        title: "Open webhooks in Aimfox",
+        body: "In Aimfox, go to **Workspace settings** and switch to the **Webhooks** tab. If there is already a marketing-erp webhook there with an older URL, delete it (three-dot menu → **Delete webhook**): marketing-erp refuses deliveries to any URL except the one on this page.",
+      },
+      {
+        title: "Add the webhook",
+        body: "Click **Add webhook**. For **Name**, type \"marketing-erp\". Paste the URL into **URL**. Leave **Authentication Header** empty — the secret is already in the URL. In the events dropdown, tick exactly two: **Campaign Reply** and **Connect accepted**. Don't also tick New Reply, Message reply or Inmail reply — they report the same replies again. Click **Save**.",
+      },
+      {
+        title: "Test it",
+        body: "On the Webhooks tab, open the three-dot menu next to the new webhook and choose **Test webhook**. It should succeed. A test uses a made-up lead, so it won't change any prospect.",
       },
     ],
     verify: [
       "The connect form calls Aimfox's accounts-list endpoint — free, read-only, and works even with a Read-only-permission key (so a successful connect here does not by itself confirm the key can add leads).",
       "A green \"Connected\" badge appears next to Aimfox in Settings → Integrations once it checks out.",
+      "Reply tracking: the next time a prospect the Outbound Engine added replies on LinkedIn, their status on the Outbound page changes to Replied. If the Outbound Revenue agent is turned on, a run also appears, waiting for approval before anything is written to GoHighLevel.",
     ],
     troubleshooting: [
+      {
+        symptom: "A prospect replied on LinkedIn but their status on the Outbound page didn't change",
+        fix: "Check three things. (1) The webhook URL in Aimfox is exactly the one on this page — if someone clicked Rotate, the old URL stopped working. (2) The webhook has Campaign Reply ticked. (3) The person is a prospect the Outbound Engine added in this workspace, with their LinkedIn profile URL on record — replies from anyone else are ignored on purpose.",
+      },
       {
         symptom: "\"Aimfox rejected that key. Check it was copied whole and has not been revoked.\"",
         fix: "Re-copy the key from Workspace Settings → Integrations — Aimfox only shows it once, so if it was never saved, generate a new one.",
@@ -350,7 +387,11 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       },
     ],
     privacy: "Both read and write, and it can send real connection requests and messages once you approve a run — same model as Email Marketing's channels. LinkedIn Outbound looks up the target campaign by name (read-only) and writes the connection note and follow-up messages while staging, but never calls Aimfox's add-to-campaign-audience endpoint itself: that only happens once a workspace admin approves the run. Approving is what adds the profile to the live Aimfox campaign, which then sends the connection request and follow-ups from your connected LinkedIn seat on its own schedule — this cannot be undone from marketing-erp; pause the campaign directly in Aimfox if you need to stop it. Rejecting the run makes no call to Aimfox at all. Aimfox does not document whether adding the same profile to a campaign twice is itself a no-op, so the only guard against a duplicate add is marketing-erp's own record of which runs have already been approved — don't approve the same run more than once. LinkedIn Engager uses the same key for its own connection-request and message queue: it only ever sends a connection note (via the same add-to-campaign-audience call) or a direct message, and only for the specific targets a workspace admin approved — it never reads, likes, or comments on a post, because Aimfox's API has no endpoint for any of those; a drafted comment stays a manual, paste-it-yourself action no matter what. Disconnect any time from Settings → Integrations → Aimfox → Disconnect, or revoke the key in Aimfox under Workspace Settings → Integrations.",
-    docs: [{ label: "Aimfox: API integration", url: "https://help.aimfox.com/en/articles/10162205-aimfox-api-integration" }],
+    docs: [
+      { label: "Aimfox: API integration", url: "https://help.aimfox.com/en/articles/10162205-aimfox-api-integration" },
+      { label: "Aimfox Help Center: Webhooks", url: "https://help.aimfox.com/en/articles/10183889-webhooks" },
+      { label: "Aimfox webhook events reference", url: "https://docs.aimfox.com/webhooks" },
+    ],
   },
 
   GO_HIGH_LEVEL: {
