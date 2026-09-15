@@ -253,6 +253,10 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         title: "Paste it into marketing-erp",
         body: "Go to **Settings → Integrations → Instantly → Connect**, paste it into **API key**, and click **Connect**.",
       },
+      {
+        title: "Add the webhook (for reply tracking)",
+        body: "Copy the **Webhook URL** shown under the connect form — it is unique to this workspace and contains a secret. In Instantly, add a webhook (Settings → Integrations → Webhooks) with that URL as the target. Deliveries to any other URL are refused, so replace any older marketing-erp webhook URL with this one.",
+      },
     ],
     verify: [
       "The connect form calls Instantly's campaigns-list endpoint with a limit of 1 — free, and works even with zero campaigns in the account.",
@@ -321,6 +325,10 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       {
         title: "Paste it into marketing-erp",
         body: "Go to **Settings → Integrations → Aimfox → Connect**, paste it into **API key**, and click **Connect**.",
+      },
+      {
+        title: "Add the webhook (for reply tracking)",
+        body: "Copy the **Webhook URL** shown under the connect form — it is unique to this workspace and contains a secret. In Aimfox, add a webhook (Workspace Settings → Integrations → Webhooks) with that URL. Deliveries to any other URL are refused, so replace any older marketing-erp webhook URL with this one.",
       },
     ],
     verify: [

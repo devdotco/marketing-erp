@@ -7,6 +7,7 @@ import { apiFetch, withBase } from "@/lib/base-path";
 import { CONNECT_METHODS, providerFromSlug, type CredentialField } from "@/lib/integrations/catalog";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { SetupGuide } from "@/components/integrations/SetupGuide";
+import { WebhookUrl } from "@/components/integrations/WebhookUrl";
 
 const panel: React.CSSProperties = {
   padding: "20px 20px 24px",
@@ -50,7 +51,10 @@ export default function ConnectProviderPage() {
             Connect {entry.name}
           </h1>
           {entry.method.kind === "key" ? (
-            <KeyForm provider={provider} name={entry.name} fields={entry.method.fields} />
+            <>
+              <KeyForm provider={provider} name={entry.name} fields={entry.method.fields} />
+              {(provider === "INSTANTLY" || provider === "AIMFOX") && <WebhookUrl provider={provider} name={entry.name} />}
+            </>
           ) : entry.method.kind === "google" ? (
             <Suspense fallback={null}>
               <GoogleConnect provider={provider} name={entry.name} />

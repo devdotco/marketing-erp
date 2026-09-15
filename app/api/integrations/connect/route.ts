@@ -5,6 +5,8 @@ import { CONNECT_METHODS, normaliseKeyCredentials } from "@/lib/integrations/cat
 import { revokeGoogleGrant } from "@/lib/integrations/google";
 import { integrationAdmin } from "@/lib/integrations/route-auth";
 import { KEY_VERIFIERS } from "@/lib/integrations/verify";
+import { webhookTokenForSave } from "@/lib/integrations/webhook-auth";
+import { isWebhookProvider } from "@/lib/security/webhook-token";
 import { IntegrationProvider } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -53,7 +55,14 @@ export async function POST(req: NextRequest) {
     if (!verdict.ok) return NextResponse.json({ error: verdict.reason }, { status: 400 });
   }
 
-  const encrypted = await encryptCredentials(credentials);
+  // Instantly/Aimfox webhooks authenticate with a per-workspace token kept in
+  // these credentials. Carry the existing one across a reconnect so the URL an
+  // admin already pasted into the vendor keeps working.
+  const toStore: Record<string, string> = isWebhookProvider(typedProvider)
+    ? { ...credentials, webhookToken: await webhookTokenForSave(workspaceId, typedProvider) }
+    : credentials;
+
+  const encrypted = await encryptCredentials(toStore);
 
   await prisma.integration.upsert({
     where: { workspaceId_provider: { workspaceId, provider: typedProvider } },

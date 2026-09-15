@@ -87,6 +87,14 @@ import {
 import { AimfoxApiError } from "@/lib/integrations/aimfox";
 import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
+import { constantTimeEqual } from "@/lib/security/compare";
+import {
+  allowUnsignedWebhooks,
+  generateWebhookToken,
+  isWebhookProvider,
+  parseWebhookToken,
+  webhookAuthMode,
+} from "@/lib/security/webhook-token";
 
 let failures = 0;
 const check = (name: string, cond: boolean, got?: unknown) => {
@@ -1937,6 +1945,38 @@ check(
   check("isMetaBatchSettled: true once nothing is left pending", isMetaBatchSettled(metaResult.posts) === true);
   check("isMetaBatchSettled: false while any post is still pending", isMetaBatchSettled(metaPosts) === false);
   check("isMetaBatchSettled: an empty batch is not considered settled", isMetaBatchSettled([]) === false);
+}
+
+// ─── Security hotfix: webhook tokens (Instantly/Aimfox deliveries were unsigned and matched across workspaces) ───
+{
+  check("constantTimeEqual: identical secrets match", constantTimeEqual("s3cret-value", "s3cret-value"));
+  check("constantTimeEqual: a different secret does not match", !constantTimeEqual("s3cret-value", "s3cret-valuf"));
+  check("constantTimeEqual: a prefix of the secret does not match", !constantTimeEqual("s3cret", "s3cret-value"));
+  check("constantTimeEqual: empty presented never matches", !constantTimeEqual("", "s3cret-value"));
+  check("constantTimeEqual: empty expected never matches (an unset env is not a password of '')", !constantTimeEqual("", ""));
+  check("constantTimeEqual: null/undefined never match", !constantTimeEqual(null, undefined));
+
+  const ws = "cmabc123workspace";
+  const token = generateWebhookToken(ws);
+  check("generateWebhookToken: carries the workspace id it was minted for", parseWebhookToken(token)?.workspaceId === ws, token);
+  check("generateWebhookToken: two tokens for the same workspace differ", generateWebhookToken(ws) !== generateWebhookToken(ws));
+  check("generateWebhookToken: the secret half is at least 32 bytes of entropy", token.split(".")[1]!.length >= 43, token);
+  check("parseWebhookToken: a bare workspace id is not a token", parseWebhookToken(ws) === null);
+  check("parseWebhookToken: a short secret is rejected", parseWebhookToken(`${ws}.short`) === null);
+  check("parseWebhookToken: path-traversal-ish input is rejected", parseWebhookToken(`../${ws}.${"a".repeat(43)}`) === null);
+  check("parseWebhookToken: empty/null rejected", parseWebhookToken("") === null && parseWebhookToken(null) === null);
+  check("parseWebhookToken: oversize input rejected", parseWebhookToken(`${ws}.${"a".repeat(300)}`) === null);
+  check("a token for workspace A never equals workspace B's token", !constantTimeEqual(token, generateWebhookToken("cmotherworkspace")));
+  // The attack: keep workspace A's id, forge the secret — the whole-token compare must fail.
+  const forged = `${ws}.${"A".repeat(43)}`;
+  check("a forged secret on a real workspace id is parseable but does not verify", parseWebhookToken(forged) !== null && !constantTimeEqual(forged, token));
+
+  check("allowUnsignedWebhooks: off when unset", allowUnsignedWebhooks({}) === false);
+  check("allowUnsignedWebhooks: only the literal 'true' turns it on", allowUnsignedWebhooks({ WEBHOOKS_ALLOW_UNSIGNED: "true" }) && !allowUnsignedWebhooks({ WEBHOOKS_ALLOW_UNSIGNED: "1" }) && !allowUnsignedWebhooks({ WEBHOOKS_ALLOW_UNSIGNED: "TRUE" }));
+  check("webhookAuthMode: no token, flag off → reject", webhookAuthMode(null, false) === "reject");
+  check("webhookAuthMode: no token, flag on → unsigned grace", webhookAuthMode(null, true) === "unsigned-grace");
+  check("webhookAuthMode: a presented token is always verified, even with the flag on (a bad token never falls back)", webhookAuthMode("x", true) === "verify" && webhookAuthMode("x", false) === "verify");
+  check("isWebhookProvider: Instantly and Aimfox only", isWebhookProvider("INSTANTLY") && isWebhookProvider("AIMFOX") && !isWebhookProvider("APOLLO"));
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
