@@ -21,6 +21,7 @@ import type { AgentRun, AgentConfig, IntegrationProvider } from "@prisma/client"
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { AgentInputError } from "@/lib/ai/errors";
+import { resolveCrmConnection } from "@/lib/integrations/crm-connection";
 import {
   activateInstantlyChannel,
   activateApolloSequence,
@@ -58,6 +59,23 @@ async function emailMarketingOnApprove(
   if (!channelDelivery || channelDelivery.status !== "staged") return;
 
   const platform = channelDelivery.platform as IntegrationProvider;
+
+  if (platform === "CRM_ERP_IO") {
+    // No integration row to look up: the connection is derived from the workspace's shell org
+    // (or, for an unlinked workspace, a super-admin's legacy key) at approval time.
+    const connection = await resolveCrmConnection(run.agentConfig.workspaceId);
+    if (!connection.ok) {
+      throw new AgentInputError(
+        `The erp.io CRM can't be reached for this workspace: ${connection.reason}`,
+        "Check Settings → Integrations → erp.io CRM, then approve this run again.",
+        "channel_disconnected",
+      );
+    }
+    channelDelivery.crm = await activateCrmSequence(connection.target, channelDelivery.crm as CrmChannelOutput);
+    channelDelivery.status = "activated";
+    return { ...output, channelDelivery };
+  }
+
   const integration = await prisma.integration.findUnique({
     where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: platform } },
   });
@@ -75,9 +93,6 @@ async function emailMarketingOnApprove(
   } else if (platform === "APOLLO") {
     const creds = await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials);
     channelDelivery.apollo = await activateApolloSequence(creds.apiKey, channelDelivery.apollo as ApolloChannelOutput);
-  } else if (platform === "CRM_ERP_IO") {
-    const creds = await decryptCredentials<{ apiKey: string; crmUrl?: string }>(integration.encryptedCredentials);
-    channelDelivery.crm = await activateCrmSequence(creds.apiKey, channelDelivery.crm as CrmChannelOutput);
   } else {
     return;
   }

@@ -22,6 +22,10 @@ const AUDIENCE = "marketing";
 /** Cached across requests — the shell rotates keys rarely and jose re-fetches on an unknown kid. */
 const jwks = createRemoteJWKSet(new URL(JWKS_URL));
 
+/** The shell's key set and issuer name — also what verifies workspace-mirror events (lib/shell-mirror). */
+export const shellKeySet = jwks;
+export const SHELL_ISSUER = ISSUER;
+
 export type ShellClaims = {
   /** The shell's user id. Stable; the local row is keyed off email but records this. */
   sub: string;
@@ -31,6 +35,13 @@ export type ShellClaims = {
   org: string | null;
   orgName: string | null;
   role: string | null;
+  /**
+   * Whether the shell has verified `email`. Anything but `true` — including a
+   * missing claim — is unverified, and nobody is created or linked for it.
+   */
+  emailVerified?: boolean;
+  /** When the shell minted the token (seconds) — compared against a mirror removal tombstone. */
+  issuedAt?: number;
 };
 
 export class ShellTokenInvalid extends Error {}
@@ -57,5 +68,7 @@ export async function verifyShellToken(token: string): Promise<ShellClaims> {
     org: typeof payload.org === "string" ? payload.org : null,
     orgName: typeof payload.org_name === "string" ? payload.org_name : null,
     role: typeof payload.role === "string" ? payload.role : null,
+    emailVerified: typeof payload.email_verified === "boolean" ? payload.email_verified : undefined,
+    issuedAt: typeof payload.iat === "number" ? payload.iat : undefined,
   };
 }

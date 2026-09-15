@@ -9,7 +9,7 @@ import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { createKlaviyoDraft, createMailchimpDraft, resolveEspLiveData } from "./esp-providers";
 import { emailSequenceToSteps, parseAudienceEmails, stageInstantlyCampaign, stageApolloSequence, stageCrmSequence } from "./email-marketing-channels";
-import { DEFAULT_CRM_URL } from "@/lib/integrations/crm-erp-io";
+import { resolveCrmConnection, type CrmConnection } from "@/lib/integrations/crm-connection";
 import type { CreateInstantlyCampaignInput } from "@/lib/integrations/instantly";
 
 type InstantlySendDay = NonNullable<CreateInstantlyCampaignInput["sendDayOfWeek"]>;
@@ -58,7 +58,22 @@ export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => 
   });
 
   let preferredIntegration: Awaited<ReturnType<typeof prisma.integration.findUnique>> = null;
-  if (preferredProvider) {
+  let crmConnection: Extract<CrmConnection, { ok: true }> | null = null;
+  if (preferredProvider === "CRM_ERP_IO") {
+    // No pasted key: a workspace tied to an erp.io organization reaches that org's CRM workspace
+    // with a signed service assertion. See lib/integrations/crm-connection.ts.
+    const connection = await resolveCrmConnection(run.agentConfig.workspaceId);
+    if (!connection.ok) {
+      throw new AgentInputError(
+        `erp.io CRM is selected as the Email Platform, but ${connection.reason}`,
+        connection.code === "no_org"
+          ? "Open Marketing from app.erp.io so this workspace is tied to your organization, or change the Email Platform field."
+          : "Ask an administrator to set MARKETING_SERVICE_PRIVATE_KEY on this server, or change the Email Platform field.",
+        "crm_not_linked",
+      );
+    }
+    crmConnection = connection;
+  } else if (preferredProvider) {
     preferredIntegration = await prisma.integration.findUnique({
       where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: preferredProvider } },
     });
@@ -274,13 +289,11 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
         })()
       : "example.com";
     const fromAddress = `hello@${hostname}`;
-    // Guaranteed non-null: the check above (lines defining `preferredIntegration`) already threw
-    // AgentInputError if this platform was selected but not connected.
-    const integration = preferredIntegration!;
-
     try {
       if (preferredProvider === "INSTANTLY") {
-        const creds = await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials);
+        // Guaranteed non-null: the check above already threw AgentInputError if this platform was
+        // selected but not connected.
+        const creds = await decryptCredentials<{ apiKey: string }>(preferredIntegration!.encryptedCredentials);
         const channel = await stageInstantlyCampaign(creds.apiKey, {
           campaignName,
           steps,
@@ -289,7 +302,7 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
         });
         output.channelDelivery = { platform: "INSTANTLY", status: "staged", instantly: channel };
       } else if (preferredProvider === "APOLLO") {
-        const creds = await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials);
+        const creds = await decryptCredentials<{ apiKey: string }>(preferredIntegration!.encryptedCredentials);
         const channel = await stageApolloSequence(creds.apiKey, {
           sequenceName: campaignName,
           steps: steps.map((s) => ({ subject: s.subject, bodyHtml: s.body, waitDays: s.delayDays })),
@@ -298,8 +311,8 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
         });
         output.channelDelivery = { platform: "APOLLO", status: "staged", apollo: channel };
       } else {
-        const creds = await decryptCredentials<{ apiKey: string; crmUrl?: string }>(integration.encryptedCredentials);
-        const channel = await stageCrmSequence(creds.crmUrl || DEFAULT_CRM_URL, creds.apiKey, {
+        // Resolved (and refused if unusable) before any tokens were spent, above.
+        const channel = await stageCrmSequence(crmConnection!.target, {
           name: campaignName,
           fromAddress,
           fromName,

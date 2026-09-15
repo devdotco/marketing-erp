@@ -3,9 +3,9 @@ import { assertPublicUrl } from "@/lib/integrations/public-url";
 import { crmPing, DEFAULT_CRM_URL } from "@/lib/integrations/crm-erp-io";
 
 /**
- * erp.io CRM. `GET /api/marketing-erp/ping` is a free, read-only call that just confirms the key
- * resolves to a tenant — mirrors the other verifiers here (never a call that creates or sends
- * anything). See lib/integrations/crm-erp-io.ts.
+ * erp.io CRM — the LEGACY pasted-key path only. A workspace tied to an erp.io organization never
+ * needs this: it reaches its CRM workspace with a signed service assertion (see
+ * lib/integrations/crm-connection.ts). `GET /api/marketing-erp/ping` is free and read-only.
  */
 const verifyCrmErpIo: KeyVerifier = async (credentials) => {
   const apiKey = credentials.apiKey?.trim();
@@ -20,7 +20,7 @@ const verifyCrmErpIo: KeyVerifier = async (credentials) => {
 
   let res: Response;
   try {
-    res = await crmPing(baseUrl, apiKey);
+    res = await crmPing({ baseUrl, auth: { kind: "key", apiKey } });
   } catch (err) {
     return { ok: false, reason: `Couldn't reach the erp.io CRM at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}` };
   }

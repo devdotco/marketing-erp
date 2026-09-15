@@ -1,4 +1,5 @@
 import { notFound, redirect } from "next/navigation";
+import { isPlatformSuperAdmin } from "@/lib/platform-admin";
 import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
@@ -10,7 +11,7 @@ export default async function SuperAdminWorkspacePage({ params }: { params: Prom
 
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
-  if (!session.user.isSuperAdmin) redirect("/");
+  if (!(await isPlatformSuperAdmin(session.user.id))) redirect("/");
 
   const workspace = await prisma.workspace.findUnique({
     where: { id },

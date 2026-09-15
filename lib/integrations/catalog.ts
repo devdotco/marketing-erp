@@ -120,7 +120,7 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
           label: "API key",
           placeholder: "Paste the marketing API key…",
           secret: true,
-          hint: "Create a per-tenant Marketing API key in the CRM under Settings → API Keys, not a shared/global secret — it scopes every call this integration makes to that one tenant.",
+          hint: "Super-admin fallback only, for a workspace with no erp.io organization. Workspaces tied to an organization link automatically and need no key. Create a per-tenant key in the CRM with `npm run marketing:create-key`.",
         },
       ],
     },

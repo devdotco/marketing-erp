@@ -623,46 +623,41 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
   CRM_ERP_IO: {
     provider: "CRM_ERP_IO",
     summary:
-      "Connecting the erp.io CRM lets Email Marketing stage and send outbound sequences through your erp.io CRM contacts and segments, as an alternative to Mailchimp, Klaviyo, Instantly, or Apollo.",
-    timeMinutes: 5,
+      "The erp.io CRM is linked automatically: every Marketing workspace tied to an erp.io organization is paired with that organization's CRM workspace, with the same name, members and roles. Email Marketing can stage and send sequences through its contacts and segments — nothing to paste.",
+    timeMinutes: 1,
     youWillNeed: [
-      "Access to your workspace's erp.io CRM instance (default app.erp.io/crm) and someone who can provision a marketing API key for your tenant. As of now this key has no self-serve page inside the CRM yet — your erp.io account contact or admin creates it for you with a one-line command on their end (`npm run marketing:create-key`) and hands you the raw key. Ask them for it if you don't already have one.",
-      "At least one Contact Segment already set up in the CRM (Contacts → Segments) for the audience you want a campaign to reach.",
+      "To have opened Marketing from app.erp.io, which ties this workspace to your erp.io organization.",
+      "At least one Contact Segment in the CRM (Contacts → Segments) for the audience you want a campaign to reach.",
     ],
     steps: [
       {
-        title: "Request a marketing API key",
-        body: "Ask whoever administers your erp.io CRM tenant for a **marketing-erp API key** scoped to your workspace. This is a per-tenant key, not a shared or global secret — every call it makes is confined to your CRM tenant.",
+        title: "Check the link",
+        body: "Under **Settings → Integrations**, the erp.io CRM row reads **Linked to <your CRM workspace>**. If it says Not linked, the reason is shown beside it.",
       },
       {
-        title: "Get the raw key",
-        body: "They'll hand you the key as plain text. It's shown to them once when created and can't be recovered afterward — if it's lost, ask them to create a new one.",
+        title: "Note a Segment ID",
+        body: "Find the Contact Segment you want to send to under Contacts → Segments in the CRM and copy its ID into the Email Marketing agent's Audience or List ID field.",
       },
       {
-        title: "Confirm your CRM URL",
-        body: "If your CRM lives at the default **app.erp.io/crm**, you can leave the CRM URL field blank. Only fill it in if your workspace uses a different address.",
-      },
-      {
-        title: "Paste it into marketing-erp",
-        body: "Go to **Settings → Integrations → erp.io CRM → Connect**, paste the key into **API key**, fill in **CRM URL** if needed, and click **Connect**.",
-      },
-      {
-        title: "Note a Segment ID for later",
-        body: "Before running Email Marketing with the CRM as the delivery channel, find the Contact Segment you want to send to under Contacts → Segments in the CRM and copy its ID into the agent's Audience or List ID field.",
+        title: "Run and approve",
+        body: "Choose **erp.io CRM** as the Email Platform. The run stages a DRAFT sequence; nothing sends until a workspace admin approves the run.",
       },
     ],
     verify: [
-      "The connect form calls the CRM's free, read-only /api/marketing-erp/ping endpoint, which just confirms the key resolves to your tenant.",
-      "A green \"Connected\" badge appears next to erp.io CRM in Settings → Integrations once it checks out.",
+      "The Integrations row calls the CRM's free, read-only /api/marketing-erp/ping with this server's signed service assertion and shows the CRM workspace it resolved to.",
     ],
     troubleshooting: [
       {
-        symptom: "\"The CRM rejected that key. Check it was copied whole and has not been revoked ...\"",
-        fix: "Confirm with your CRM admin that the key hasn't been revoked, and re-paste it carefully — there's no self-serve way yet to see it again once created, so a lost key means asking for a new one.",
+        symptom: "\"Not linked: this workspace is not tied to an erp.io organization\"",
+        fix: "The workspace was created here rather than through app.erp.io. Ask a platform admin to link it to your organization; until then a super admin can connect a per-tenant API key as a fallback.",
       },
       {
-        symptom: "\"No marketing-erp endpoint found at [URL] — check the CRM URL.\"",
-        fix: "Your CRM URL field points somewhere that isn't the CRM app itself (a proxy, or the old crm.erp.io host, which now redirects). Leave it blank to use the default app.erp.io/crm unless you know your workspace uses a different address.",
+        symptom: "\"This organization's CRM workspace hasn't been created yet\"",
+        fix: "The CRM workspace is created automatically when Marketing or CRM is switched on for the organization. It appears within minutes; nobody needs to create it by hand.",
+      },
+      {
+        symptom: "\"The CRM didn't accept this server's signature\"",
+        fix: "A deployment problem, not something to fix in the workspace: MARKETING_SERVICE_PUBLIC_KEY on the CRM must be the public half of MARKETING_SERVICE_PRIVATE_KEY here.",
       },
       {
         symptom: "\"erp.io CRM is selected as the Email Platform, but no Segment ID was given.\"",
@@ -673,7 +668,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         fix: "Check the run's error detail — a 422 from the CRM means it refused activation (e.g. an invalid segment); check the segment still exists and try approving again.",
       },
     ],
-    privacy: "Both read and write, and it can send real email — but only after you approve a run. Email Marketing's CRM channel creates a DRAFT Sequence in your CRM tenant with no one enrolled while the run is in progress — nothing sends yet. Approving the run flips it to ACTIVE and enrolls everyone in the Contact Segment you chose, which starts real sends on the CRM's own schedule; this cannot be undone from marketing-erp — pause or edit the sequence directly in the CRM if you need to stop it. The key only ever acts within your own tenant. Disconnect any time from Settings → Integrations → erp.io CRM → Disconnect; ask your CRM admin to revoke the key on their end to cut off access immediately.",
+    privacy: "Both read and write, and it can send real email — but only after you approve a run. Email Marketing's CRM channel creates a DRAFT Sequence in your organization's CRM workspace with no one enrolled while the run is in progress — nothing sends yet. Approving the run flips it to ACTIVE and enrolls everyone in the Contact Segment you chose, which starts real sends on the CRM's own schedule; pause or edit the sequence directly in the CRM if you need to stop it. Every call is signed for your organization, and the CRM resolves the workspace from that signature alone, so it can only ever act within your own organization's CRM workspace.",
     docs: [{ label: "erp.io CRM", url: "https://app.erp.io/crm" }],
   },
 

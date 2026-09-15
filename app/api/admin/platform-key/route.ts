@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isPlatformSuperAdmin } from "@/lib/platform-admin";
 import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { forgetAnthropicKey } from "@/lib/ai/client";
@@ -9,7 +10,7 @@ export const dynamic = "force-dynamic";
 export async function PATCH(req: NextRequest) {
   const session = await getServerSession();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!session.user.isSuperAdmin) {
+  if (!(await isPlatformSuperAdmin(session.user.id))) {
     return NextResponse.json({ error: "Super admin only" }, { status: 403 });
   }
 

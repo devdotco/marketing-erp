@@ -54,6 +54,11 @@ model User {
   image         String?
   passwordHash  String?
   referralSource String?         // e.g. "digitalmarketers.ai"
+  /// The app.erp.io shell user (`VibeUser.id`) this account IS. The identity join for the
+  /// Marketing/CRM mirror and the hand-off: set at first link — by shell id, else by a VERIFIED
+  /// email — and never moved to another shell user. Null = no shell user has claimed this account;
+  /// the mirror never removes memberships from those. See lib/shell-mirror.
+  shellUserId   String?          @unique
   accounts      Account[]
   sessions      Session[]
   memberships   WorkspaceMember[]
@@ -109,6 +114,10 @@ model WorkspaceMember {
   userId      String
   user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   role        MemberRole  @default(VIEWER)
+  /// Where this membership came from: `mirror` (pushed by the shell, which may remove it), `app`
+  /// (invited or created here — the mirror never removes it) or `legacy` (predates the mirror;
+  /// never removed by it). Owner decision 2026-09-14: in-app invites stay.
+  source      String      @default("app")
   createdAt   DateTime    @default(now())
 
   @@unique([workspaceId, userId])
@@ -485,4 +494,25 @@ model GeneratedAsset {
   createdAt   DateTime  @default(now())
 
   @@index([workspaceId, runId])
+}
+
+/// Last shell-mirror version applied per key (`org:<shellOrgId>`, `member:<shellOrgId>:<shellUserId>`).
+/// A sidecar rather than a column so a REMOVED membership keeps its version: without that tombstone
+/// a delayed, older "member added" event would put the person back. See lib/shell-mirror/apply.ts.
+model ShellMirrorVersion {
+  key       String   @id
+  version   BigInt
+  /// True when the last state applied for this member key was a REMOVAL — the tombstone the
+  /// shell hand-off consults before it would recreate the membership.
+  removed   Boolean  @default(false)
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+/// Replay guard for signed service requests from the shell (`shell:<jti>`). One row per accepted
+/// token until it has expired; pruned opportunistically.
+model SignedRequestReceipt {
+  jti       String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
 }

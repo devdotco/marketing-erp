@@ -33,7 +33,7 @@ import {
   apolloAddContactsToSequence,
   type ApolloEmailStep,
 } from "@/lib/integrations/apollo";
-import { crmCreateSequence, crmActivateSequence, DEFAULT_CRM_URL, type CrmSequenceStep } from "@/lib/integrations/crm-erp-io";
+import { crmCreateSequence, crmActivateSequence, DEFAULT_CRM_URL, type CrmSequenceStep, type CrmTarget } from "@/lib/integrations/crm-erp-io";
 
 // ---------------------------------------------------------------------------
 // Pure helpers — no network, no DB. Unit tested in test/content.test.ts.
@@ -346,6 +346,8 @@ export async function activateApolloSequence(
 
 export interface CrmChannelOutput {
   crmUrl: string;
+  /** How it was staged: a signed org assertion (normal) or a legacy API key. Absent on older runs = key. */
+  auth?: "service" | "key";
   sequenceId: string;
   segmentId: string;
   status: "staged" | "activated";
@@ -354,8 +356,7 @@ export interface CrmChannelOutput {
 }
 
 export async function stageCrmSequence(
-  crmUrl: string,
-  apiKey: string,
+  target: CrmTarget,
   input: { name: string; fromAddress?: string; fromName?: string; steps: CrmSequenceStep[]; segmentId: string },
 ): Promise<CrmChannelOutput> {
   if (!input.segmentId) {
@@ -375,7 +376,7 @@ export async function stageCrmSequence(
 
   let res: Response;
   try {
-    res = await crmCreateSequence(crmUrl, apiKey, {
+    res = await crmCreateSequence(target, {
       name: input.name,
       fromAddress: input.fromAddress,
       fromName: input.fromName,
@@ -383,7 +384,7 @@ export async function stageCrmSequence(
     });
   } catch (err) {
     throw new AgentInputError(
-      `Couldn't reach the erp.io CRM at ${crmUrl} to stage the sequence.`,
+      `Couldn't reach the erp.io CRM at ${target.baseUrl} to stage the sequence.`,
       "This is usually a transient network problem — try running Email Marketing again.",
       "crm_unreachable",
     );
@@ -393,8 +394,12 @@ export async function stageCrmSequence(
     throw new AgentInputError(
       `The erp.io CRM rejected staging the sequence (HTTP ${res.status}).`,
       res.status === 401
-        ? "The CRM API key in Settings → Integrations → erp.io CRM is invalid or has been revoked — reconnect it there."
-        : `Check the CRM connection in Settings → Integrations, then try again. Detail: ${detail.slice(0, 300)}`,
+        ? target.auth.kind === "service"
+          ? "The CRM didn't accept this server's signature — MARKETING_SERVICE_PUBLIC_KEY on the CRM must match. Settings → Integrations → erp.io CRM shows the link status."
+          : "The CRM API key in Settings → Integrations → erp.io CRM is invalid or has been revoked — reconnect it there."
+        : res.status === 404
+          ? `This organization has no CRM workspace yet, or the CRM URL is wrong. Detail: ${detail.slice(0, 300)}`
+          : `Check the CRM connection in Settings → Integrations, then try again. Detail: ${detail.slice(0, 300)}`,
       "crm_stage_failed",
     );
   }
@@ -408,21 +413,25 @@ export async function stageCrmSequence(
     );
   }
 
-  return { crmUrl, sequenceId: body.sequenceId, segmentId: input.segmentId, status: "staged" };
+  return { crmUrl: target.baseUrl, auth: target.auth.kind, sequenceId: body.sequenceId, segmentId: input.segmentId, status: "staged" };
 }
 
 /** Flips the sequence DRAFT → ACTIVE and enrolls the configured segment. The CRM route this
  * calls is itself idempotent (see crm-erp-io's activate route), but `isChannelActivated` is
  * checked first anyway so a second approval attempt doesn't even make the call. */
-export async function activateCrmSequence(apiKey: string, channel: CrmChannelOutput): Promise<CrmChannelOutput> {
+export async function activateCrmSequence(target: CrmTarget, channel: CrmChannelOutput): Promise<CrmChannelOutput> {
   if (isChannelActivated(channel)) return channel;
 
   let res: Response;
   try {
-    res = await crmActivateSequence(channel.crmUrl, apiKey, channel.sequenceId, channel.segmentId);
+    // The target is resolved at approval time, not replayed from the staged output: a signed
+    // assertion goes only to this server's configured CRM. The CRM re-checks that the sequence and
+    // segment belong to the tenant the credential resolves to, so a workspace re-linked since
+    // staging gets a clean 404 rather than someone else's sequence.
+    res = await crmActivateSequence(target, channel.sequenceId, channel.segmentId);
   } catch (err) {
     throw new AgentInputError(
-      `Couldn't reach the erp.io CRM at ${channel.crmUrl} to activate sequence ${channel.sequenceId}.`,
+      `Couldn't reach the erp.io CRM at ${target.baseUrl} to activate sequence ${channel.sequenceId}.`,
       "This is usually a transient network problem — approve the run again.",
       "crm_unreachable",
     );

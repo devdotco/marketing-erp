@@ -7,6 +7,7 @@ import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 import { DisconnectButton } from "@/components/integrations/DisconnectButton";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { SetupGuideExpander } from "@/components/integrations/SetupGuide";
+import { crmLinkStatus } from "@/lib/integrations/crm-connection";
 
 export const metadata = { title: "Integrations — marketing.erp.io" };
 
@@ -209,7 +210,7 @@ const INTEGRATIONS = [
   {
     provider: "CRM_ERP_IO",
     name: "erp.io CRM",
-    description: "Stage a sequence and enroll a segment in app.erp.io/crm — per-tenant API key, never a shared secret",
+    description: "Stage a sequence and enroll a segment in your organization's CRM workspace — linked automatically, nothing to paste",
     agents: ["Email Marketing"],
     color: "#4F46E5",
     docsUrl: "#",
@@ -271,6 +272,15 @@ export default async function IntegrationsPage({
     connectedIntegrations.map((i) => [i.provider, { label: i.label }]),
   );
 
+  // The erp.io CRM is not "connected" by anyone: a workspace tied to an erp.io
+  // organization is linked to that org's CRM workspace automatically. The row
+  // says which one, or exactly why not. A pasted key survives only as a
+  // super-admin fallback for a workspace with no organization.
+  const [crmStatus, superAdmin] = await Promise.all([
+    crmLinkStatus(workspaceId),
+    prisma.workspaceMember.findFirst({ where: { userId: session.user.id, role: "SUPER_ADMIN" }, select: { id: true } }),
+  ]);
+
   return (
     <div className="scrollable">
       <div style={{ marginBottom: 28 }}>
@@ -298,7 +308,8 @@ export default async function IntegrationsPage({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {INTEGRATIONS.map((integration) => {
-          const isConnected = connected.has(integration.provider);
+          const isCrm = integration.provider === "CRM_ERP_IO";
+          const isConnected = isCrm ? crmStatus.linked : connected.has(integration.provider);
           // A provider with no connect method gets "Soon", never a Connect
           // button that lands on "Unknown provider".
           const method = CONNECT_METHODS[integration.provider]?.method;
@@ -343,21 +354,42 @@ export default async function IntegrationsPage({
               <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                   <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{integration.name}</span>
-                  {isConnected && <span className="badge badge-completed">Connected</span>}
+                  {isConnected && <span className="badge badge-completed">{isCrm ? "Linked" : "Connected"}</span>}
                   {isSoon && <span className="badge badge-soon">Soon</span>}
                   {notSetUp && <span className="badge badge-muted">Not set up</span>}
                 </div>
                 <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>{integration.description}</p>
                 <p style={{ fontSize: 11, color: "var(--text-dim)", margin: "4px 0 0" }}>
                   Used by: {integration.agents.join(", ")}
-                  {isConnected && connectedLabel && connectedLabel !== integration.provider && (
+                  {!isCrm && isConnected && connectedLabel && connectedLabel !== integration.provider && (
                     <> · Using <span style={{ color: "var(--text-muted)" }}>{connectedLabel}</span></>
                   )}
                 </p>
+                {isCrm && (
+                  <p style={{ fontSize: 12, color: crmStatus.linked ? "var(--text)" : "var(--text-muted)", margin: "6px 0 0" }}>
+                    {crmStatus.linked
+                      ? <>Linked to <strong>{crmStatus.crmWorkspace}</strong>{crmStatus.via === "key" ? " (legacy API key)" : ""}</>
+                      : <>Not linked: {crmStatus.reason}</>}
+                  </p>
+                )}
                 {SETUP_GUIDES[integration.provider] && <SetupGuideExpander guide={SETUP_GUIDES[integration.provider]!} />}
               </div>
 
-              {!isSoon && !notSetUp && (
+              {isCrm ? (
+                // Nothing to connect on the normal path. The legacy key form and its
+                // Disconnect are offered to super admins only.
+                superAdmin && (!crmStatus.linked || crmStatus.via === "key") && (
+                  <div style={{ flexShrink: 0 }}>
+                    {crmStatus.linked || connected.has(integration.provider) ? (
+                      <DisconnectButton provider={integration.provider} name={`${integration.name} API key`} />
+                    ) : (
+                      <Link href={`/integrations/connect/${integration.provider.toLowerCase()}`} className="btn btn-ghost btn-sm">
+                        Use an API key
+                      </Link>
+                    )}
+                  </div>
+                )
+              ) : !isSoon && !notSetUp && (
                 <div style={{ flexShrink: 0 }}>
                   {isConnected ? (
                     <span style={{ display: "inline-flex", gap: 6 }}>

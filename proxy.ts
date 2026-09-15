@@ -34,6 +34,9 @@ export default auth((req: NextRequest & { auth: { user?: { id: string; isSuperAd
     pathname.startsWith("/api/linkedin") ||
     pathname.startsWith("/api/x") ||
     pathname.startsWith("/api/webhooks") ||
+    // Shell workspace-mirror: authenticated by the shell's signature (events)
+    // or the shell service secret (reconcile), never by a browser session.
+    pathname.startsWith("/api/shell-mirror") ||
     // Deploy gate and uptime monitor — must answer without a session, and it
     // reports only whether the configured Claude models resolve.
     pathname.startsWith("/api/health") ||

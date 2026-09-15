@@ -1,101 +1,94 @@
 import { prisma } from "@/lib/prisma";
 import type { ShellClaims } from "@/lib/shell-token";
-import { $Enums } from "@prisma/client";
-
-type MemberRole = $Enums.MemberRole;
+import { ShellTokenInvalid } from "@/lib/shell-token";
+import { ensureWorkspace, mirrorContext, resolveShellUser } from "@/lib/shell-mirror/apply";
+import { memberKey, mirroredMarketingRole, signInMayRestore } from "@/lib/shell-mirror/protocol";
 
 /**
  * Turn a verified shell identity into a local user, workspace and membership.
  *
- * Runs on every hand-off, not just the first, because all three can drift: a
- * person renamed in the shell, a workspace renamed, someone added to an
- * organisation after their first visit. It is written to be idempotent rather
- * than guarded by a "first time" flag, since the flag is what goes stale.
+ * Since the Marketing/CRM mirror (lib/shell-mirror), the shell PUSHES orgs,
+ * members and roles here and a reconcile heals anything missed — so this is only
+ * the first-contact fallback: somebody arriving before the mirror has told us
+ * about them still lands in their workspace. It uses the mirror's own functions,
+ * so the two cannot disagree about who a person is or what role they hold.
  *
- * The local row is keyed on **email**, not on the shell's user id. The shell is
- * the authority on identity and email is unique in both, so matching on it
- * links a shell hand-off to the account someone already made here with a
- * password — rather than silently creating a second one beside it.
+ * Three refusals, each closing a way back in:
+ *
+ *   - An address the shell has not verified — a MISSING claim included — gets no
+ *     account, no link and no membership. The shell does not hand off to
+ *     Marketing for one anyway; this is the belt to that brace.
+ *   - Identity is matched on the shell USER ID; an existing local account is
+ *     linked by email only for a verified address.
+ *   - A membership the mirror REMOVED is not recreated by a token minted before
+ *     that removal (`signInMayRestore` against the version tombstone). Before
+ *     this, a removed member who still held a token was put straight back.
+ *
+ * Returns the workspace the token's org maps to, so the caller can make it the
+ * active one: switching org in the shell and opening Marketing should land in
+ * that org's workspace, not whichever one the cookie last pointed at.
  */
 export async function provisionFromShell(claims: ShellClaims) {
-  const user = await prisma.user.upsert({
-    where: { email: claims.email },
-    update: { name: claims.name },
-    create: {
-      email: claims.email,
-      name: claims.name,
-      // Arriving through the shell IS the verification: they could not have
-      // reached this point without a live shell session.
-      emailVerified: new Date(),
-      referralSource: "erp.io shell",
-    },
+  if (claims.emailVerified !== true) {
+    throw new ShellTokenInvalid("shell email is not verified");
+  }
+
+  const user = await resolveShellUser({
+    id: claims.sub,
+    email: claims.email,
+    name: claims.name,
+    emailVerified: true,
   });
+  if (!user) throw new ShellTokenInvalid("existing account could not be linked to this shell user");
 
   // No organisation on the token means the shell could not resolve one. It
   // still signs the person in — being unable to name a workspace is not a
-  // reason to refuse a valid identity — and they land wherever a member with no
-  // workspace lands.
-  if (!claims.org) return user;
+  // reason to refuse a valid identity.
+  if (!claims.org) return { user, workspaceId: null as string | null };
 
-  const workspace = await prisma.workspace.upsert({
-    where: { shellOrgId: claims.org },
-    update: claims.orgName ? { name: claims.orgName } : {},
-    create: {
-      shellOrgId: claims.org,
-      name: claims.orgName ?? "Workspace",
-      slug: await uniqueSlug(claims.orgName ?? claims.org),
-    },
-  });
+  // The token carries no adoption anchor, so a brand-new org gets a new
+  // workspace here. That is why the backfill runs the reconcile (which DOES
+  // carry the anchor) before switching Marketing on for the orgs it touches.
+  const ctx = mirrorContext(false);
+  const ws = await ensureWorkspace(
+    { id: claims.org, name: claims.orgName ?? "Workspace", slug: claims.orgName ?? claims.org },
+    ctx,
+  );
+  if (!ws?.id) return { user, workspaceId: null as string | null };
 
-  await prisma.workspaceMember.upsert({
-    where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } },
-    update: { role: roleFor(claims.role) },
-    create: { workspaceId: workspace.id, userId: user.id, role: roleFor(claims.role) },
-  });
+  const [existing, tombstone] = await Promise.all([
+    prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: ws.id, userId: user.id } },
+      select: { id: true, role: true, source: true },
+    }),
+    prisma.shellMirrorVersion.findUnique({
+      where: { key: memberKey(claims.org, claims.sub) },
+      select: { version: true, removed: true },
+    }),
+  ]);
 
-  return user;
-}
-
-/**
- * The shell's role, narrowed to this app's.
- *
- * The shell normalises onto the same four-tier ladder this app uses, so most of
- * this is an identity mapping. The exception is the top of it, and it is the
- * important line here:
- *
- * **SUPER_ADMIN is never granted from a hand-off.** In the shell that means
- * "administrator of their own organisation" — which every new sign-up is, by
- * construction. In THIS app `isSuperAdmin` is a platform-operator flag: any
- * SUPER_ADMIN membership anywhere unlocks /superadmin and every workspace in
- * it. Passing the claim through would make each new customer an operator of the
- * whole product, so the top of the shell's ladder lands as WORKSPACE_ADMIN,
- * which is what "admin of their own workspace" actually means here.
- *
- * Anything unrecognised becomes the least it could mean: a role added to the
- * shell later must not arrive as more access than it was given.
- */
-function roleFor(role: string | null): MemberRole {
-  switch ((role ?? "").toUpperCase()) {
-    case "SUPER_ADMIN":
-    case "WORKSPACE_ADMIN":
-      return "WORKSPACE_ADMIN" as MemberRole;
-    case "OPERATOR":
-      return "OPERATOR" as MemberRole;
-    default:
-      return "VIEWER" as MemberRole;
+  if (!existing && !signInMayRestore(tombstone, claims.issuedAt)) {
+    // Removed by the mirror after this token was minted. Signed in, but not
+    // back into that workspace.
+    console.warn(`[auth] shell hand-off for ${claims.email}: membership in ${claims.org} was removed after this token was minted — not recreated`);
+    return { user, workspaceId: null as string | null };
   }
-}
 
-function slugify(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
-}
-
-async function uniqueSlug(base: string): Promise<string> {
-  const root = slugify(base) || "workspace";
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const candidate = attempt === 0 ? root : `${root}-${attempt + 1}`;
-    const taken = await prisma.workspace.findUnique({ where: { slug: candidate }, select: { id: true } });
-    if (!taken) return candidate;
+  if (claims.orgName && ws.name !== claims.orgName) {
+    await prisma.workspace.update({ where: { id: ws.id }, data: { name: claims.orgName } });
   }
-  return `${root}-${Date.now().toString(36)}`;
+  // SUPER_ADMIN is never granted from a hand-off (it is a platform flag here,
+  // and every shell sign-up is SUPER_ADMIN of their own org) and never taken
+  // away by one — see marketingRoleFor.
+  // Only a mirror-created row follows the shell's role; an invited or legacy
+  // membership keeps the role set here (mirroredMarketingRole).
+  const role = mirroredMarketingRole(claims.role, existing);
+  if (!existing) {
+    // Created from the shell's word, so the shell may take it away again.
+    await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role, source: "mirror" } });
+  } else if (existing.role !== role) {
+    await prisma.workspaceMember.update({ where: { id: existing.id }, data: { role } });
+  }
+
+  return { user, workspaceId: ws.id };
 }

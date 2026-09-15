@@ -7,6 +7,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { verifyShellToken } from "@/lib/shell-token";
 import { provisionFromShell } from "@/lib/shell-provision";
+import { writeActiveWorkspaceCookie } from "@/lib/active-workspace";
 import { $Enums } from "@prisma/client";
 type MemberRole = $Enums.MemberRole;
 
@@ -103,7 +104,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (typeof token !== "string" || !token) return null;
         try {
           const claims = await verifyShellToken(token);
-          const user = await provisionFromShell(claims);
+          const { user, workspaceId } = await provisionFromShell(claims);
+          // Land in the workspace of the org the person is acting as in the
+          // shell. Without this, someone in two orgs who switched in the shell
+          // and opened Marketing saw whichever workspace the cookie last named.
+          // The membership was just ensured above, so the cookie names one they
+          // belong to; getActiveWorkspaceId re-checks membership on every read.
+          if (workspaceId) {
+            await writeActiveWorkspaceCookie(workspaceId).catch((err) =>
+              console.warn("[auth] could not set active workspace:", (err as Error).message),
+            );
+          }
           return { id: user.id, email: user.email, name: user.name, image: user.image };
         } catch (err) {
           // Never surfaced to the browser: the reason a signature failed is a

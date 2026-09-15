@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getServerSession } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
+import { writeActiveWorkspaceCookie } from "@/lib/active-workspace";
 import { $Enums } from "@prisma/client";
 type MemberRole = $Enums.MemberRole;
 
@@ -66,15 +67,7 @@ export async function setActiveWorkspace(workspaceId: string) {
   });
   if (!member && !session.user.isSuperAdmin) return;
 
-  const jar = await cookies();
-  jar.set("active_workspace_id", workspaceId, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    secure: process.env.NODE_ENV === "production",
-    domain: process.env.NODE_ENV === "production" ? ".erp.io" : undefined,
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-  });
+  await writeActiveWorkspaceCookie(workspaceId);
 }
 
 // Resolves the active workspace ID — reads cookie first, falls back to the

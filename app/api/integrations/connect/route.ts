@@ -39,6 +39,24 @@ export async function POST(req: NextRequest) {
 
   const typedProvider = provider as IntegrationProvider;
 
+  // The erp.io CRM is linked automatically through the workspace's erp.io
+  // organization (lib/integrations/crm-connection.ts). A pasted per-tenant key
+  // remains only as a platform super-admin's fallback — for a workspace with no
+  // organization — so a workspace admin cannot point their campaigns at some
+  // other CRM tenant by pasting its key.
+  if (typedProvider === "CRM_ERP_IO") {
+    const superAdmin = await prisma.workspaceMember.findFirst({
+      where: { userId: who.userId, role: "SUPER_ADMIN" },
+      select: { id: true },
+    });
+    if (!superAdmin) {
+      return NextResponse.json(
+        { error: "The erp.io CRM links automatically through your erp.io organization — there is no key to paste." },
+        { status: 403 },
+      );
+    }
+  }
+
   // Check the key before storing it. An unusable key fails identically to a
   // stale model id at run time — except by then someone has queued work and is
   // waiting on it. One cheap call here turns that into a form error.

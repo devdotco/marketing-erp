@@ -1,4 +1,5 @@
 import { getServerSession } from "@/lib/session";
+import { isPlatformSuperAdmin } from "@/lib/platform-admin";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
@@ -9,7 +10,7 @@ export const metadata = { title: "Super Admin — marketing.erp.io" };
 export default async function SuperAdminPage() {
   const session = await getServerSession();
   if (!session?.user) redirect("/login");
-  if (!session.user.isSuperAdmin) redirect("/");
+  if (!(await isPlatformSuperAdmin(session.user.id))) redirect("/");
 
   const [workspaces, totalUsers, totalRuns, totalCost] = await Promise.all([
     prisma.workspace.findMany({
