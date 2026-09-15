@@ -3,7 +3,8 @@ import { IntegrationProvider } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { encryptCredentials } from "@/lib/crypto";
 import { googleCredentials, googleScopes } from "@/lib/integrations/google";
-import { GOOGLE_RESOURCES, type GoogleResource } from "@/lib/integrations/google-resources";
+import { findResourceOption, GOOGLE_RESOURCES, type GoogleResource } from "@/lib/integrations/google-resources";
+import { describeGoogleAdsError } from "@/lib/integrations/google-ads";
 import { integrationAdmin } from "@/lib/integrations/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +36,7 @@ export async function GET(req: NextRequest) {
     const options = await resource.list(creds.access_token);
     return NextResponse.json({ noun: resource.noun, options, selected: resource.selected(creds) });
   } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 502 });
+    return NextResponse.json({ error: describeGoogleAdsError(err) }, { status: 502 });
   }
 }
 
@@ -51,19 +52,21 @@ export async function POST(req: NextRequest) {
   try {
     const creds = (await googleCredentials(loaded.integration)) as Parameters<GoogleResource["selected"]>[0];
     const options = await resource.list(creds.access_token);
-    const chosen = options.find((o) => o.value === body.value);
+    // The resource's own matching rule, and the LISTED value is what gets
+    // stored (Google Ads: the spelling that carries the manager to go through).
+    const chosen = findResourceOption(resource, options, body.value);
     if (!chosen) {
       return NextResponse.json({ error: "That isn't available to the connected Google account" }, { status: 400 });
     }
     await prisma.integration.update({
       where: { id: loaded.integration.id },
       data: {
-        encryptedCredentials: await encryptCredentials(resource.apply(creds, body.value)),
+        encryptedCredentials: await encryptCredentials(resource.apply(creds, chosen.value)),
         label: chosen.label,
       },
     });
     return NextResponse.json({ success: true });
   } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 502 });
+    return NextResponse.json({ error: describeGoogleAdsError(err) }, { status: 502 });
   }
 }

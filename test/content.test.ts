@@ -101,6 +101,19 @@ import {
   type LinkedinEngagerDelivery,
 } from "@/lib/agent-handlers/linkedin-engager-delivery";
 import { AimfoxApiError } from "@/lib/integrations/aimfox";
+import {
+  buildGoogleAdsHeaders,
+  googleAdsAccountValue,
+  googleAdsError,
+  GoogleAdsApiError,
+  googleAdsSearchStream,
+  listGoogleAdsAccounts,
+  matchGoogleAdsOption,
+  parseGoogleAdsAccountValue,
+  sameGoogleAdsChoice,
+} from "@/lib/integrations/google-ads";
+import { GOOGLE_RESOURCES, findResourceOption } from "@/lib/integrations/google-resources";
+import { AgentInputError } from "@/lib/ai/errors";
 import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { constantTimeEqual } from "@/lib/security/compare";
@@ -2926,6 +2939,206 @@ check(
   const mp3 = await encodeMp3(tone, 24000);
   check("encodeMp3: one second of 24 kHz PCM becomes an MPEG audio stream of plausible size",
     mp3.length > 5000 && mp3.length < 12000 && mp3[0] === 0xff && (mp3[1] & 0xe0) === 0xe0, { length: mp3.length, head: [...mp3.subarray(0, 4)] });
+}
+
+// Google Ads through manager (MCC) accounts (lib/integrations/google-ads.ts).
+// Injected fetch only — the picker walks customer_client under each accessible
+// account, and every call must carry the chosen account's own manager.
+{
+  const adsError = (code: string, group = "authorizationError", message = "x") =>
+    JSON.stringify({ error: { code: 403, status: "PERMISSION_DENIED", details: [{ "@type": "type.googleapis.com/google.ads.googleads.v25.errors.GoogleAdsFailure", errors: [{ errorCode: { [group]: code }, message }] }] } });
+  const cc = (id: string, level: number, name: string, extra: Record<string, unknown> = {}) => ({
+    customerClient: { clientCustomer: `customers/${id}`, descriptiveName: name, level: String(level), status: "ENABLED", currencyCode: "USD", ...extra },
+  });
+  type Seen = { url: string; headers: Record<string, string> };
+  const makeAdsFetch = (routes: Record<string, (seen: Seen) => Response | Promise<Response>>, seen: Seen[]) =>
+    (async (url: string, init?: RequestInit) => {
+      const s = { url: String(url), headers: (init?.headers ?? {}) as Record<string, string> };
+      seen.push(s);
+      const key = Object.keys(routes).find((k) => s.url.includes(k));
+      if (!key) return new Response("not routed", { status: 599 });
+      return routes[key](s);
+    }) as unknown as typeof fetch;
+  const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+
+  // Composite value: parse, back-compat, round trip.
+  const both = parseGoogleAdsAccountValue("1234567890@9876543210");
+  check("ads value: customer@manager parses both ids", both?.customerId === "1234567890" && both?.loginCustomerId === "9876543210", both);
+  const legacy = parseGoogleAdsAccountValue("123-456-7890");
+  check("ads value: a bare dashed legacy id still parses, with no manager", legacy?.customerId === "1234567890" && legacy.loginCustomerId === undefined, legacy);
+  check("ads value: blank, non-numeric and triple-part values are rejected", parseGoogleAdsAccountValue("") === null && parseGoogleAdsAccountValue("abc@123") === null && parseGoogleAdsAccountValue("1@2@3") === null);
+  check("ads value: round trips", googleAdsAccountValue(both!) === "1234567890@9876543210" && googleAdsAccountValue(legacy!) === "1234567890");
+
+  // Headers.
+  const viaManager = buildGoogleAdsHeaders({ accessToken: "tok", developerToken: "dev", customerId: "1234567890", loginCustomerId: "9876543210", fallbackLoginCustomerId: "5555555555" });
+  check("ads headers: a manager selection sends that manager as login-customer-id, not the env fallback", viaManager["login-customer-id"] === "9876543210" && viaManager["developer-token"] === "dev" && viaManager.Authorization === "Bearer tok", viaManager);
+  const direct = buildGoogleAdsHeaders({ accessToken: "tok", developerToken: "dev", customerId: "1234567890", loginCustomerId: "1234567890", fallbackLoginCustomerId: "5555555555" });
+  check("ads headers: direct access sends no login-customer-id and ignores the env fallback", !("login-customer-id" in direct), direct);
+  const legacyHeaders = buildGoogleAdsHeaders({ accessToken: "tok", developerToken: "dev", customerId: "1234567890", fallbackLoginCustomerId: "555-555-5555" });
+  check("ads headers: a legacy selection with no manager keeps the env fallback", legacyHeaders["login-customer-id"] === "5555555555", legacyHeaders);
+  let threw = false;
+  try {
+    buildGoogleAdsHeaders({ accessToken: "tok", customerId: "1" });
+  } catch {
+    threw = true;
+  }
+  check("ads headers: no developer token is a server misconfiguration error", threw);
+
+  // Error mapping.
+  const testMode = googleAdsError(401, adsError("DEVELOPER_TOKEN_NOT_APPROVED", "authorizationError", "The developer token is only approved for use with test accounts."));
+  check("ads errors: test-only developer token is known, fatal and says Test access", testMode.known && testMode.fatal && testMode.errorCode === "DEVELOPER_TOKEN_NOT_APPROVED" && /Test access/.test(testMode.message) && /apicenter/.test(testMode.hint), testMode);
+  const testModeText = googleAdsError(401, "The developer token is only approved for use with test accounts. To access non-test accounts, apply for Basic or Standard access.");
+  check("ads errors: the test-accounts sentence alone is enough to recognise it", testModeText.errorCode === "DEVELOPER_TOKEN_NOT_APPROVED", testModeText);
+  const denied = googleAdsError(403, `[${adsError("USER_PERMISSION_DENIED")}]`, { customerId: "3333333333", loginCustomerId: "1111111111" });
+  check("ads errors: USER_PERMISSION_DENIED (searchStream array body) names the account and manager, and says to pick it via its manager", denied.known && !denied.fatal && /333-333-3333/.test(denied.message) && /111-111-1111/.test(denied.message) && /via/.test(denied.hint) && /manager/.test(denied.hint), denied);
+  const notAds = googleAdsError(401, adsError("NOT_ADS_USER", "authenticationError"));
+  check("ads errors: NOT_ADS_USER says the login isn't on any Ads account", notAds.known && notAds.fatal && /isn't a user on any Google Ads account/.test(notAds.message), notAds);
+  const mcc = googleAdsError(400, adsError("REQUESTED_METRICS_FOR_MANAGER", "queryError"), { customerId: "1111111111" });
+  check("ads errors: metrics on a manager says to pick a client under it", mcc.known && /manager \(MCC\)/.test(mcc.message), mcc);
+  const unknown = googleAdsError(500, "upstream exploded");
+  check("ads errors: anything else keeps the raw status + body shape", !unknown.known && unknown.message === "Google Ads API 500: upstream exploded", unknown);
+
+  // Account picker across a manager with clients, deduped against direct access.
+  {
+    const seen: Seen[] = [];
+    const fetchImpl = makeAdsFetch(
+      {
+        "customers:listAccessibleCustomers": () => ok({ resourceNames: ["customers/2222222222", "customers/5555555555", "customers/1111111111"] }),
+        "customers/1111111111/googleAds:searchStream": () =>
+          ok([
+            {
+              results: [
+                cc("1111111111", 0, "Agency MCC", { manager: true }),
+                cc("2222222222", 1, "Direct Co"),
+                cc("3333333333", 1, "Client A"),
+                cc("4444444444", 1, "Closed Co", { status: "CLOSED" }),
+                cc("4545454545", 1, "Cancelled Co", { status: "CANCELED" }),
+                cc("6666666666", 1, "Sub MCC", { manager: true }),
+              ],
+            },
+            { results: [cc("7777777777", 2, "Deep Client", { status: "SUSPENDED", currencyCode: "EUR" })] },
+          ]),
+        "customers/2222222222/googleAds:searchStream": () => ok([{ results: [cc("2222222222", 0, "Direct Co")] }]),
+        "customers/5555555555/googleAds:searchStream": () => new Response(adsError("CUSTOMER_NOT_ENABLED"), { status: 403 }),
+      },
+      seen,
+    );
+    const options = await listGoogleAdsAccounts("tok", { fetch: fetchImpl, developerToken: "dev", fallbackLoginCustomerId: "9999999999" });
+    const values = options.map((o) => o.value).sort();
+    check(
+      "ads picker: clients under the manager are listed with the manager as login; managers, closed, cancelled and not-enabled accounts are not",
+      JSON.stringify(values) === JSON.stringify(["2222222222@2222222222", "3333333333@1111111111", "7777777777@1111111111"]),
+      options,
+    );
+    const clientA = options.find((o) => o.value === "3333333333@1111111111");
+    check("ads picker: label reads 'Client Name (123-456-7890) · via Manager'", clientA?.label === "Client A (333-333-3333) · via Agency MCC" && clientA?.detail === "USD", clientA);
+    const deep = options.find((o) => o.value.startsWith("7777777777"));
+    check("ads picker: a level-2 client under a sub-manager goes through the top manager, and a non-enabled status shows in the detail", deep?.label === "Deep Client (777-777-7777) · via Agency MCC" && deep?.detail === "EUR · suspended", deep);
+    const directCo = options.find((o) => o.value.startsWith("2222222222"));
+    check("ads picker: an account reachable directly AND via a manager appears once, as direct access", options.filter((o) => o.value.startsWith("2222222222")).length === 1 && directCo?.label === "Direct Co (222-222-2222)", options);
+    const queries = seen.filter((s) => s.url.includes("searchStream"));
+    check(
+      "ads picker: each customer_client query authenticates as that accessible account (no login header, no env fallback) with the developer token",
+      queries.length === 3 && queries.every((q) => !("login-customer-id" in q.headers) && q.headers["developer-token"] === "dev"),
+      queries,
+    );
+    const listCall = seen.find((s) => s.url.includes("listAccessibleCustomers"));
+    check("ads picker: listAccessibleCustomers doesn't send the env fallback manager", !!listCall && !("login-customer-id" in listCall.headers), listCall);
+
+    // The resource entry and override resolution built on it.
+    const ads = GOOGLE_RESOURCES.GOOGLE_ADS!;
+    check("ads resource: a bare legacy id matches the listed option for that customer", findResourceOption(ads, options, "333-333-3333")?.value === "3333333333@1111111111");
+    check("ads resource: a stale/forged manager resolves to the path the grant actually has", matchGoogleAdsOption(options, "3333333333@9999999999")?.value === "3333333333@1111111111");
+    check("ads resource: an unreachable customer matches nothing", findResourceOption(ads, options, "8888888888") === undefined);
+    const baseCreds = { access_token: "t", refresh_token: "r", expires_at: 0, scope: "s" };
+    const applied = ads.apply({ ...baseCreds }, "3333333333@1111111111") as typeof baseCreds & { customer_id?: string; login_customer_id?: string };
+    check("ads resource: apply stores customer_id and login_customer_id", applied.customer_id === "3333333333" && applied.login_customer_id === "1111111111", applied);
+    check("ads resource: selected reads the composite back", ads.selected(applied as never) === "3333333333@1111111111");
+    const reapplied = ads.apply({ ...applied }, "2222222222") as typeof applied;
+    check("ads resource: applying a bare value drops a stale manager", reapplied.customer_id === "2222222222" && reapplied.login_customer_id === undefined, reapplied);
+    check("ads resource: a connection saved before manager support still reads back as the bare id", ads.selected({ ...baseCreds, customer_id: "2222222222" } as never) === "2222222222");
+    check("ads resource: a bare override of the saved customer keeps the saved manager", sameGoogleAdsChoice("3333333333", "3333333333@1111111111") === "3333333333@1111111111");
+    check("ads resource: an override adding an unverified manager isn't taken on trust", sameGoogleAdsChoice("3333333333@9999999999", "3333333333") === null);
+    check("ads resource: a different customer is a different choice", sameGoogleAdsChoice("2222222222", "3333333333@1111111111") === null);
+  }
+
+  // Nearer manager wins when a client is only reachable through managers.
+  {
+    const fetchImpl = makeAdsFetch(
+      {
+        "customers:listAccessibleCustomers": () => ok({ resourceNames: ["customers/1000000000", "customers/2000000000"] }),
+        "customers/1000000000/googleAds:searchStream": () => ok([{ results: [cc("1000000000", 0, "Top MCC", { manager: true }), cc("2000000000", 1, "Sub MCC", { manager: true }), cc("3000000000", 2, "Client")] }]),
+        "customers/2000000000/googleAds:searchStream": () => ok([{ results: [cc("2000000000", 0, "Sub MCC", { manager: true }), cc("3000000000", 1, "Client")] }]),
+      },
+      [],
+    );
+    const options = await listGoogleAdsAccounts("tok", { fetch: fetchImpl, developerToken: "dev" });
+    check("ads picker: the nearer manager wins the dedupe", options.length === 1 && options[0].value === "3000000000@2000000000" && options[0].label === "Client (300-000-0000) · via Sub MCC", options);
+  }
+
+  // A test-only developer token fails the whole listing with the plain message.
+  {
+    const fetchImpl = makeAdsFetch(
+      {
+        "customers:listAccessibleCustomers": () => ok({ resourceNames: ["customers/1111111111"] }),
+        "googleAds:searchStream": () => new Response(adsError("DEVELOPER_TOKEN_NOT_APPROVED", "authorizationError", "The developer token is only approved for use with test accounts."), { status: 401 }),
+      },
+      [],
+    );
+    let err: unknown = null;
+    try {
+      await listGoogleAdsAccounts("tok", { fetch: fetchImpl, developerToken: "dev" });
+    } catch (e) {
+      err = e;
+    }
+    check("ads picker: test-only developer token throws the mapped error", err instanceof GoogleAdsApiError && err.errorCode === "DEVELOPER_TOKEN_NOT_APPROVED", err);
+  }
+
+  // A timed-out account is offered bare rather than dropped.
+  {
+    const fetchImpl = makeAdsFetch(
+      {
+        "customers:listAccessibleCustomers": () => ok({ resourceNames: ["customers/1111111111"] }),
+        "googleAds:searchStream": () => new Promise<Response>(() => {}),
+      },
+      [],
+    );
+    // The injected fetch ignores the abort signal, so the race below is what a
+    // real hung socket looks like once the per-request timeout fires.
+    const hanging = (async (url: string, init?: RequestInit) =>
+      Promise.race([
+        fetchImpl(url, init),
+        new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+      ])) as unknown as typeof fetch;
+    const options = await listGoogleAdsAccounts("tok", { fetch: hanging, developerToken: "dev", timeoutMs: 20 });
+    check("ads picker: a timed-out account is still offered, bare", options.length === 1 && options[0].value === "1111111111@1111111111" && options[0].detail === "details unavailable", options);
+  }
+
+  // Handler calls: the selection's manager goes out, and known errors become AgentInputError.
+  {
+    const seen: Seen[] = [];
+    const good = makeAdsFetch({ "customers/3333333333/googleAds:searchStream": () => ok([{ results: [{ campaign: { name: "C" } }] }]) }, seen);
+    const chunks = await googleAdsSearchStream<{ results?: unknown[] }>("tok", { customerId: "3333333333", loginCustomerId: "1111111111" }, "SELECT campaign.name FROM campaign", { fetch: good, developerToken: "dev" });
+    check("ads search: returns chunks and sends the selection's manager as login-customer-id", chunks.length === 1 && seen[0]?.headers["login-customer-id"] === "1111111111", seen);
+
+    const deniedFetch = makeAdsFetch({ "googleAds:searchStream": () => new Response(`[${adsError("USER_PERMISSION_DENIED")}]`, { status: 403 }) }, []);
+    let err: unknown = null;
+    try {
+      await googleAdsSearchStream("tok", { customerId: "3333333333" }, "q", { fetch: deniedFetch, developerToken: "dev" });
+    } catch (e) {
+      err = e;
+    }
+    check("ads search: USER_PERMISSION_DENIED surfaces as an AgentInputError with the pick-via-manager hint", err instanceof AgentInputError && /manager/.test(err.hint), err);
+
+    const brokenFetch = makeAdsFetch({ "googleAds:searchStream": () => new Response("boom", { status: 502 }) }, []);
+    err = null;
+    try {
+      await googleAdsSearchStream("tok", { customerId: "3333333333" }, "q", { fetch: brokenFetch, developerToken: "dev" });
+    } catch (e) {
+      err = e;
+    }
+    check("ads search: an unrecognised failure stays a plain error for liveCallFailed to wrap", err instanceof GoogleAdsApiError && !(err instanceof AgentInputError) && /Google Ads API 502/.test((err as Error).message), err);
+  }
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

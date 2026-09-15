@@ -12,6 +12,7 @@ import {
   type GoogleCredentials,
 } from "@/lib/integrations/google";
 import { GOOGLE_RESOURCES } from "@/lib/integrations/google-resources";
+import { describeGoogleAdsError, GoogleAdsApiError } from "@/lib/integrations/google-ads";
 import { integrationAdmin } from "@/lib/integrations/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -68,7 +69,11 @@ export async function GET(req: NextRequest) {
     try {
       const options = await resource.list(creds.access_token);
       if (options.length === 0) {
-        return fail(`That Google account has no ${resource.noun} it can use. Connect with the account that owns it.`);
+        return fail(
+          provider === "GOOGLE_ADS"
+            ? "That Google login can't reach any active Google Ads client account. Manager (MCC) accounts are searched for the client accounts under them, but a manager with no active clients has nothing to report on. Connect with the Google login that has access to the Ads account or its manager."
+            : `That Google account has no ${resource.noun} it can use. Connect with the account that owns it.`,
+        );
       }
       // One option: nothing to choose. Several: the connect page asks.
       if (options.length === 1) {
@@ -77,6 +82,9 @@ export async function GET(req: NextRequest) {
       }
     } catch (err) {
       console.error(`[integrations/google] listing ${provider} resources failed:`, (err as Error).message);
+      // A recognised Google Ads refusal (test-only developer token, not an Ads
+      // user, API disabled) says exactly what to do — show that instead.
+      if (err instanceof GoogleAdsApiError && err.known) return fail(describeGoogleAdsError(err));
       return fail(`Connected to Google, but it refused to list your ${resource.noun}. Check that API is enabled in the Google Cloud project for this OAuth client.`);
     }
   }

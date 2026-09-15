@@ -43,6 +43,13 @@ export type GoogleCredentials = {
   property_id?: string;
   /** Google Ads only: the chosen customer, digits only — no dashes. */
   customer_id?: string;
+  /**
+   * Google Ads only: the account to authenticate as (`login-customer-id`) —
+   * the manager the customer was picked through, or customer_id itself for
+   * direct access. Absent on connections saved before manager support, which
+   * fall back to the server-wide GOOGLE_ADS_LOGIN_CUSTOMER_ID.
+   */
+  login_customer_id?: string;
   /** Google Business Profile only: the chosen account, digits only. */
   account_id?: string;
   /** Google Business Profile only: the chosen location, digits only — no `locations/` prefix. */
@@ -220,33 +227,10 @@ export function liveCallFailed(provider: string, detail: string): AgentInputErro
   );
 }
 
-/** Google Ads REST endpoints all live under this version path. Bump when it sunsets. */
-export const GOOGLE_ADS_API_VERSION = "v25";
-
 /**
- * Google Ads is the one Google API in this fleet that needs more than the
- * OAuth token: every call also needs an approved developer token
- * (https://ads.google.com/aw/apicenter), and a call made through a manager
- * account needs to say which manager is asking. Missing the developer token
- * is a server misconfiguration, not something reconnecting the integration
- * fixes — so it gets its own message.
+ * Google Ads needs more than the OAuth token — a developer token, and a
+ * `login-customer-id` per selected account when it's reached through a
+ * manager. That lives in ./google-ads (pure, testable); re-exported here so
+ * handlers keep one import.
  */
-export function googleAdsHeaders(accessToken: string): Record<string, string> {
-  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-  if (!developerToken) {
-    throw new Error(
-      "GOOGLE_ADS_DEVELOPER_TOKEN is not configured on this server — Google Ads needs an approved developer token before any account can be read. An administrator must set it (see https://ads.google.com/aw/apicenter).",
-    );
-  }
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    "developer-token": developerToken,
-    "Content-Type": "application/json",
-  };
-  // Only needed when the developer token's manager account differs from the
-  // customer being queried. Most single-account connections don't set this.
-  if (process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) {
-    headers["login-customer-id"] = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID.replace(/-/g, "");
-  }
-  return headers;
-}
+export { GOOGLE_ADS_API_VERSION, googleAdsHeaders } from "./google-ads";

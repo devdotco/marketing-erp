@@ -1,6 +1,7 @@
 import type { AgentHandler } from "./index";
 import { prisma } from "@/lib/prisma";
-import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { googleAdsSearchStream, parseGoogleAdsAccountValue } from "@/lib/integrations/google-ads";
 import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
@@ -346,34 +347,29 @@ export const anomalyWatchHandler: AgentHandler = async (run, updateStatus) => {
       // A submitted dropdown choice wins over the integration's saved
       // default — but it's still just a client string, so it's checked
       // against what this grant can actually reach first.
-      const customerId = await resolvePropertyOverride("GOOGLE_ADS", creds, adsCustomerOverride.replace(/-/g, ""));
-      if (!customerId) {
+      // The resolved value carries the manager (MCC) the account is reached
+      // through, when there is one — it becomes login-customer-id.
+      const selection = parseGoogleAdsAccountValue(
+        await resolvePropertyOverride("GOOGLE_ADS", creds, adsCustomerOverride.replace(/-/g, "")),
+      );
+      if (!selection) {
         throw new AgentInputError(
           "Google Ads is connected, but no account has been selected.",
           "Open Integrations → Google Ads and choose an account, or set a Google Ads Customer ID override on this agent.",
           "integration_not_configured",
         );
       }
+      const customerId = selection.customerId;
       adsCustomerResolved = customerId;
 
-      const adsRes = await fetch(
-        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${customerId}/googleAds:searchStream`,
-        {
-          method: "POST",
-          headers: googleAdsHeaders(creds.access_token),
-          body: JSON.stringify({
-            // Campaign-level (not customer-level) — the same resource
-            // google-ads.ts already queries successfully in this codebase —
-            // segmented by day and summed client-side below, since a multi-
-            // campaign account returns one row per campaign per day.
-            query:
-              "SELECT segments.date, metrics.cost_micros, metrics.clicks, metrics.impressions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
-          }),
-        },
+      // Campaign-level (not customer-level) — the same resource google-ads.ts
+      // already queries — segmented by day and summed client-side below,
+      // since a multi-campaign account returns one row per campaign per day.
+      const chunks = await googleAdsSearchStream<AdsStreamChunk>(
+        creds.access_token,
+        selection,
+        "SELECT segments.date, metrics.cost_micros, metrics.clicks, metrics.impressions FROM campaign WHERE segments.date DURING LAST_30_DAYS",
       );
-      if (!adsRes.ok) throw new Error(`Google Ads API ${adsRes.status}: ${(await adsRes.text()).slice(0, 300)}`);
-
-      const chunks = (await adsRes.json()) as AdsStreamChunk[];
       const byDate = new Map<string, number>();
       for (const row of chunks.flatMap((c) => c.results ?? [])) {
         const date = row.segments.date;

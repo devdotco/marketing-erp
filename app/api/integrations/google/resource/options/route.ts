@@ -3,6 +3,7 @@ import { IntegrationProvider } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { googleCredentials, googleScopes } from "@/lib/integrations/google";
 import { GOOGLE_RESOURCES, type GoogleResource } from "@/lib/integrations/google-resources";
+import { describeGoogleAdsError } from "@/lib/integrations/google-ads";
 import { runAccess } from "@/lib/integrations/route-auth";
 import { CONNECT_METHODS } from "@/lib/integrations/catalog";
 
@@ -67,7 +68,7 @@ export async function GET(req: NextRequest) {
     // than being blocked on a listing failure.
     return NextResponse.json({
       connected: true,
-      error: err instanceof Error ? err.message : String(err),
+      error: describeGoogleAdsError(err),
       providerLabel,
     });
   }
