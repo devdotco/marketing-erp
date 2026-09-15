@@ -1,7 +1,8 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { formatCustomerId, googleAdsSearchStream, parseGoogleAdsAccountValue } from "@/lib/integrations/google-ads";
 import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
@@ -160,8 +161,12 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
       // A submitted dropdown choice wins over the integration's saved
       // default — but it's still just a client string, so it's checked
       // against what this grant can actually reach first.
-      const adsCustomerId = await resolvePropertyOverride("GOOGLE_ADS", adsCreds, adsAccount.replace(/-/g, ""));
-      if (!adsCustomerId) {
+      // The resolved value carries the manager (MCC) the account is reached
+      // through, when there is one — it becomes login-customer-id.
+      const adsSelection = parseGoogleAdsAccountValue(
+        await resolvePropertyOverride("GOOGLE_ADS", adsCreds, adsAccount.replace(/-/g, "")),
+      );
+      if (!adsSelection) {
         throw new AgentInputError(
           "Google Ads is connected, but no account has been selected.",
           "Open Integrations → Google Ads and choose an account.",
@@ -169,22 +174,11 @@ export const weeklyReportHandler: AgentHandler = async (run, updateStatus) => {
         );
       }
 
-      const adsRes = await fetch(
-        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${adsCustomerId}/googleAds:searchStream`,
-        {
-          method: "POST",
-          headers: googleAdsHeaders(adsCreds.access_token),
-          body: JSON.stringify({
-            query:
-              `SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${fmtDate(periodStart)}' AND '${fmtDate(periodEnd)}'`,
-          }),
-        }
+      const chunks = await googleAdsSearchStream<AdsStreamChunk>(
+        adsCreds.access_token,
+        adsSelection,
+        `SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${fmtDate(periodStart)}' AND '${fmtDate(periodEnd)}'`,
       );
-      if (!adsRes.ok) {
-        throw new Error(`Google Ads API ${adsRes.status}: ${(await adsRes.text()).slice(0, 300)}`);
-      }
-
-      const chunks = (await adsRes.json()) as AdsStreamChunk[];
       const campaigns: Array<{
         name: string;
         costUsd: number;
@@ -234,7 +228,7 @@ Business Context:
 Report Configuration:
 - GA4 Property: ${ga4Property}
 - GSC Property: ${gscProperty}
-- Google Ads Account: ${adsAccount}
+- Google Ads Account: ${formatCustomerId(parseGoogleAdsAccountValue(adsAccount)?.customerId ?? adsAccount)}
 - Report Period: ${reportPeriod}
 - Comparison Period for every delta: ${comparisonPeriod}${comparisonPeriod === "Both" ? " (report deltas against the previous period, and add the year-over-year change in each narrative)" : ""}
 - Metric Groups: ${includedMetrics}${includeSpend ? "" : " — paid media is excluded: set keyMetrics.paid to null and paidCampaignSummary to []"}

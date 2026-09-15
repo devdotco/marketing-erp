@@ -8,7 +8,8 @@
  * Google provider means adding an entry here, not a new route or picker.
  */
 import type { GoogleCredentials } from "./google";
-import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, listGscSites } from "./google";
+import { listGscSites } from "./google";
+import { googleAdsAccountValue, listGoogleAdsAccounts, matchGoogleAdsOption, parseGoogleAdsAccountValue, sameGoogleAdsChoice } from "./google-ads";
 import { AgentInputError } from "@/lib/ai/errors";
 
 export type ResourceOption = { value: string; label: string; detail?: string };
@@ -21,7 +22,20 @@ export type GoogleResource = {
   selected(creds: GoogleCredentials & Record<string, unknown>): string | null;
   /** Write the choice into the credential shape the handlers decrypt. */
   apply(creds: GoogleCredentials & Record<string, unknown>, value: string): Record<string, unknown>;
+  /**
+   * Which listed option a submitted value means. Default: exact match. Only
+   * needed where one choice can be spelled more than one way (Google Ads: a
+   * bare legacy customer id vs `customer@manager`).
+   */
+  match?(options: ResourceOption[], value: string): ResourceOption | undefined;
+  /** An override that means the saved choice → the value to use, with no listing needed; otherwise null. Default: string equality. */
+  sameChoice?(override: string, saved: string): string | null;
 };
+
+/** The option `value` refers to, by the resource's own matching rule. */
+export function findResourceOption(resource: GoogleResource, options: ResourceOption[], value: string): ResourceOption | undefined {
+  return resource.match ? resource.match(options, value) : options.find((o) => o.value === value);
+}
 
 export const GOOGLE_RESOURCES: Partial<Record<string, GoogleResource>> = {
   GOOGLE_SEARCH_CONSOLE: {
@@ -124,25 +138,28 @@ export const GOOGLE_RESOURCES: Partial<Record<string, GoogleResource>> = {
 
   GOOGLE_ADS: {
     noun: "Ads account",
-    async list(accessToken) {
-      // listAccessibleCustomers only returns resource names — no descriptive
-      // name, currency, or status. A per-customer GAQL lookup for
-      // customer.descriptive_name would turn this into N extra calls; the
-      // picker falls back to the formatted customer id as the label instead.
-      const res = await fetch(
-        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers:listAccessibleCustomers`,
-        { headers: googleAdsHeaders(accessToken) },
-      );
-      if (!res.ok) throw new Error(`Google Ads API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-      const data = (await res.json()) as { resourceNames?: string[] };
-      return (data.resourceNames ?? []).map((rn) => {
-        const id = rn.replace(/^customers\//, "");
-        const formatted = id.length === 10 ? `${id.slice(0, 3)}-${id.slice(3, 6)}-${id.slice(6)}` : id;
-        return { value: id, label: formatted };
+    // Accounts the login is directly a user on, plus every client account
+    // under the manager (MCC) accounts it can reach — each option's value
+    // carries the manager to send as login-customer-id (see ./google-ads).
+    list: (accessToken) => listGoogleAdsAccounts(accessToken),
+    selected: (creds) => {
+      if (typeof creds.customer_id !== "string" || !creds.customer_id) return null;
+      return googleAdsAccountValue({
+        customerId: creds.customer_id,
+        loginCustomerId: typeof creds.login_customer_id === "string" && creds.login_customer_id ? creds.login_customer_id : undefined,
       });
     },
-    selected: (creds) => (typeof creds.customer_id === "string" ? creds.customer_id : null),
-    apply: (creds, value) => ({ ...creds, customer_id: value }),
+    apply: (creds, value) => {
+      const sel = parseGoogleAdsAccountValue(value);
+      const { login_customer_id: _stale, ...rest } = creds;
+      void _stale;
+      if (!sel) return rest;
+      return sel.loginCustomerId
+        ? { ...rest, customer_id: sel.customerId, login_customer_id: sel.loginCustomerId }
+        : { ...rest, customer_id: sel.customerId };
+    },
+    match: (options, value) => matchGoogleAdsOption(options, value),
+    sameChoice: (override, saved) => sameGoogleAdsChoice(override, saved),
   },
 };
 
@@ -168,14 +185,19 @@ export async function resolvePropertyOverride(
   const saved = resource ? resource.selected(creds) ?? "" : "";
   if (!override || override === saved) return saved || override;
   if (!resource) return override; // no picker defined for this provider — nothing to verify against
+  const same = saved && resource.sameChoice ? resource.sameChoice(override, saved) : null;
+  if (same) return same;
 
   const options = await resource.list(creds.access_token);
-  if (!options.some((o) => o.value === override)) {
+  const chosen = findResourceOption(resource, options, override);
+  if (!chosen) {
     throw new AgentInputError(
       `"${override}" isn't one of the ${resource.noun} values the connected Google account can reach.`,
       "Pick a value from the dropdown, or reconnect the integration if it should be listed there.",
       "integration_resource_unreachable",
     );
   }
-  return override;
+  // The listed spelling, not the submitted one: for Google Ads that's the
+  // value carrying the manager the account is actually reachable through.
+  return chosen.value;
 }

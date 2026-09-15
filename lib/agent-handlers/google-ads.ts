@@ -1,7 +1,8 @@
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { GOOGLE_ADS_API_VERSION, googleAdsHeaders, googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
+import { googleAdsSearchStream, parseGoogleAdsAccountValue } from "@/lib/integrations/google-ads";
 import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
@@ -85,8 +86,10 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
       // A submitted dropdown choice wins over the integration's saved
       // default — but it's still just a client string, so it's checked
       // against what this grant can actually reach first.
-      const customerId = await resolvePropertyOverride("GOOGLE_ADS", creds, accountId);
-      if (!customerId) {
+      // The resolved value carries the manager (MCC) the account is reached
+      // through, when there is one — it becomes login-customer-id.
+      const selection = parseGoogleAdsAccountValue(await resolvePropertyOverride("GOOGLE_ADS", creds, accountId));
+      if (!selection) {
         throw new AgentInputError(
           "Google Ads is connected, but no account has been selected.",
           "Open Integrations → Google Ads and choose an account.",
@@ -94,27 +97,17 @@ export const googleAdsHandler: AgentHandler = async (run, updateStatus) => {
         );
       }
 
-      const adsRes = await fetch(
-        `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${customerId}/googleAds:searchStream`,
-        {
-          method: "POST",
-          headers: googleAdsHeaders(creds.access_token),
-          body: JSON.stringify({
-            query: [
-              "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE",
-              gaqlDateClause(auditWindowDays),
-              CHANNEL_TYPE_FILTER[campaignFilter]
-                ? `AND campaign.advertising_channel_type = '${CHANNEL_TYPE_FILTER[campaignFilter]}'`
-                : "",
-            ].filter(Boolean).join(" "),
-          }),
-        }
+      const chunks = await googleAdsSearchStream<AdsStreamChunk>(
+        creds.access_token,
+        selection,
+        [
+          "SELECT campaign.name, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM campaign WHERE",
+          gaqlDateClause(auditWindowDays),
+          CHANNEL_TYPE_FILTER[campaignFilter]
+            ? `AND campaign.advertising_channel_type = '${CHANNEL_TYPE_FILTER[campaignFilter]}'`
+            : "",
+        ].filter(Boolean).join(" "),
       );
-      if (!adsRes.ok) {
-        throw new Error(`Google Ads API ${adsRes.status}: ${(await adsRes.text()).slice(0, 300)}`);
-      }
-
-      const chunks = (await adsRes.json()) as AdsStreamChunk[];
 
       const campaigns: Array<{
         name: string;

@@ -221,24 +221,20 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
   GOOGLE_ADS: {
     provider: "GOOGLE_ADS",
     summary:
-      "Connects a Google Ads account so paid media agents can pull campaign performance for reporting. Standard or even Read-only account access is enough — nothing here requires the ability to spend budget.",
+      "Connects a Google Ads account so paid media agents can pull campaign performance for reporting. Works whether you're a user on the Ads account itself or on a manager (MCC) account above it. Standard or even Read-only access is enough — nothing here requires the ability to spend budget.",
     timeMinutes: 5,
     youWillNeed: [
-      "A Google account with at least Read-only access on the Ads account (Standard access also works)",
-      "If this workspace's account is on a manager (MCC) account, know which customer ID under it you need",
+      "The Google login you use at ads.google.com, with at least Read-only access on the Ads account — or on the manager (MCC) account that manages it",
+      "If you run several accounts under a manager, know which client account this workspace's campaigns run under",
     ],
     steps: [
       {
         title: "Check your access level",
-        body: "Sign in to ads.google.com, click the tools icon, and open **Access and security** under Setup. Confirm your email is listed with Standard or Read-only access. Email-only access (no login) isn't enough — you need account-level access tied to a Google account.",
-      },
-      {
-        title: "Find your customer ID",
-        body: "The customer ID is the number shown near the top of the Ads interface, formatted like 123-456-7890. If this account is managed through an agency or in-house manager (MCC) account, note that a manager account itself is not the same as the individual customer account agents need — you'll pick the specific customer account in the next steps.",
+        body: "Sign in to ads.google.com, click the tools icon, and open **Access and security** under Setup. Confirm your email is listed with Standard or Read-only access — on the client account itself, or on the manager (MCC) account it sits under. Email-only access (no login) isn't enough — you need account-level access tied to a Google login.",
       },
       {
         title: "Click Continue with Google",
-        body: "On this app's Google Ads connect page, click **Continue with Google** and sign in with the account that has Ads access.",
+        body: "On this app's Google Ads connect page, click **Continue with Google** and sign in with that Google login. Agencies: sign in with the login that has access to your manager account — you don't need to be added to each client account separately.",
       },
       {
         title: "Approve the requested access",
@@ -246,7 +242,7 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       },
       {
         title: "Choose the account",
-        body: "The picker lists every Ads customer ID your account can see, formatted like 123-456-7890. If you manage several accounts under one manager account, pick the specific customer account this workspace's campaigns run under — not the manager account itself.",
+        body: "The picker lists every active Ads account your login can reach: accounts you're a user on directly, plus the client accounts under any manager account you can access, labelled like **Client Name (123-456-7890) · via Agency MCC**. Manager accounts themselves aren't listed — they have no campaigns of their own to report on — and cancelled or closed accounts are hidden. If there's only one account, it's chosen for you.",
       },
       {
         title: "Save",
@@ -254,7 +250,7 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       },
     ],
     verify: [
-      "Integrations page shows Google Ads as Connected with the customer ID under \"Using\"",
+      "Integrations page shows Google Ads as Connected, with the account name and customer ID under \"Using\"",
       "Run a paid media agent that reports on campaign performance — real numbers back confirm the connection",
     ],
     troubleshooting: [
@@ -263,16 +259,28 @@ export const OAUTH_CMS_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
         fix: "This means the server-side developer token isn't configured yet, not a problem with your Google account. Contact support — reconnecting won't fix it.",
       },
       {
+        symptom: "\"developer token only has Test access\" (Google: DEVELOPER_TOKEN_NOT_APPROVED)",
+        fix: "This app's Google Ads developer token hasn't been approved for real accounts yet. It's a server-side prerequisite, not your account — contact support. Reconnecting won't fix it.",
+      },
+      {
         symptom: "The account I need isn't in the picker",
-        fix: "You're likely signed in with a Google account that has no access to it, or it sits under a different manager account than the one you expected. Check Access and security in Ads for your own account access.",
+        fix: "You're likely signed in with a Google login that has no access to it or to its manager, or the account is cancelled or closed. Check Access and security in Google Ads for the client account and its manager, then reconnect with the login that's listed there.",
+      },
+      {
+        symptom: "\"doesn't have permission to read Google Ads account\" (Google: USER_PERMISSION_DENIED)",
+        fix: "The account is probably under a manager account. Open Integrations → Google Ads and choose it again from the picker — client accounts are listed \"via\" their manager so requests go through it. If it isn't listed, reconnect with a login that has access to it or its manager.",
+      },
+      {
+        symptom: "\"isn't a user on any Google Ads account\" (Google: NOT_ADS_USER)",
+        fix: "The Google login you connected isn't on any Ads account. Reconnect and sign in with the login you use at ads.google.com.",
       },
       {
         symptom: "\"access_denied\" on Google's consent screen",
         fix: "Reconnect and leave every requested permission checked.",
       },
       {
-        symptom: "Connected, but reports fail or come back empty",
-        fix: "Confirm the account picked isn't a manager (MCC) account with no campaigns of its own — pick the underlying customer account instead. If that's already right, reconnect from the Integrations page.",
+        symptom: "Connected, but reports come back empty",
+        fix: "Confirm the chosen account actually ran campaigns in the report window. If you manage several accounts, check you picked the client account those campaigns run under.",
       },
     ],
     privacy:
