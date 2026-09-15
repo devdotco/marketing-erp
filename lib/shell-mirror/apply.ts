@@ -12,9 +12,13 @@ import {
   type MirrorEvent,
   type MirrorMember,
   type MirrorOrg,
+  type MirrorRetiredOrg,
   type MirrorSnapshot,
   type MirrorUser,
+  PLATFORM_SUPER_ADMIN_REFUSAL,
+  platformAdminMayJoin,
 } from "./protocol";
+import { isPlatformSuperAdmin } from "@/lib/platform-admin";
 
 /**
  * Applying shell mirror state to Marketing's tables — the one implementation
@@ -246,6 +250,13 @@ export async function applyMemberUpsert(org: MirrorOrg, member: MirrorMember, ve
     ctx.report.push({ kind: "link.refused", orgId: org.id, email, detail: "shell email unverified — skipped" });
     return;
   }
+  // A platform super admin is never given a membership in an OUTSIDE org —
+  // checked before the workspace, so it is not created for them either.
+  // (Internal orgs are decided without the lookup: platformAdminMayJoin allows them.)
+  if (org.internal !== true && !platformAdminMayJoin(org, await localPlatformSuperAdmin(member.user))) {
+    ctx.report.push({ kind: "link.refused", orgId: org.id, email, detail: PLATFORM_SUPER_ADMIN_REFUSAL });
+    return;
+  }
   const ws = await ensureWorkspace(org, ctx, version);
   if (!ws) return;
   const key = memberKey(org.id, member.user.id);
@@ -295,13 +306,36 @@ export async function applyMemberUpsert(org: MirrorOrg, member: MirrorMember, ve
 
 class LinkRefused extends Error {}
 
+/**
+ * Whether the local account this shell user would reach — by shell id, else by
+ * email — is a Marketing platform super admin. Either match counts: refusing is
+ * the safe answer, and a verified shell address IS that person.
+ */
+async function localPlatformSuperAdmin(shellUser: MirrorUser): Promise<boolean> {
+  const [byShellId, byEmail] = await Promise.all([
+    prisma.user.findUnique({ where: { shellUserId: shellUser.id }, select: { id: true } }),
+    prisma.user.findUnique({ where: { email: shellUser.email.trim().toLowerCase() }, select: { id: true } }),
+  ]);
+  for (const u of [byShellId, byEmail]) {
+    if (u && (await isPlatformSuperAdmin(u.id))) return true;
+  }
+  return false;
+}
+
 function reportMembership(ctx: MirrorContext, orgId: string, email: string, before: MemberRole | null, after: MemberRole, source?: string) {
   if (!before) ctx.report.push({ kind: "member.added", orgId, email, detail: after });
   else if (before !== after) ctx.report.push({ kind: "member.role_changed", orgId, email, detail: `${before} → ${after}` });
   else ctx.report.push({ kind: "member.unchanged", orgId, email, detail: source && source !== "mirror" ? `${after} (${source} role kept)` : after });
 }
 
-export async function applyMemberRemoval(org: MirrorOrg, shellUserId: string, version: number, ctx: MirrorContext): Promise<void> {
+export async function applyMemberRemoval(
+  org: MirrorOrg,
+  shellUserId: string,
+  version: number,
+  ctx: MirrorContext,
+  /** Appended to the report's `member.removed` entry (the retired-org reconcile says why). */
+  why?: string,
+): Promise<void> {
   const [ws, user] = await Promise.all([
     prisma.workspace.findUnique({ where: { shellOrgId: org.id }, select: { id: true } }),
     prisma.user.findUnique({ where: { shellUserId }, select: { id: true, email: true, shellUserId: true } }),
@@ -314,7 +348,7 @@ export async function applyMemberRemoval(org: MirrorOrg, shellUserId: string, ve
 
   if (ctx.dryRun) {
     if (!(await wouldClaim(key, version))) return void ctx.report.push({ kind: "stale", orgId: org.id, email: user?.email });
-    if (removable) ctx.report.push({ kind: "member.removed", orgId: org.id, email: user!.email });
+    if (removable) ctx.report.push({ kind: "member.removed", orgId: org.id, email: user!.email, ...(why ? { detail: why } : {}) });
     else if (membership) ctx.report.push({ kind: "unmanaged", orgId: org.id, email: user?.email, detail: `${membership.role} (${membership.source}): kept` });
     return;
   }
@@ -329,7 +363,7 @@ export async function applyMemberRemoval(org: MirrorOrg, shellUserId: string, ve
       return;
     }
     const res = await tx.workspaceMember.deleteMany({ where: { id: membership!.id, source: "mirror", NOT: { role: "SUPER_ADMIN" } } });
-    if (res.count) ctx.report.push({ kind: "member.removed", orgId: org.id, email: user!.email });
+    if (res.count) ctx.report.push({ kind: "member.removed", orgId: org.id, email: user!.email, ...(why ? { detail: why } : {}) });
   });
 }
 
@@ -368,12 +402,66 @@ export async function applyEvent(event: MirrorEvent, ctx: MirrorContext): Promis
   }
 }
 
+/** The report detail on a removal made because the org is no longer mirrored. */
+export const RETIRED_REMOVAL_DETAIL = "org no longer eligible for the mirror: remove-only";
+
+/**
+ * A mirrored org that is not eligible now: REMOVE-ONLY.
+ *
+ * Deletes mirror-created memberships, in the org's EXISTING workspace, of
+ * anyone not in `memberUserIds` — the same rule, through the same
+ * `applyMemberRemoval` (source = 'mirror' only, never a SUPER_ADMIN row,
+ * version-gated with a tombstone) as a full snapshot. It never creates, adopts
+ * or renames a workspace and never adds or re-roles a member: an ineligible org
+ * gets nothing new. Heals a missed removal of an org's last eligible member,
+ * which is exactly the write that made it ineligible.
+ */
+export async function applyRetiredOrg(
+  retired: MirrorRetiredOrg,
+  workspaceId: string,
+  version: number,
+  ctx: MirrorContext,
+): Promise<void> {
+  // Only `id` is ever read from the org on the removal path.
+  const org: MirrorOrg = { id: retired.orgId, name: "", slug: "" };
+  const rows = await prisma.workspaceMember.findMany({
+    where: { workspaceId },
+    select: { role: true, source: true, user: { select: { shellUserId: true, email: true } } },
+  });
+  const { remove } = snapshotRemovals(
+    rows.map((r) => ({ role: r.role, source: r.source, email: r.user.email, shellUserId: r.user.shellUserId })),
+    new Set(retired.memberUserIds),
+  );
+  for (const r of remove) await applyMemberRemoval(org, r.shellUserId!, version, ctx, RETIRED_REMOVAL_DETAIL);
+}
+
 export async function applySnapshot(snapshot: MirrorSnapshot, ctx: MirrorContext): Promise<void> {
   for (const { org, members } of snapshot.orgs) {
     try {
       await applyOrgSnapshot(org, members, snapshot.version, ctx);
     } catch (err) {
       ctx.report.push({ kind: "conflict", orgId: org.id, detail: `failed: ${(err as Error).message}` });
+    }
+  }
+
+  // Retired orgs: one lookup for all of them; only those with an existing
+  // workspace go further. An id also present in `orgs` is ignored — the shell
+  // never sends both, and the full snapshot is the stronger statement.
+  const live = new Set(snapshot.orgs.map((o) => o.org.id));
+  const retired = (snapshot.retired ?? []).filter((r) => !live.has(r.orgId));
+  if (retired.length === 0) return;
+  const workspaces = await prisma.workspace.findMany({
+    where: { shellOrgId: { in: retired.map((r) => r.orgId) } },
+    select: { id: true, shellOrgId: true },
+  });
+  const workspaceFor = new Map(workspaces.map((w) => [w.shellOrgId!, w.id]));
+  for (const r of retired) {
+    const workspaceId = workspaceFor.get(r.orgId);
+    if (!workspaceId) continue;
+    try {
+      await applyRetiredOrg(r, workspaceId, snapshot.version, ctx);
+    } catch (err) {
+      ctx.report.push({ kind: "conflict", orgId: r.orgId, detail: `failed (retired): ${(err as Error).message}` });
     }
   }
 }

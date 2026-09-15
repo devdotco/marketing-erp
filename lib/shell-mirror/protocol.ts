@@ -33,7 +33,18 @@ export type MirrorEvent =
   | { type: "member.removed"; version: number; org: MirrorOrg; userId: string }
   | { type: "org.snapshot"; version: number; org: MirrorOrg; members: MirrorMember[] };
 
-export type MirrorSnapshot = { version: number; orgs: Array<{ org: MirrorOrg; members: MirrorMember[] }> };
+/**
+ * A mirrored shell org that is NOT eligible now (a dormant customer, or one whose
+ * last eligible member was just removed). REMOVE-ONLY: Marketing looks up an
+ * existing workspace for `orgId` and deletes mirror-created, non-SUPER_ADMIN
+ * memberships of anyone not in `memberUserIds`; it never creates, adopts,
+ * renames or re-roles anything for it. This heals a missed `member.removed` for
+ * an org's last member, the write that made it drop out of `orgs`. Ids only.
+ */
+export type MirrorRetiredOrg = { orgId: string; memberUserIds: string[] };
+
+/** `retired` is absent from a shell older than it; parsed as an empty list. */
+export type MirrorSnapshot = { version: number; orgs: Array<{ org: MirrorOrg; members: MirrorMember[] }>; retired: MirrorRetiredOrg[] };
 
 export class MirrorPayloadError extends Error {}
 
@@ -117,7 +128,41 @@ export function parseSnapshot(v: unknown): MirrorSnapshot {
       if (!Array.isArray(row.members)) throw new MirrorPayloadError("snap.orgs[].members must be an array");
       return { org: parseOrg(row.org), members: row.members.map(parseMember) };
     }),
+    retired: parseRetired(s.retired),
   };
+}
+
+function parseRetired(v: unknown): MirrorRetiredOrg[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new MirrorPayloadError("snap.retired must be an array");
+  return v.map((r) => {
+    const row = (r ?? {}) as Record<string, unknown>;
+    if (!Array.isArray(row.memberUserIds)) throw new MirrorPayloadError("snap.retired[].memberUserIds must be an array");
+    return { orgId: orgIdOf(row.orgId), memberUserIds: row.memberUserIds.map((id) => str(id, "snap.retired[].memberUserIds[]")) };
+  });
+}
+
+/** The report's wording when a platform super admin is kept out of an outside org. */
+export const PLATFORM_SUPER_ADMIN_REFUSAL = "refused: platform super admin in an outside organization";
+
+/**
+ * Whether a Marketing PLATFORM super admin (any SUPER_ADMIN membership — see
+ * lib/platform-admin.ts) may be given a membership in this org's workspace by
+ * the shell: only when the shell states the org is internal (owner decision
+ * 2026-09-15). A super admin already sees every workspace through /superadmin,
+ * so no shell membership in a customer's org may become a reason to write one;
+ * that row would put a platform operator inside a customer workspace as an
+ * ordinary member. `internal` is `MirrorOrg.internal` for the mirror and the
+ * hand-off token's `org_internal` claim for sign-in; absent is OUTSIDE, so a
+ * shell older than the claim fails closed.
+ *
+ * In an internal org nothing changes, source included: the Marketing mirror
+ * manages a super admin's non-SUPER_ADMIN memberships in internal orgs like
+ * anyone else's (and never touches a SUPER_ADMIN row), so a sign-in-created row
+ * there stays `mirror` — exactly what the reconcile would create.
+ */
+export function platformAdminMayJoin(org: { internal?: boolean | null }, isPlatformSuperAdmin: boolean): boolean {
+  return !isPlatformSuperAdmin || org.internal === true;
 }
 
 /**

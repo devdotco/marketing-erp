@@ -2,7 +2,8 @@ import { prisma } from "@/lib/prisma";
 import type { ShellClaims } from "@/lib/shell-token";
 import { ShellTokenInvalid } from "@/lib/shell-token";
 import { ensureWorkspace, mirrorContext, resolveShellUser } from "@/lib/shell-mirror/apply";
-import { memberKey, mirroredMarketingRole, signInMayRestore } from "@/lib/shell-mirror/protocol";
+import { memberKey, mirroredMarketingRole, platformAdminMayJoin, signInMayRestore } from "@/lib/shell-mirror/protocol";
+import { isPlatformSuperAdmin } from "@/lib/platform-admin";
 
 /**
  * Turn a verified shell identity into a local user, workspace and membership.
@@ -23,6 +24,10 @@ import { memberKey, mirroredMarketingRole, signInMayRestore } from "@/lib/shell-
  *   - A membership the mirror REMOVED is not recreated by a token minted before
  *     that removal (`signInMayRestore` against the version tombstone). Before
  *     this, a removed member who still held a token was put straight back.
+ *   - A PLATFORM super admin acting as an org the shell has not marked internal
+ *     (`org_internal`) is signed in, but nothing is written for that org — no
+ *     workspace, no membership, no re-role (`platformAdminMayJoin`). Their
+ *     reach into customer workspaces is /superadmin, not a membership row.
  *
  * Returns the workspace the token's org maps to, so the caller can make it the
  * active one: switching org in the shell and opening Marketing should land in
@@ -45,6 +50,17 @@ export async function provisionFromShell(claims: ShellClaims) {
   // still signs the person in — being unable to name a workspace is not a
   // reason to refuse a valid identity.
   if (!claims.org) return { user, workspaceId: null as string | null };
+
+  if (!platformAdminMayJoin({ internal: claims.orgInternal }, await isPlatformSuperAdmin(user.id))) {
+    // Read-only from here. Land in that workspace only if they are ALREADY a
+    // member of it (a row that predates this rule); otherwise land nowhere.
+    const ws = await prisma.workspace.findUnique({ where: { shellOrgId: claims.org }, select: { id: true } });
+    const member = ws
+      ? await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: ws.id, userId: user.id } }, select: { id: true } })
+      : null;
+    console.warn(`[auth] shell hand-off for ${claims.email}: platform super admin acting as outside org ${claims.org} — signed in, no membership written`);
+    return { user, workspaceId: member ? ws!.id : null };
+  }
 
   // The token carries no adoption anchor, so a brand-new org gets a new
   // workspace here. That is why the backfill runs the reconcile (which DOES

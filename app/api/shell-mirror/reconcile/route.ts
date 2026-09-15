@@ -74,5 +74,8 @@ export async function POST(req: Request) {
   // Every removal and role change, listed on its own so a dry run cannot bury one.
   const removals = ctx.report.filter((r) => r.kind === "member.removed");
   const roleChanges = ctx.report.filter((r) => r.kind === "member.role_changed");
-  return NextResponse.json({ dryRun, orgs: verified.snapshot.orgs.length, counts, removals, roleChanges, report });
+  // `retired`: orgs the shell still mirrors but that are not eligible now. They
+  // are remove-only; any removal they cause is listed in `removals` with the
+  // detail RETIRED_REMOVAL_DETAIL.
+  return NextResponse.json({ dryRun, orgs: verified.snapshot.orgs.length, retired: verified.snapshot.retired.length, counts, removals, roleChanges, report });
 }

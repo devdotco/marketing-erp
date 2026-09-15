@@ -42,6 +42,12 @@ export type ShellClaims = {
   emailVerified?: boolean;
   /** When the shell minted the token (seconds) — compared against a mirror removal tombstone. */
   issuedAt?: number;
+  /**
+   * The shell's `org_internal` claim: true only when the shell states the org is
+   * one of ours. Anything else — a shell older than the claim included — is an
+   * OUTSIDE org (see platformAdminMayJoin).
+   */
+  orgInternal?: boolean;
 };
 
 export class ShellTokenInvalid extends Error {}
@@ -70,5 +76,6 @@ export async function verifyShellToken(token: string): Promise<ShellClaims> {
     role: typeof payload.role === "string" ? payload.role : null,
     emailVerified: typeof payload.email_verified === "boolean" ? payload.email_verified : undefined,
     issuedAt: typeof payload.iat === "number" ? payload.iat : undefined,
+    orgInternal: payload.org_internal === true,
   };
 }

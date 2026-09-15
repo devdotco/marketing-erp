@@ -10,7 +10,7 @@
     "lint": "eslint",
     "check:models": "node scripts/check-models.mjs",
     "postinstall": "prisma skills sync || exit 0",
-    "test:mirror": "esbuild test/mirror.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/mirror.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/mirror.test.mjs",
+    "test:mirror": "esbuild test/mirror.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/mirror.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/mirror.test.mjs && esbuild test/mirror-apply.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/mirror-apply.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/mirror-apply.test.mjs",
     "test": "esbuild test/content.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/content.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/content.test.mjs"
   },
   "dependencies": {
