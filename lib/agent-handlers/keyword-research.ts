@@ -1,10 +1,51 @@
 import type { AgentHandler } from "./index";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { textFrom } from "@/lib/ai/extract";
+import { assertNotTruncated, jsonFrom, textFrom } from "@/lib/ai/extract";
 import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { googleCredentials } from "@/lib/integrations/google";
+import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushPhraseThis, resolveSeoLiveData } from "./seo-data-providers";
+
+type GscQueryRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
+
+/**
+ * The site's own queries from Search Console, last 90 days. Free, real, and
+ * the best source of "already almost ranking" keywords — so a workspace with
+ * GSC but no Ahrefs/Semrush still gets research anchored in actual demand.
+ * Returns null when GSC isn't connected or has no property chosen.
+ */
+async function fetchGscQueries(workspaceId: string): Promise<{ property: string; rows: GscQueryRow[] } | null> {
+  const integration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId, provider: "GOOGLE_SEARCH_CONSOLE" } },
+  });
+  if (!integration) return null;
+  const creds = await googleCredentials(integration);
+  const property = await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, "");
+  if (!property) return null;
+
+  const end = new Date();
+  end.setDate(end.getDate() - 2); // GSC data lags ~2 days
+  const start = new Date(end);
+  start.setDate(end.getDate() - 89);
+  const res = await fetch(
+    `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(property)}/searchAnalytics/query`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${creds.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startDate: start.toISOString().slice(0, 10),
+        endDate: end.toISOString().slice(0, 10),
+        dimensions: ["query"],
+        rowLimit: 1000,
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = (await res.json()) as { rows?: GscQueryRow[] };
+  return { property, rows: data.rows ?? [] };
+}
 
 export const keywordResearchHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -59,8 +100,33 @@ export const keywordResearchHandler: AgentHandler = async (run, updateStatus) =>
         : undefined,
     },
   );
-  const source = liveResult.source;
+  let source: string = liveResult.source;
   if (liveResult.source === "live") liveDataSection = liveResult.section;
+
+  // Search Console is additive: it never replaces a paid provider, and a GSC
+  // failure is reported in the output rather than failing research that can
+  // still be done without it.
+  let gscNote: string | undefined;
+  try {
+    const gsc = await fetchGscQueries(run.agentConfig.workspaceId);
+    if (gsc && gsc.rows.length > 0) {
+      const seedTerms = seedKeywords.toLowerCase().split(/[\s,]+/).filter((t) => t.length > 2);
+      const byImpressions = [...gsc.rows].sort((a, b) => b.impressions - a.impressions);
+      const related = seedTerms.length
+        ? byImpressions.filter((r) => seedTerms.some((t) => r.keys[0].toLowerCase().includes(t)))
+        : [];
+      const picked = [...new Map([...related.slice(0, 150), ...byImpressions.slice(0, 100)].map((r) => [r.keys[0], r])).values()];
+      const lines = picked
+        .map((r) => `${r.keys[0]}\t${r.impressions}\t${r.clicks}\t${r.position.toFixed(1)}`)
+        .join("\n");
+      liveDataSection += `\n\nGOOGLE SEARCH CONSOLE DATA for ${gsc.property}, last 90 days (query, impressions, clicks, avg position):\n${lines}\n\nThese are the site's REAL queries. Build clusters around them: prioritise queries at positions 8-30 with meaningful impressions (striking distance), and use impressions as the demand signal. Impressions are not monthly search volume; still estimate volume, but keep it consistent with these impressions.`;
+      source = source === "live" ? "live+gsc" : "gsc";
+    } else if (gsc) {
+      gscNote = `Search Console (${gsc.property}) returned no queries for the last 90 days.`;
+    }
+  } catch (err) {
+    gscNote = `Search Console data could not be loaded: ${err instanceof Error ? err.message : String(err)}`;
+  }
   // --- End live API ---
 
   const systemPrompt = `You are an expert SEO strategist and keyword researcher with 15+ years of experience. Your task is to expand seed keywords into comprehensive keyword clusters with article briefs.
@@ -130,27 +196,38 @@ ${includeQuestions ? "Include question-format queries (People Also Ask style: ho
 Prioritize commercially valuable, winnable keywords within those limits.
 Aim for at least 4 distinct clusters${intentFilter === "all" ? " covering different buyer journey stages" : ""}.`;
 
-  const message = await client.messages.create({
-    model: MODELS.standard,
-    max_tokens: 8096,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
-  });
+  // Sonnet 5 thinks before answering, and thinking spends the same max_tokens.
+  // At 8096 a run on 2026-09-17 spent every token thinking, returned no text at
+  // all, and still went to AWAITING_APPROVAL as {"result": ""}. Streaming lets
+  // the ceiling sit well clear of that without tripping the SDK's
+  // non-streaming timeout guard.
+  const message = await client.messages
+    .stream({
+      model: MODELS.standard,
+      max_tokens: 64000,
+      output_config: { effort: "medium" },
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+    })
+    .finalMessage();
 
-  const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
-  try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };
-  } catch {
-    output = { result: rawText };
+  assertNotTruncated(message, "The keyword research");
+  const parsed = jsonFrom<Record<string, unknown>>(textFrom(message));
+  if (!parsed || !Array.isArray(parsed.clusters) || parsed.clusters.length === 0) {
+    // Never hand a person an empty result to approve.
+    throw new Error("The keyword research came back without any keyword clusters. Run it again.");
   }
+  const output: Record<string, unknown> = parsed;
 
   output.generatedAt = new Date().toISOString();
   output.workspaceId = run.agentConfig.workspaceId;
   output.source = source;
-  if (source === "live") {
+  if (gscNote) output.gscNote = gscNote;
+  if (source === "live" || source === "live+gsc") {
     delete output.simulationNote;
+  } else if (source === "gsc") {
+    output.simulationNote =
+      "Queries, impressions and positions are real Search Console data. Search volume, difficulty and CPC are estimates — connect Ahrefs, Semrush, or SearchAtlas for measured values.";
   } else {
     output.simulationNote =
       "Connect Ahrefs, Semrush, or SearchAtlas in Settings to enable live search volume, keyword difficulty, and CPC data. Add competitor domains to also pull real content-gap keywords via SearchAtlas.";
