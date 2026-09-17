@@ -28,7 +28,7 @@ export const SUITES: Suite[] = [
   { slug: "paid-media",    name: "Paid Media",           description: "Ad copy, creative, and spend optimisation.", icon: "BarChart2" },
   { slug: "lifecycle",     name: "Lifecycle & Revenue",  description: "Email, lead enrichment, reviews, and inbox.", icon: "Mail" },
   { slug: "analytics",     name: "Analytics & Reporting", description: "Weekly reports, anomaly detection, and attribution.", icon: "TrendingUp" },
-  { slug: "outbound",      name: "Outbound Engine",      description: "Autonomous multichannel sales outbound: Scout → Score → Email + LinkedIn → GHL.", icon: "Crosshair" },
+  { slug: "outbound",      name: "Outbound Engine",      description: "Autonomous multichannel sales outbound: Scout → Score → Email + LinkedIn → CRM.", icon: "Crosshair" },
   { slug: "operator",      name: "Operator",             description: "The intelligence layer that coordinates everything else.", icon: "Bot" },
 ];
 
@@ -592,12 +592,12 @@ export const AGENTS: Agent[] = [
   },
   {
     slug: "outbound-revenue",
-    name: "Revenue (GHL)",
+    name: "Revenue (CRM)",
     suite: "outbound",
     suiteName: "Outbound Engine",
     status: "ACTIVE",
-    description: "Creates and stages GHL contacts and opportunities on first engagement. Logs every channel event to the contact timeline. Attributes each meeting to its originating play and signal.",
-    integrations: ["GoHighLevel"],
+    description: "Writes each engagement to the erp.io CRM on approval: the contact, a deal that moves forward through the pipeline, a timeline entry, and a suggested reply left as a task for a person to send.",
+    integrations: ["erp.io CRM"],
     companions: ["outbound-email", "outbound-linkedin"],
     cadence: "Continuous",
   },

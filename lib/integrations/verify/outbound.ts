@@ -92,51 +92,8 @@ const verifyAimfox: KeyVerifier = async (credentials) => {
   return { ok: true };
 };
 
-/**
- * GoHighLevel v2. `GET /locations/{locationId}` proves both halves of what
- * this integration needs in one call: the token authenticates, AND it can see
- * the specific sub-account the location ID names — a token valid for a
- * different location in the same agency would otherwise look fine right up
- * until the first contact write 403s.
- */
-const verifyGoHighLevel: KeyVerifier = async (credentials) => {
-  const apiKey = credentials.apiKey?.trim();
-  const locationId = credentials.locationId?.trim();
-  if (!apiKey) return { ok: false, reason: "The private integration token is empty." };
-  if (!locationId) return { ok: false, reason: "The location ID is empty." };
-
-  let res: Response;
-  try {
-    res = await fetch(`https://services.leadconnectorhq.com/locations/${encodeURIComponent(locationId)}`, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Version: "2021-07-28",
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (err) {
-    return { ok: false, reason: `Couldn't reach GoHighLevel: ${err instanceof Error ? err.message : String(err)}` };
-  }
-
-  if (res.status === 401 || res.status === 403) {
-    return {
-      ok: false,
-      reason: "GoHighLevel rejected that token, or the token isn't authorised for this location ID. Both come from Settings → Private Integrations / Business Profile in the same sub-account.",
-    };
-  }
-  if (res.status === 404) {
-    return { ok: false, reason: "GoHighLevel couldn't find a location with that ID. Check Settings → Business Profile in the sub-account you want to connect." };
-  }
-  if (!res.ok) {
-    return { ok: false, reason: `GoHighLevel returned an unexpected error (${res.status}). Try again in a moment.` };
-  }
-  return { ok: true };
-};
-
 export const VERIFIERS: Partial<Record<string, KeyVerifier>> = {
   APOLLO: verifyApollo,
   INSTANTLY: verifyInstantly,
   AIMFOX: verifyAimfox,
-  GO_HIGH_LEVEL: verifyGoHighLevel,
 };

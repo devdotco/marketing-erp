@@ -134,7 +134,7 @@ async function prospectorOnApprove(
 
 /**
  * Outbound Email / LinkedIn / Revenue — the Outbound Engine's three agents that write to a live
- * Instantly, Aimfox, or GoHighLevel account. Owner decision: these always stage and only ever
+ * Instantly, Aimfox, or erp.io CRM account. Owner decision: these always stage and only ever
  * execute on a workspace admin's approval, with no `requireApproval` escape hatch (unlike, say,
  * Outbound Scout) — see lib/agent-handlers/outbound-email.ts, outbound-linkedin.ts, and
  * outbound-revenue.ts for why each one's mutating API call can't happen any earlier than this.
@@ -272,6 +272,14 @@ async function outboundLinkedinOnApprove(
   return { ...output, deliveries: results, delivery: results[0] };
 }
 
+/**
+ * Outbound Revenue writes to the erp.io CRM, and only from here.
+ *
+ * The CRM connection is re-resolved at approval time rather than trusted from the staged run: a
+ * workspace can be linked to its org (or have a key added) between staging and approval, and the
+ * signed assertion is per-request anyway. Idempotent twice over — an already-activated delivery
+ * returns untouched, and the CRM answers a repeated (prospect, event, run) with `duplicate: true`.
+ */
 async function outboundRevenueOnApprove(
   run: AgentRun & { agentConfig: AgentConfig },
 ): Promise<Record<string, unknown> | undefined> {
@@ -279,43 +287,27 @@ async function outboundRevenueOnApprove(
   const delivery = output.delivery as OutboundRevenueDelivery | undefined;
   if (!delivery || delivery.status !== "staged") return;
 
-  let apiKey: string | undefined;
-  let locationId: string | undefined;
-  if (delivery.connected) {
-    const integration = await prisma.integration.findUnique({
-      where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "GO_HIGH_LEVEL" } },
-    });
-    if (!integration) {
-      throw new AgentInputError(
-        "The GoHighLevel integration was disconnected after this event was staged.",
-        "Reconnect it under Settings → Integrations, then approve this run again.",
-        "channel_disconnected",
-      );
-    }
-    const creds = await decryptCredentials<{ apiKey: string; locationId: string }>(integration.encryptedCredentials);
-    apiKey = creds.apiKey;
-    locationId = creds.locationId;
+  const connection = await resolveCrmConnection(run.agentConfig.workspaceId);
+  if (!connection.ok) {
+    throw new AgentInputError(
+      `This workspace can't reach the erp.io CRM: ${connection.reason}`,
+      "Outbound Revenue writes to app.erp.io/crm. Once the workspace is linked to its erp.io organization (or a CRM key is connected under Settings → Integrations), approve this run again — nothing has been written.",
+      "crm_not_connected",
+    );
   }
 
-  // Read fresh, not from this run's own staged output — an opportunity may have been created
-  // for this prospect by a different run (a second reply event) since this one was staged.
-  // Opportunity creation is not idempotent on GHL's side, so this is what stops a duplicate.
-  // Workspace-scoped: delivery.prospectId comes from the run's stored output, never trusted as an id alone.
-  const prospect = await prisma.outboundProspect.findFirst({
-    where: { id: delivery.prospectId, workspaceId: run.agentConfig.workspaceId },
-    select: { ghlOpportunityId: true },
-  });
+  const activated = await activateOutboundRevenueDelivery(delivery, { target: connection.target, via: connection.via });
 
-  const activated = await activateOutboundRevenueDelivery(delivery, prospect?.ghlOpportunityId ?? null, { apiKey, locationId });
+  const updateData: { crmPersonId?: string; crmDealId?: string | null } = {};
+  if (activated.crmPersonId) updateData.crmPersonId = activated.crmPersonId;
+  if (activated.crmDealId) updateData.crmDealId = activated.crmDealId;
+  if (Object.keys(updateData).length > 0) {
+    await prisma.outboundProspect
+      .updateMany({ where: { id: delivery.prospectId, workspaceId: run.agentConfig.workspaceId }, data: updateData })
+      .catch((err) => console.error(`[on-approve] outbound-revenue: could not update prospect ${delivery.prospectId}:`, err));
+  }
 
-  const updateData: { ghlContactId?: string; ghlOpportunityId?: string | null } = {};
-  if (activated.ghlContactId) updateData.ghlContactId = activated.ghlContactId;
-  if (activated.ghlOpportunityId) updateData.ghlOpportunityId = activated.ghlOpportunityId;
-  await prisma.outboundProspect
-    .updateMany({ where: { id: delivery.prospectId, workspaceId: run.agentConfig.workspaceId }, data: updateData })
-    .catch((err) => console.error(`[on-approve] outbound-revenue: could not update prospect ${delivery.prospectId}:`, err));
-
-  return { ...output, delivery: activated };
+  return { ...output, delivery: activated, warnings: activated.warnings ?? output.warnings };
 }
 
 /**

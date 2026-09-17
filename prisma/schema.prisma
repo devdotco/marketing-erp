@@ -396,6 +396,14 @@ model OutboundProspect {
   apolloEnrichment  Json?
   instantlyLeadId   String?
   aimfoxLeadId      String?
+  /// The erp.io CRM records Outbound Revenue wrote for this prospect (app.erp.io/crm): the
+  /// `Person`, and the `Deal` opened from their first qualifying engagement. One deal per prospect
+  /// — the CRM keys it on this prospect's id, so a second engagement moves that deal rather than
+  /// opening another.
+  crmPersonId       String?
+  crmDealId         String?
+  /// GoHighLevel, retired 2026-09. Kept only so the ids of records written before the move aren't
+  /// lost; nothing reads them. See lib/agent-handlers/outbound-revenue.ts.
   ghlContactId      String?
   ghlOpportunityId  String?
   emailRepliedAt    DateTime?

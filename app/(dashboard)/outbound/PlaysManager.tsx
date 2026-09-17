@@ -29,6 +29,7 @@ const EMPTY_CONFIG: OutboundPlayConfig = {
   routingThresholds: { emailAndLinkedin: 80, emailOnly: 65, watchlist: 50 },
   autoAdvance: true,
   dailySourcingCap: 30,
+  crmDealOn: "interested",
 };
 
 function toConfig(raw: unknown): OutboundPlayConfig {
@@ -200,9 +201,37 @@ function PlayForm({
         </div>
       </div>
 
-      <div>
-        <label style={label}>GoHighLevel pipeline id (optional — falls back to a pipeline named "Outbound")</label>
-        <input style={fieldStyle} value={config.ghlPipelineId ?? ""} onChange={(e) => setConfig((c) => ({ ...c, ghlPipelineId: e.target.value || undefined }))} placeholder="e.g. qWRoUZ6kNRf4Mx3RRtgs" />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={label}>CRM pipeline (app.erp.io/crm)</label>
+          <ResourceSelect
+            id="crmPipelineId"
+            optionsUrl="/api/outbound/integrations/options?provider=CRM_ERP_IO"
+            value={config.crmPipelineId ?? ""}
+            onChange={(v) => setConfig((c) => ({ ...c, crmPipelineId: v || undefined }))}
+            fieldStyle={fieldStyle}
+            emptyLabel="Outbound (the CRM creates it on the first reply)"
+          />
+          <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+            Leave unset to use the CRM&rsquo;s own Outbound pipeline. Another pipeline only advances deals if its
+            stages are named Replied / Interested / Meeting Set, or are mapped on the play.
+          </p>
+        </div>
+        <div>
+          <label style={label}>Open a CRM deal on</label>
+          <select
+            style={fieldStyle}
+            value={config.crmDealOn}
+            onChange={(e) => setConfig((c) => ({ ...c, crmDealOn: e.target.value as "interested" | "reply" }))}
+          >
+            <option value="interested">Interest or a booked meeting (recommended)</option>
+            <option value="reply">Any reply</option>
+          </select>
+          <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+            Every engagement writes the contact and a timeline entry either way. A bare reply is often
+            &ldquo;remove me&rdquo;, which is why it does not open a deal by default.
+          </p>
+        </div>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 20 }}>

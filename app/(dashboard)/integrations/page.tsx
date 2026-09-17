@@ -127,14 +127,6 @@ const INTEGRATIONS = [
     docsUrl: "#",
   },
   {
-    provider: "GO_HIGH_LEVEL",
-    name: "GoHighLevel",
-    description: "CRM contacts and opportunity pipeline management",
-    agents: ["Outbound Revenue"],
-    color: "#16A34A",
-    docsUrl: "#",
-  },
-  {
     provider: "GOOGLE_ANALYTICS_4",
     name: "Google Analytics 4",
     description: "Session data, conversion tracking, and traffic analytics",

@@ -78,11 +78,26 @@ export const OutboundPlayConfigSchema = z.object({
   instantlyCampaignName: z.string().optional(),
   aimfoxCampaignId: z.string().optional(),
   aimfoxCampaignName: z.string().optional(),
-  /** A GoHighLevel pipeline id from Settings → Business Profile → Pipelines in the sub-account.
-   * Optional — outbound-revenue.ts falls back to its existing by-name ("Outbound") resolution when
-   * unset. */
-  ghlPipelineId: z.string().optional(),
-  ghlPipelineName: z.string().optional(),
+  /** An erp.io CRM pipeline id (app.erp.io/crm), chosen from the play editor's dropdown
+   * (GET /api/outbound/integrations/options?provider=CRM_ERP_IO). Unset → the CRM's own "Outbound"
+   * pipeline, which it creates on the first engagement. Replaced `ghlPipelineId` when GoHighLevel
+   * was retired; an old play's `ghlPipelineId` is simply ignored. */
+  crmPipelineId: z.string().optional(),
+  crmPipelineName: z.string().optional(),
+  /** For a pipeline that isn't the CRM's Outbound template: which stage key each engagement means.
+   * An event with no mapping (and no stage the CRM recognises by name) leaves the deal where it is,
+   * with a warning on the run — never a silent drop into the first stage. */
+  crmStageKeys: z
+    .object({
+      email_reply: z.string().optional(),
+      linkedin_reply: z.string().optional(),
+      interested: z.string().optional(),
+      meeting_booked: z.string().optional(),
+    })
+    .optional(),
+  /** When Outbound Revenue opens a CRM deal. `interested` (default) keeps a bare reply — which may
+   * well be "please remove me" — to a contact and a timeline row; `reply` opens one on any reply. */
+  crmDealOn: z.enum(["interested", "reply"]).default("interested"),
   /** Whether a completed/approved Scout or Strategist run for this play automatically enqueues the
    * next stage. Default on — see lib/agent-handlers/chaining.ts. */
   autoAdvance: z.boolean().default(true),

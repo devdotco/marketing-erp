@@ -62,27 +62,6 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
       ),
     },
   },
-  GO_HIGH_LEVEL: {
-    name: "GoHighLevel",
-    method: {
-      kind: "key",
-      fields: [
-        {
-          key: "apiKey",
-          label: "Private integration token",
-          placeholder: "pit-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-          secret: true,
-          hint: "Settings → Private Integrations in the GHL sub-account. Grant it Contacts and Opportunities read/write scopes.",
-        },
-        {
-          key: "locationId",
-          label: "Location ID",
-          placeholder: "e.g. qWRoUZ6kNRf4Mx3RRtgs",
-          hint: "Settings → Business Profile in the same GHL sub-account. GoHighLevel's v2 API is scoped per location — this is what tells it which sub-account to write to.",
-        },
-      ],
-    },
-  },
   CARTESIA: { name: "Cartesia", method: { kind: "key", fields: apiKey() } },
   TRANSISTOR: { name: "Transistor", method: { kind: "key", fields: apiKey() } },
   GOOGLE_TTS: {

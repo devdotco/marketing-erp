@@ -1262,20 +1262,31 @@ export const AGENT_META: Record<string, AgentMeta> = {
   },
 
   "outbound-revenue": {
-    overview: "The Outbound Revenue agent fires when a prospect replies to an email or LinkedIn message. It classifies the event (reply, interested, meeting booked) and stages the GoHighLevel contact and opportunity record it would create or update. This agent is triggered automatically by Instantly and Aimfox webhooks — not manually — which is exactly why writing to GoHighLevel always waits for a workspace admin to approve the run: a webhook firing must never itself create a live CRM record. A webhook only starts it while the agent is turned on; the reply is recorded on the prospect either way.",
+    overview:
+      "The Outbound Revenue agent fires when a prospect replies, shows interest, or books a meeting. It writes that engagement to your organization's erp.io CRM workspace (app.erp.io/crm) — the contact, the deal, the timeline entry and a suggested reply for a person to send. It is triggered automatically by Instantly and Aimfox webhooks, not by anyone clicking Run, which is exactly why the CRM write always waits for a workspace admin to approve: a webhook firing must never itself create a live CRM record. A webhook only starts it while the agent is turned on; the reply is recorded on the prospect either way. (It wrote GoHighLevel contacts and opportunities until September 2026; GoHighLevel is retired.)",
     steps: [
-      { title: "Receive Engagement Event", detail: "Reads the event type (email_reply, linkedin_reply, interested, meeting_booked) and the prospect ID from the incoming webhook payload or run input. Records the reply/interest/meeting on the OutboundProspect record immediately — that's just logging what already happened, not a write to GoHighLevel." },
-      { title: "Generate CRM Record Data", detail: "Uses Claude Haiku to produce the GHL contact and opportunity field values — company name, tags, ICP score, pain hypothesis, pipeline stage — based on the Intelligence Object and event type." },
-      { title: "Resolve Pipeline and Stage", detail: "For interested/meeting_booked events with no opportunity yet on file for this prospect, looks up the GHL pipeline and stage by name — a read-only lookup, not a write. Stages the contact/opportunity payload and pauses as Awaiting Approval." },
-      { title: "Write to GoHighLevel on Approval", detail: "Only once a workspace admin approves the run: upserts the GHL contact (safe to repeat — GHL dedupes by email) and, only if no opportunity already exists for this prospect, creates one — opportunity creation is not idempotent on GHL's side, so an existing id is reused instead of creating a second one." },
+      { title: "Receive Engagement Event", detail: "Reads the event type (email_reply, linkedin_reply, interested, meeting_booked) and the prospect ID from the incoming webhook payload or run input. Records the reply/interest/meeting on the OutboundProspect record immediately, through the same guarded updates the webhook itself uses — statuses only ever move forward, so a late or re-run event can't drag a booked meeting back to Replied." },
+      { title: "Check the CRM link and the play's pipeline", detail: "Before spending a token: confirms this workspace can reach its organization's CRM workspace, and — if the play names a CRM pipeline — that the pipeline still exists and has a stage this event can move a deal into. A missing link or pipeline is a refusal that names what to fix, not a simulated write." },
+      { title: "Write the CRM entry", detail: "Claude Sonnet writes the timeline note, the deal name, the tags and (for a reply or interest) a suggested reply for a salesperson to review — grounded in the prospect's own reply and the Intelligence Object, in the workspace's own brand voice rather than a hardcoded one. Nothing is sent to the CRM yet; the run pauses as Awaiting Approval." },
+      { title: "Write to the CRM on approval", detail: "Only once a workspace admin approves: upserts the contact (existing fields are never overwritten, only gaps filled), links their company, opens one deal per prospect — or moves the existing one FORWARD through the pipeline — writes the timeline entry, and leaves the suggested reply as a CRM task. Idempotent: the deal is keyed on the prospect and the timeline row on this run, so a retried approval writes nothing new. The CRM never sends the reply itself." },
     ],
     inputs: [
       { key: "prospectId", label: "Prospect ID", type: "text", placeholder: "cuid from OutboundProspect table", hint: "Populated automatically by Instantly and Aimfox webhooks — no manual entry needed in normal operation." },
       { key: "event", label: "Event Type", type: "select", options: ["email_reply", "linkedin_reply", "interested", "meeting_booked"], defaultValue: "email_reply", hint: "For manual testing. In production this is set by the Instantly or Aimfox webhook." },
-      { key: "replyText", label: "Reply Text (optional)", type: "textarea", placeholder: "The prospect's reply message for context...", hint: "Paste the prospect's reply to help Claude generate a more contextual CRM note." },
+      { key: "replyText", label: "Reply Text (optional)", type: "textarea", placeholder: "The prospect's reply message for context...", hint: "Paste the prospect's reply so the suggested reply actually answers what they wrote." },
     ],
-    outputs: ["Staged CRM record plan: contact fields, opportunity fields, pipeline/stage, connected account — awaiting approval", "GHL contact ID once approved", "GHL opportunity ID (for interested/meeting_booked events) once approved", "Updated OutboundProspect status and timestamp (recorded immediately, independent of approval)"],
-    requirements: ["GoHighLevel API key connected in Settings → Integrations", "Outbound Email or LinkedIn agent must have run first"],
+    outputs: [
+      "Staged CRM entry: contact fields, timeline note, deal name and pipeline, suggested reply — awaiting approval",
+      "CRM contact (Person) id once approved",
+      "CRM deal id and the stage it now sits in, for engagements that open or advance one",
+      "A CRM task carrying the suggested reply, for a person to review and send",
+      "Updated OutboundProspect status and timestamp (recorded immediately, independent of approval)",
+    ],
+    requirements: [
+      "This workspace linked to its erp.io organization (automatic when Marketing is opened from app.erp.io), which is what gives it a CRM workspace",
+      "Outbound Email or LinkedIn agent must have run first",
+      "A workspace admin to approve the run before anything is written to the CRM",
+    ],
   },
 
   "outbound-cro": {

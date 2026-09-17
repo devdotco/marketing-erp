@@ -79,8 +79,9 @@ import {
   type OutboundLinkedinDelivery,
 } from "@/lib/agent-handlers/outbound-linkedin-delivery";
 import {
-  buildGhlContactBody,
-  buildGhlOpportunityBody,
+  buildCrmEngagement,
+  crmRefusalHint,
+  wantsDeal,
   activateOutboundRevenueDelivery,
   type OutboundRevenueDelivery,
 } from "@/lib/agent-handlers/outbound-revenue-delivery";
@@ -895,92 +896,118 @@ check(
     simulatedLi,
   );
 
-  // --- Outbound Revenue / GoHighLevel -----------------------------------------------------
+  // --- Outbound Revenue / erp.io CRM ------------------------------------------------------
 
-  const revDelivery: OutboundRevenueDelivery = {
-    status: "staged",
-    prospectId: "prospect_3",
+  const engagementProspect = {
+    id: "prospect_3",
+    firstName: "Sam",
+    lastName: "Lee",
+    email: "sam@beta.com",
+    title: "VP Engineering",
+    company: "Beta Co",
+    companyDomain: "beta.com",
+    linkedInUrl: "https://linkedin.com/in/samlee",
+    score: 84,
+    channel: "EMAIL_AND_LINKEDIN",
+    play: { slug: "saas", name: "SaaS founders" },
+    intelligence: { painHypothesis: "Shipping slowly", primarySignal: "Hiring 3 engineers" },
+  };
+
+  const engagement = buildCrmEngagement({
+    prospect: engagementProspect,
     event: "meeting_booked",
-    connected: true,
-    locationId: "loc_1",
-    contact: { firstName: "Sam", lastName: "Lee", email: "sam@beta.com", companyName: "Beta Co", tags: ["outbound"] },
-    wantsOpportunity: true,
-    opportunity: { name: "Dev.co — Beta Co", source: "Outbound — meeting_booked" },
-    pipelineId: "pipe_1",
-    pipelineStageId: "stage_1",
-    ghlOpportunityId: null,
-  };
-  const contactBody = buildGhlContactBody(revDelivery);
-  check("GHL contact body carries the locationId and email", contactBody.locationId === "loc_1" && contactBody.email === "sam@beta.com", contactBody);
-  const oppBody = buildGhlOpportunityBody(revDelivery, "contact_1");
-  check("GHL opportunity body targets the resolved pipeline/stage", oppBody.pipelineId === "pipe_1" && oppBody.pipelineStageId === "stage_1", oppBody);
-  check("GHL opportunity body carries the resolved contact id", oppBody.contactId === "contact_1", oppBody);
-
-  // Contact upsert always runs (idempotent on GHL's side); opportunity creation is skipped, and
-  // the existing id reused, when one already exists for this prospect — this is the guard
-  // against GHL's non-idempotent create-opportunity call firing twice on a re-approval or a
-  // second webhook for the same prospect.
-  let contactCallsExisting = 0;
-  let oppCallsExisting = 0;
-  const withExistingOpp = await activateOutboundRevenueDelivery(revDelivery, "existing_opp_1", {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => { contactCallsExisting++; return "contact_new"; },
-    createOpportunity: async () => { oppCallsExisting++; return "should-not-happen"; },
+    runId: "run_9",
+    occurredAt: new Date("2026-09-17T10:00:00.000Z"),
+    replyText: "Happy to chat Thursday.",
+    writing: { note: "Booked a meeting for Thursday.", dealName: "Beta Co — dev pod", tags: ["Outbound", "hiring"], replyDraft: "Thursday works." },
+    play: { crmDealOn: "interested", crmPipelineId: "pipe_1" },
   });
-  check("activateOutboundRevenueDelivery still upserts the contact (idempotent on GHL's side)", contactCallsExisting === 1, contactCallsExisting);
   check(
-    "activateOutboundRevenueDelivery does NOT create a second opportunity when one already exists",
-    oppCallsExisting === 0,
-    oppCallsExisting,
+    "CRM engagement carries the prospect, the play and the run as its idempotency key",
+    engagement.prospectId === "prospect_3" && engagement.eventKey === "run_9" && engagement.play.slug === "saas",
+    engagement,
   );
-  check("activateOutboundRevenueDelivery reuses the existing opportunity id instead", withExistingOpp.ghlOpportunityId === "existing_opp_1", withExistingOpp);
-
-  let oppCallsNew = 0;
-  const withNoExistingOpp = await activateOutboundRevenueDelivery(revDelivery, null, {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => "contact_new",
-    createOpportunity: async () => { oppCallsNew++; return "opp_new"; },
-  });
   check(
-    "activateOutboundRevenueDelivery creates an opportunity when none exists yet",
-    oppCallsNew === 1 && withNoExistingOpp.ghlOpportunityId === "opp_new",
-    withNoExistingOpp,
+    "CRM engagement passes the contact through with tags normalised",
+    engagement.contact.email === "sam@beta.com" && engagement.contact.companyDomain === "beta.com" && engagement.contact.tags?.[0] === "outbound",
+    engagement.contact,
   );
+  check("CRM engagement asks for a deal in the play's pipeline", engagement.deal?.create === true && engagement.deal?.pipelineId === "pipe_1", engagement.deal);
 
-  // Already-activated deliveries short-circuit entirely — no contact or opportunity call, even
-  // if an (incorrect) existingOpportunityId is passed in.
-  let contactCallsActivated = 0;
-  let oppCallsActivated = 0;
-  const activatedRev: OutboundRevenueDelivery = {
-    ...revDelivery,
-    status: "activated",
-    activatedAt: "2026-09-14T00:00:00.000Z",
-    ghlContactId: "contact_x",
-    ghlOpportunityId: "opp_x",
-  };
-  const revReturned = await activateOutboundRevenueDelivery(activatedRev, "opp_x", {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => { contactCallsActivated++; return "x"; },
-    createOpportunity: async () => { oppCallsActivated++; return "x"; },
+  // A bare reply is often "take me off your list". Under the default setting it still writes the
+  // contact and the timeline entry, but it does not open a deal.
+  check("wantsDeal: interest and meetings always open a deal", wantsDeal("interested", "interested") && wantsDeal("meeting_booked", "interested"));
+  check("wantsDeal: a bare reply does not, by default", !wantsDeal("email_reply", "interested") && !wantsDeal("linkedin_reply", "interested"));
+  check("wantsDeal: unless the play says any reply should", wantsDeal("email_reply", "reply"));
+  const replyEngagement = buildCrmEngagement({
+    prospect: engagementProspect,
+    event: "email_reply",
+    runId: "run_10",
+    occurredAt: new Date("2026-09-17T10:00:00.000Z"),
+    writing: {},
+    play: { crmDealOn: "interested" },
+  });
+  check("CRM engagement for a bare reply opens no deal", replyEngagement.deal?.create === false, replyEngagement.deal);
+
+  // Approval is the only thing that writes to the CRM, and it is safe to repeat: an
+  // already-activated delivery never calls again, and the CRM answers a repeat with duplicate:true.
+  const stagedRev: OutboundRevenueDelivery = { status: "staged", prospectId: "prospect_3", event: "meeting_booked", engagement };
+  const target = { baseUrl: "https://app.erp.io/crm", auth: { kind: "service" as const, shellOrgId: "org_1" } };
+  let crmCalls = 0;
+  const activatedRev = await activateOutboundRevenueDelivery(stagedRev, {
+    target,
+    via: "service",
+    record: async () => {
+      crmCalls++;
+      return new Response(
+        JSON.stringify({
+          personId: "person_1",
+          dealId: "deal_1",
+          taskId: "task_1",
+          pipeline: { id: "pipe_1", name: "Outbound" },
+          stage: { key: "meeting_set", name: "Meeting Set" },
+          duplicate: false,
+          warnings: [],
+        }),
+        { status: 201 },
+      );
+    },
   });
   check(
-    "activateOutboundRevenueDelivery skips an already-activated delivery entirely — no contact or opportunity call",
-    contactCallsActivated === 0 && oppCallsActivated === 0 && revReturned === activatedRev,
-    revReturned,
+    "activateOutboundRevenueDelivery records the CRM's own ids",
+    crmCalls === 1 && activatedRev.crmPersonId === "person_1" && activatedRev.crmDealId === "deal_1" && activatedRev.stageName === "Meeting Set",
+    activatedRev,
   );
 
-  // No GoHighLevel integration connected → simulate, no network calls.
-  let simGhlCalls = 0;
-  const simulatedRev = await activateOutboundRevenueDelivery({ ...revDelivery, connected: false }, null, {
-    upsertContact: async () => { simGhlCalls++; return "x"; },
+  let crmCallsAgain = 0;
+  const reActivated = await activateOutboundRevenueDelivery(activatedRev, {
+    target,
+    via: "service",
+    record: async () => { crmCallsAgain++; return new Response("{}", { status: 201 }); },
   });
   check(
-    "activateOutboundRevenueDelivery simulates (no network call) when GoHighLevel isn't connected",
-    simGhlCalls === 0 && simulatedRev.source === "simulation" && simulatedRev.status === "activated",
-    simulatedRev,
+    "activateOutboundRevenueDelivery skips an already-activated delivery entirely — no CRM call",
+    crmCallsAgain === 0 && reActivated === activatedRev,
+    reActivated,
+  );
+
+  // A refusal is legible and never a fabricated success — the GoHighLevel version simulated a
+  // contact id when the integration was missing, and the run looked like it had worked.
+  let refusalMessage = "";
+  try {
+    await activateOutboundRevenueDelivery(stagedRev, {
+      target,
+      via: "service",
+      record: async () => new Response(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }), { status: 401 }),
+    });
+  } catch (err) {
+    refusalMessage = err instanceof Error ? err.message : String(err);
+  }
+  check("activateOutboundRevenueDelivery throws a legible error when the CRM refuses", refusalMessage.includes("401"), refusalMessage);
+  check(
+    "crmRefusalHint names the signing key for a signed 401, and the pipeline for a missing one",
+    crmRefusalHint(401, "unauthorized", "service").includes("MARKETING_SERVICE_PUBLIC_KEY") &&
+      crmRefusalHint(404, "pipeline_not_found", "service").includes("Outbound Engine → Plays"),
   );
 
   // --- No escape hatch: sending is never optional for these, unlike e.g. Outbound Scout ---
