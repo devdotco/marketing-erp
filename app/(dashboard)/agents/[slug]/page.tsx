@@ -12,6 +12,7 @@ import { ScheduleEditor } from "@/components/ui/ScheduleEditor";
 import { checkModelsAvailable } from "@/lib/ai/models";
 import { getKeyStatus } from "@/lib/ai/client";
 import { ByokPrompt } from "@/components/ui/ByokPrompt";
+import { ScoutIcpPanel } from "./ScoutIcpPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -33,13 +34,21 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
   const workspaceId = await resolveWorkspaceId();
   if (!workspaceId) redirect("/onboarding");
 
-  await requireWorkspaceAccess(workspaceId);
+  const { member } = await requireWorkspaceAccess(workspaceId);
+  // Same three-way OR every other page in this app computes isAdmin from (PlaysManager's caller,
+  // app/(dashboard)/outbound/page.tsx) — a super admin or this workspace's own WORKSPACE_ADMIN/
+  // SUPER_ADMIN member. Only actually needed for the outbound-scout ICP panel below, but it's cheap
+  // and keeps this page's notion of "admin" identical to the play editor's.
+  const isAdmin = Boolean(session.user.isSuperAdmin || member?.role === "WORKSPACE_ADMIN" || member?.role === "SUPER_ADMIN");
 
   // Whether this workspace can run anything at all. Asked before a button is
   // shown rather than discovered by a failed run.
   const keyStatus = await getKeyStatus(workspaceId);
 
-  const [agentConfig, recentRuns] = await Promise.all([
+  // Outbound Scout's ICP panel needs this workspace's plays — fetched only for that one agent slug
+  // so every other agent page stays a plain single query pair, not a query pair plus an always-empty
+  // findMany against a table it has nothing to do with.
+  const [agentConfig, recentRuns, outboundPlays] = await Promise.all([
     prisma.agentConfig.findUnique({
       where: { workspaceId_agentSlug: { workspaceId, agentSlug: slug } },
     }),
@@ -48,6 +57,13 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
       orderBy: { createdAt: "desc" },
       take: 10,
     }),
+    slug === "outbound-scout"
+      ? prisma.outboundPlay.findMany({
+          where: { workspaceId },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, slug: true, name: true, enabled: true, config: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   const isEnabled = agentConfig?.enabled ?? false;
@@ -148,9 +164,23 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 20 }}>
+      {/* .run-layout (app/globals.css) rather than a hand-rolled inline grid: it's the same
+          1fr/280px split this page wants, already collapses to a single column under 900px, and
+          keeping the two in sync (rather than a second inline copy) is what makes everything in the
+          left column below — including the ICP panel — actually readable at phone width. */}
+      <div className="run-layout">
         {/* Left — main content */}
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+          {/* Outbound Scout's ICP panel — who Scout searches Apollo.io for. Scout refuses to run
+              without an enabled play (lib/agent-handlers/outbound-scout.ts), so this sits above
+              every other panel: it's the thing that decides whether "Run now" produces anything at
+              all, not a secondary setting. Only rendered for this one agent slug — see this
+              component's own doc comment for why the ICP itself isn't duplicated into a generic
+              agent-page field instead. */}
+          {slug === "outbound-scout" && (
+            <ScoutIcpPanel workspaceId={workspaceId} plays={outboundPlays} isAdmin={isAdmin} />
+          )}
 
           {/* Configure panel (active agents only) */}
           {isActive && isEnabled && (

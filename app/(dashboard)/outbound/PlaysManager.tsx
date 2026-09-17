@@ -26,7 +26,13 @@ interface PlaysManagerProps {
   isAdmin: boolean;
 }
 
-const EMPTY_CONFIG: OutboundPlayConfig = {
+// Exported for reuse by the Outbound Scout agent page's ICP panel
+// (app/(dashboard)/agents/[slug]/ScoutIcpPanel.tsx) — that panel edits the same OutboundPlay.config
+// shape through the same two server actions, so it needs the same "what does a brand-new/partial
+// config default to" and "how does a comma/newline list field parse" logic this file already has.
+// Keeping one copy here (rather than forking it) is what guarantees a play created from either
+// place produces the identical shape PlaysManager's own form would.
+export const EMPTY_CONFIG: OutboundPlayConfig = {
   icp: { titles: [], seniorities: [], departments: [], employeeRanges: [], industries: [], geographies: [], technologies: [], exclusions: [] },
   serviceOffer: "",
   proofPoints: [],
@@ -37,7 +43,7 @@ const EMPTY_CONFIG: OutboundPlayConfig = {
   crmDealOn: "interested",
 };
 
-function toConfig(raw: unknown): OutboundPlayConfig {
+export function toConfig(raw: unknown): OutboundPlayConfig {
   const c = (raw ?? {}) as Partial<OutboundPlayConfig> & { icp?: Partial<OutboundPlayConfig["icp"]> };
   return {
     ...EMPTY_CONFIG,
@@ -47,11 +53,11 @@ function toConfig(raw: unknown): OutboundPlayConfig {
   };
 }
 
-function splitList(value: string): string[] {
+export function splitList(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean))];
 }
 
-const fieldStyle: React.CSSProperties = {
+export const fieldStyle: React.CSSProperties = {
   width: "100%",
   padding: "8px 10px",
   fontSize: 13,
@@ -61,7 +67,7 @@ const fieldStyle: React.CSSProperties = {
   color: "var(--text)",
 };
 
-const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.04em", display: "block", marginBottom: 4 };
+export const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.04em", display: "block", marginBottom: 4 };
 
 // Display label per scoring dimension — same six, same order, the Strategist's scoring prompt and
 // submit_prospect_intelligence tool schema present them in (lib/agent-handlers/outbound-strategist.ts).
