@@ -8,6 +8,7 @@ import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/worksp
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
 import { RunModal } from "@/components/ui/RunModal";
+import { ScheduleEditor } from "@/components/ui/ScheduleEditor";
 import { checkModelsAvailable } from "@/lib/ai/models";
 import { getKeyStatus } from "@/lib/ai/client";
 import { ByokPrompt } from "@/components/ui/ByokPrompt";
@@ -180,6 +181,18 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
                 </p>
               )}
             </div>
+          )}
+
+          {/* Schedule panel (active, enabled agents only — same gate as Saved defaults) */}
+          {isActive && isEnabled && (
+            <ScheduleEditor
+              workspaceId={workspaceId}
+              agentSlug={slug}
+              agentConfigId={agentConfig?.id}
+              schedule={agentConfig?.schedule ?? null}
+              enabled={isEnabled}
+              defaultSchedule={agent.defaultSchedule}
+            />
           )}
 
           {/* Enable prompt for active-but-not-enabled */}

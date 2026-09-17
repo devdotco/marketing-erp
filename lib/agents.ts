@@ -10,6 +10,12 @@ export interface Agent {
   integrations: string[];
   companions: string[];
   cadence: string;
+  /** Machine-readable form of `cadence`, pre-filled into the schedule editor
+   *  (components/ui/ScheduleEditor.tsx) the first time a workspace enables
+   *  this agent — never applied automatically to an existing AgentConfig.
+   *  Only set where a cadence has one obvious cron reading; most of the
+   *  "Continuous"/"On demand" agents don't. */
+  defaultSchedule?: string;
 }
 
 export interface Suite {
@@ -556,6 +562,10 @@ export const AGENTS: Agent[] = [
     integrations: ["Apollo.io"],
     companions: ["outbound-strategist"],
     cadence: "Daily",
+    // Weekday mornings, UTC — a live Apollo.io account is a business account
+    // and its buyers keep business hours; running over a weekend just burns
+    // Apollo credits sourcing into an inbox nobody works until Monday.
+    defaultSchedule: "0 13 * * 1-5",
   },
   {
     slug: "outbound-strategist",
@@ -611,6 +621,10 @@ export const AGENTS: Agent[] = [
     integrations: [],
     companions: ["outbound-scout", "outbound-email", "outbound-linkedin"],
     cadence: "Weekly",
+    // Matches the agent's own description: "runs every Friday". Afternoon UTC
+    // so the week's Friday-morning activity (US and EU business hours) is
+    // already in the data it analyses.
+    defaultSchedule: "0 15 * * 5",
   },
 
   // ── Operator ──────────────────────────────────────────────────────────
