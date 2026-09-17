@@ -34,7 +34,7 @@ export interface OutboundEmailDelivery {
   connected: boolean;
   personalization: Record<string, string>;
   instantlyLeadId?: string;
-  source?: "instantly_live" | "simulation";
+  source?: "instantly_live";
   /** Set only on a delivery that failed to activate within a batch that had at least one other
    * delivery succeed this same approval call — see on-approve.ts's outboundEmailOnApprove for why
    * a batch doesn't abort on the first failure once real sends have already happened. Absent on
@@ -87,15 +87,19 @@ export async function activateOutboundEmailDelivery(
   if (isChannelActivated(delivery)) return delivery;
 
   if (!delivery.connected || !deps.apiKey) {
-    // No Instantly integration connected — simulate so the pipeline still produces a
-    // consistent, approvable record instead of blocking on a missing integration.
-    return {
-      ...delivery,
-      status: "activated",
-      activatedAt: new Date().toISOString(),
-      instantlyLeadId: `instantly_${delivery.prospectId.slice(-8)}_${Date.now()}`,
-      source: "simulation",
-    };
+    // outbound-email.ts's staging handler now refuses the whole run up front when Instantly isn't
+    // connected (see its own doc comment), so a delivery reaching approval with connected: false
+    // should only happen for a run staged before that refusal shipped, or an Instantly integration
+    // disconnected in the gap between staging and approval. Either way, this used to fabricate an
+    // `instantly_...` lead id and report the send as successful — for a real campaign, a fabricated
+    // send is worse than no send: nothing was actually queued in Instantly, but the prospect's
+    // pipeline status would still flip to IN_SEQUENCE. Refuse instead, same as
+    // on-approve.ts's own `channel_disconnected` check for the "was connected, isn't now" case.
+    throw new AgentInputError(
+      `Instantly isn't connected for this workspace, so ${delivery.email} can't be added to campaign "${delivery.campaignName}".`,
+      "Connect Instantly in Settings → Integrations → Instantly, then approve this run again.",
+      "instantly_not_connected",
+    );
   }
 
   const addLead = deps.addLead ?? addInstantlyLead;
