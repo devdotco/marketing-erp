@@ -1291,15 +1291,16 @@ export const AGENT_META: Record<string, AgentMeta> = {
   "outbound-cro": {
     overview: "The Outbound CRO agent runs every Friday to analyse the week's outbound performance across every one of this workspace's outbound plays. It reviews prospect counts by status, open-to-reply rates, reply-to-meeting conversion, winning signals, and play-level ROI, then produces actionable recommendations for next week's allocation. It uses Claude Sonnet 5 for deeper analysis than the operational agents.",
     steps: [
-      { title: "Pull Week's Pipeline Data", detail: "Queries OutboundProspect records created or updated in the last 7 days, grouped by play and status, to build the raw performance dataset for the week." },
+      { title: "Pull Week's Pipeline Data", detail: "Queries OutboundProspect records sourced within the (wider) slice cohort window, grouped by play, and reports activity (replied/interested/meetings) within the shorter lookback window using their own timestamp columns (emailRepliedAt, interestedAt, meetingBookedAt) rather than a generic 'last updated'." },
       { title: "Analyse by Play and Channel", detail: "Calculates sourced-to-scored rate, email open-to-reply rate, LinkedIn acceptance rate, reply-to-meeting conversion, and estimated pipeline value per play." },
-      { title: "Identify Winning Signals", detail: "Identifies the top 3 buying signals that correlated with the highest reply and meeting rates this week — used to tune the Scout's sourcing criteria for next week." },
+      { title: "Identify Winning Signals", detail: "Breaks each play's cohort down by the Strategist's own primary signal, messaging angle, persona (Apollo seniority when known, else a title heuristic), channel, and score band — added/replied/interested/meetings and rates per slice, each flagged when its sample is too small to call a winner. The model is only allowed to cite a slice that clears the minimum-sample-size bar; everything else it must call out as insufficient data instead of guessing." },
       { title: "Generate Recommendations", detail: "Produces the executive summary, play-level allocation recommendation for next week, A/B test suggestions for message variants, and a list of prospects to prioritise for personal follow-up." },
     ],
     inputs: [
-      { key: "lookbackDays", label: "Lookback Window (days)", type: "number", defaultValue: "7", hint: "Number of days to analyse. Default is 7 (weekly review); increase to 30 for monthly strategic review." },
+      { key: "lookbackDays", label: "Lookback Window (days)", type: "number", defaultValue: "7", hint: "Number of days of activity (replies/interested/meetings) to report. Default is 7 (weekly review); increase to 30 for monthly strategic review." },
+      { key: "sliceWindowDays", label: "Slice Cohort Window (days)", type: "number", defaultValue: "28", hint: "How far back to pull prospects for the signal/persona/channel/score-band breakdowns the model is allowed to cite. Wider than the lookback window on purpose — a low-volume play barely has any prospects in 7 days, so slices need a bigger cohort to clear the minimum-sample-size bar. Must be >= the lookback window." },
     ],
-    outputs: ["Weekly outbound performance summary", "Play-level analysis with conversion rates", "Winning signals and their correlation scores", "Next-week allocation recommendation", "A/B test suggestions for message variants", "Executive summary (copy-paste for leadership)"],
+    outputs: ["Weekly outbound performance summary", "Play-level analysis with conversion rates", "Real signal/persona/channel/score-band breakdowns with a minimum-sample-size flag (no invented winners on a thin slice)", "Next-week allocation recommendation", "A/B test suggestions for message variants", "Executive summary (copy-paste for leadership)"],
     requirements: ["At least one completed outbound cycle (Scout → Strategist → Email → Revenue) must exist in the database"],
   },
 };

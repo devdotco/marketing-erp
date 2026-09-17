@@ -166,6 +166,54 @@ export async function addInstantlyLead(apiKey: string, body: Record<string, unkn
   return (await res.json()) as { id: string };
 }
 
+/**
+ * Instantly's `lt_interest_status` enum — confirmed from the Lead schema
+ * (https://developer.instantly.ai/api/v2/schemas/def-11, reached via the "List leads" and "Patch
+ * lead" reference pages, which both list `lt_interest_status` as one of these nine values): 1
+ * Interested, 2 Meeting Booked, 3 Meeting Completed, 4 Won, 0 Out of Office, -1 Not Interested, -2
+ * Wrong Person, -3 Lost, -4 No Show. Only INTERESTED and MEETING_BOOKED are used by this codebase
+ * today (lib/webhooks/outbound-pause.ts) — the rest are listed so a future caller doesn't have to
+ * re-derive them.
+ */
+export const INSTANTLY_INTEREST_STATUS = {
+  NOT_INTERESTED: -1,
+  WRONG_PERSON: -2,
+  LOST: -3,
+  NO_SHOW: -4,
+  OUT_OF_OFFICE: 0,
+  INTERESTED: 1,
+  MEETING_BOOKED: 2,
+  MEETING_COMPLETED: 3,
+  WON: 4,
+} as const;
+
+/**
+ * POST /api/v2/leads/update-interest-status —
+ * https://developer.instantly.ai/api-reference/lead/update-the-interest-status-of-a-lead
+ * (method confirmed POST, not PATCH, despite the path reading like a sub-resource). This is the
+ * endpoint Instantly's own doc says drives its automations on write — "campaign leads may be
+ * completed, opportunities updated or created, and matching automations and CRM-status
+ * subsequences triggered" — unless `disable_auto_interest` is set. That's the documented mechanism
+ * for stopping a lead's remaining campaign steps without deleting them (no separate "paused"
+ * field exists on the lead — see PATCH /api/v2/leads/{id}'s schema, which only exposes the same
+ * `lt_interest_status`). Used by lib/webhooks/outbound-pause.ts to implement Email Outbound's
+ * advertised "stops sequences on positive signal" and LinkedIn Outbound's "on reply, pauses email"
+ * — see that file for which events qualify and why. `campaign_id` / `list_id` are optional
+ * disambiguators the docs support when the same email exists in more than one campaign; this
+ * codebase doesn't persist a per-prospect campaign id today (only the play's, which can change),
+ * so callers key by `lead_email` alone.
+ */
+export async function updateInstantlyLeadInterestStatus(
+  apiKey: string,
+  body: { lead_email: string; interest_value: number; campaign_id?: string; list_id?: string },
+): Promise<void> {
+  const res = await instantlyFetch("/leads/update-interest-status", apiKey, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`http_${res.status}: ${(await res.text()).slice(0, 300)}`);
+}
+
 export interface InstantlyAccountSummary {
   email: string;
   status?: number;

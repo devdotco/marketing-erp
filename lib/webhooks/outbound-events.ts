@@ -458,6 +458,11 @@ export type WebhookDeps<P extends ProspectCandidate = ProspectCandidate> = {
   /** Forgets a claim, so the vendor's retry of a delivery that failed part-way is processed. */
   release(workspaceId: string, vendor: WebhookVendor, key: string): Promise<void>;
   applyUpdate(prospect: P, update: ProspectUpdate): Promise<void>;
+  /** Best-effort cross-channel "stop on positive signal" — see lib/webhooks/outbound-pause.ts for
+   * which events do anything and what vendor call(s) they imply. Must never throw (that module's
+   * own contract), but processWebhook also guards the call itself so a deps implementation that
+   * doesn't honour that contract still can't 500 the webhook. */
+  applyChannelPause(prospect: P, event: OutboundEvent): Promise<void>;
   /** The workspace's Outbound Revenue agent, if it exists and is enabled. */
   revenueAgentId(workspaceId: string): Promise<string | null>;
   createRevenueRun(args: {
@@ -516,6 +521,17 @@ export async function processWebhook<P extends ProspectCandidate>(
   let runId: string | null = null;
   try {
     for (const update of prospectUpdatesFor(parsed.event, deps.now())) await deps.applyUpdate(prospect, update);
+
+    // Best-effort and never allowed to affect the webhook's own outcome — see
+    // lib/webhooks/outbound-pause.ts's runChannelPause, which is the real implementation of this
+    // deps method and already catches everything internally. Caught again here regardless, so a
+    // deps implementation that doesn't honour that contract (e.g. in a test) still can't turn a
+    // pause failure into a 500 that makes the vendor retry a delivery that otherwise succeeded.
+    try {
+      await deps.applyChannelPause(prospect, parsed.event);
+    } catch (err) {
+      deps.log(`[webhooks] ${parsed.vendor}: ${parsed.vendorEventType} channel-pause failed unexpectedly: ${(err as Error).message}`);
+    }
 
     const revenueEvent = REVENUE_EVENT[parsed.event];
     if (revenueEvent) {
