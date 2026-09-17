@@ -7,7 +7,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { enqueueAgentRun } from "@/lib/queue";
+import { decryptCredentials } from "@/lib/crypto";
+import { updateInstantlyLeadInterestStatus } from "@/lib/integrations/instantly";
 import { authenticateWebhook } from "@/lib/integrations/webhook-auth";
+import { runChannelPause, type ChannelPauseDeps, type ChannelPauseState } from "./outbound-pause";
 import {
   parseWebhookPayload,
   processWebhook,
@@ -40,6 +43,55 @@ function candidateWhere(vendor: WebhookVendor, identity: LeadIdentity): Prisma.O
   for (const slug of identity.linkedInSlugs) or.push({ linkedInUrl: { contains: `/in/${slug}`, mode: "insensitive" } });
   return or;
 }
+
+// The real (Prisma + live Instantly call) implementation of ChannelPauseDeps — see
+// lib/webhooks/outbound-pause.ts for the orchestration this wires up to. Kept as its own object,
+// same as prismaDeps below, so both stay easy to read as "here is the whole real-world contract".
+const channelPauseDeps: ChannelPauseDeps = {
+  async instantlyApiKey(workspaceId) {
+    const integration = await prisma.integration.findUnique({
+      where: { workspaceId_provider: { workspaceId, provider: "INSTANTLY" } },
+    });
+    return integration ? (await decryptCredentials<{ apiKey: string }>(integration.encryptedCredentials)).apiKey : null;
+  },
+
+  async setInterestStatus(apiKey, email, interestValue) {
+    await updateInstantlyLeadInterestStatus(apiKey, { lead_email: email, interest_value: interestValue });
+  },
+
+  // Merged into the same `intelligence` JSON column the Strategist writes its scoring/intelligence
+  // keys into (see outbound-strategist.ts) — read-then-write, not a transaction: the dedupe claim
+  // in outbound-events.ts already means at most one delivery is processing this prospect at a
+  // time, so the only real race is with a Strategist re-score landing mid-write, which is rare
+  // enough and low-stakes enough (a channelPause key merged a beat late) not to warrant a
+  // transaction here — same tradeoff outbound-email.ts's backfillApolloEnrichment already makes.
+  async recordState(prospectId, workspaceId, state: ChannelPauseState) {
+    // findFirst rather than findUnique(by id) so the where clause carries workspaceId explicitly —
+    // id is already workspace-unique on its own (cuid), but every OutboundProspect call in this
+    // codebase scopes by workspaceId too as defense in depth (see the "prospect scoping" guard in
+    // test/content.test.ts).
+    const row = await prisma.outboundProspect.findFirst({ where: { id: prospectId, workspaceId }, select: { intelligence: true } });
+    const current = (row?.intelligence ?? {}) as Record<string, unknown>;
+    const existingPause = (current.channelPause ?? {}) as ChannelPauseState;
+    await prisma.outboundProspect.updateMany({
+      where: { id: prospectId, workspaceId },
+      data: { intelligence: { ...current, channelPause: { ...existingPause, ...state } } as Prisma.InputJsonObject },
+    });
+  },
+
+  async notifyFailure(workspaceId, prospectId, message) {
+    await prisma.notification.create({
+      data: {
+        workspaceId,
+        type: "outbound_channel_pause_failed",
+        title: "Outbound Engine: couldn't pause a sequence",
+        body: `${message} (prospect ${prospectId})`,
+      },
+    });
+  },
+
+  log: (message) => console.error(message),
+};
 
 const prismaDeps: WebhookDeps<ProspectCandidate> = {
   async findCandidates(vendor, identity, workspaceId) {
@@ -77,6 +129,10 @@ const prismaDeps: WebhookDeps<ProspectCandidate> = {
       },
       data: update.data,
     });
+  },
+
+  async applyChannelPause(prospect, event) {
+    await runChannelPause(event, prospect, channelPauseDeps);
   },
 
   async revenueAgentId(workspaceId) {

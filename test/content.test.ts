@@ -141,6 +141,15 @@ import {
   type ProspectUpdate,
   type WebhookDeps,
 } from "@/lib/webhooks/outbound-events";
+import { planChannelPause, PAUSE_TRIGGER_EVENTS, type PauseCandidate } from "@/lib/webhooks/outbound-pause";
+import {
+  buildPlaySlices,
+  buildSliceRows,
+  personaBucket,
+  scoreBand,
+  MIN_SLICE_SAMPLE_SIZE,
+  type SliceInputProspect,
+} from "@/lib/agent-handlers/outbound-cro";
 import {
   buildGoogleTtsRequest,
   chunkDialogue,
@@ -2619,10 +2628,11 @@ check(
 
   // ── The whole flow, against an in-memory store ──
   type Row = ProspectCandidate & { emailRepliedAt: Date | null; linkedInRepliedAt: Date | null; interestedAt: Date | null; meetingBookedAt: Date | null; excludeUntil: Date | null };
-  function memoryDeps(rows: Row[], opts: { revenueEnabled?: boolean; failFirstUpdate?: boolean } = {}) {
+  function memoryDeps(rows: Row[], opts: { revenueEnabled?: boolean; failFirstUpdate?: boolean; failChannelPause?: boolean } = {}) {
     const receipts = new Set<string>();
     const runs: Record<string, unknown>[] = [];
     const enqueued: string[] = [];
+    const pauseCalls: Array<{ prospectId: string; event: string }> = [];
     let calls = 0;
     let failNext = opts.failFirstUpdate ?? false;
     const deps: WebhookDeps<Row> = {
@@ -2656,6 +2666,10 @@ check(
         if (update.onlyIfNull && row[update.onlyIfNull] !== null) return;
         Object.assign(row, update.data);
       },
+      async applyChannelPause(prospect, event) {
+        pauseCalls.push({ prospectId: prospect.id, event });
+        if (opts.failChannelPause) throw new Error("pause boom");
+      },
       async revenueAgentId() {
         return opts.revenueEnabled === false ? null : "cfg_revenue";
       },
@@ -2669,7 +2683,7 @@ check(
       now: () => now,
       log: () => undefined,
     };
-    return { deps, runs, enqueued, receipts, calls: () => calls };
+    return { deps, runs, enqueued, receipts, pauseCalls, calls: () => calls };
   }
   const row = (over: Partial<Row>): Row => ({ ...cand({}), emailRepliedAt: null, linkedInRepliedAt: null, interestedAt: null, meetingBookedAt: null, excludeUntil: null, ...over });
 
@@ -2678,6 +2692,7 @@ check(
     const m = memoryDeps(rows);
     const first = await processWebhook(r, "ws1", m.deps);
     check("flow: a documented Instantly reply matches the prospect and starts one Outbound Revenue run", first.status === 200 && first.outcome === "run_created" && m.runs.length === 1 && m.enqueued.length === 1, { first, runs: m.runs });
+    check("flow: applyChannelPause is called for every located event, even one that plans no pause step (email_reply)", m.pauseCalls.length === 1 && m.pauseCalls[0]?.prospectId === "p_jane" && m.pauseCalls[0]?.event === "email_reply", m.pauseCalls);
     check("flow: the run carries the prospect, our event name, the reply and the vendor event", m.runs[0]?.prospectId === "p_jane" && m.runs[0]?.event === "email_reply" && String(m.runs[0]?.replyText).startsWith("Sounds") && m.runs[0]?.sourceEvent === "reply_received", m.runs[0]);
     check("flow: the reply is recorded on the prospect", rows[0]!.status === "REPLIED" && rows[0]!.emailRepliedAt?.getTime() === now.getTime(), rows[0]);
     check("flow: a prospect with the same address in ANOTHER workspace is untouched", rows[1]!.status === "IN_SEQUENCE" && rows[1]!.emailRepliedAt === null, rows[1]);
@@ -2749,6 +2764,105 @@ check(
     const res = await processWebhook(bounced, "ws1", m.deps);
     check("flow: a bounce suppresses the prospect and starts no run", res.outcome === "updated" && rows[0]!.status === "SUPPRESSED" && m.runs.length === 0, { res, row: rows[0] });
   }
+
+  {
+    // A pause-orchestration failure (network error, bad credentials, whatever) must never turn an
+    // otherwise-successful webhook into a 500 — that would make the vendor retry a delivery that
+    // already updated the database and (if applicable) already started a Revenue run, risking a
+    // second one. See outbound-events.ts's processWebhook, which wraps deps.applyChannelPause in
+    // its own try/catch on top of runChannelPause's own never-throws contract.
+    const rows = [row({ id: "p_jane", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows, { failChannelPause: true });
+    const res = await processWebhook(r, "ws1", m.deps);
+    check("flow: a channel-pause failure still returns 200/run_created, not 500", res.status === 200 && res.outcome === "run_created" && m.pauseCalls.length === 1, res);
+  }
+}
+
+// Outbound Engine: cross-channel "stop on positive signal" (lib/webhooks/outbound-pause.ts) and
+// the CRO's real signal/persona/channel/score-band slicing (lib/agent-handlers/outbound-cro.ts).
+// Both pure — no network, no DB.
+{
+  const withInstantly: PauseCandidate = { instantlyLeadId: "lead_1", aimfoxLeadId: null };
+  const withAimfox: PauseCandidate = { instantlyLeadId: null, aimfoxLeadId: "aimfox_1" };
+  const withBoth: PauseCandidate = { instantlyLeadId: "lead_1", aimfoxLeadId: "aimfox_1" };
+  const withNeither: PauseCandidate = { instantlyLeadId: null, aimfoxLeadId: null };
+
+  check("pause: exactly interested, meeting_booked, linkedin_reply are trigger events", [...PAUSE_TRIGGER_EVENTS].sort().join() === ["interested", "linkedin_reply", "meeting_booked"].sort().join(), [...PAUSE_TRIGGER_EVENTS]);
+  for (const untouched of ["email_reply", "bounced", "unsubscribed", "not_interested", "connection_accepted", "connection_declined"] as const) {
+    check(`pause: "${untouched}" plans nothing at all, even with both vendor ids on record`, planChannelPause(untouched, withBoth).length === 0);
+  }
+
+  const interested = planChannelPause("interested", withInstantly);
+  check("pause: interested + instantlyLeadId → one Instantly step at interestValue 1", interested.length === 1 && interested[0]?.vendor === "INSTANTLY" && interested[0]?.action === "set_interest_status" && interested[0]?.interestValue === 1, interested);
+
+  const meeting = planChannelPause("meeting_booked", withInstantly);
+  check("pause: meeting_booked + instantlyLeadId → one Instantly step at interestValue 2", meeting.length === 1 && meeting[0]?.action === "set_interest_status" && meeting[0]?.interestValue === 2, meeting);
+
+  const liReplyCross = planChannelPause("linkedin_reply", withInstantly);
+  check("pause: linkedin_reply + instantlyLeadId → cross-channel Instantly step, interestValue 1", liReplyCross.length === 1 && liReplyCross[0]?.vendor === "INSTANTLY" && liReplyCross[0]?.interestValue === 1 && /cross-channel/.test(liReplyCross[0]!.reason), liReplyCross);
+
+  check("pause: interested with only an aimfoxLeadId on record → no Instantly step, one unsupported Aimfox step", (() => {
+    const steps = planChannelPause("interested", withAimfox);
+    return steps.length === 1 && steps[0]?.vendor === "AIMFOX" && steps[0]?.action === "unsupported";
+  })());
+
+  check("pause: a trigger event with both vendor ids plans one Instantly step AND records the Aimfox limitation", (() => {
+    const steps = planChannelPause("meeting_booked", withBoth);
+    return steps.length === 2 && steps.some((s) => s.vendor === "INSTANTLY") && steps.some((s) => s.vendor === "AIMFOX" && s.action === "unsupported");
+  })());
+
+  check("pause: a trigger event with neither vendor id on record plans nothing — 'only act for prospects that actually have ... on record'", planChannelPause("interested", withNeither).length === 0);
+
+  // ── CRO slicing ──
+  check("cro: scoreBand boundaries", scoreBand(0) === "0-49" && scoreBand(49) === "0-49" && scoreBand(50) === "50-64" && scoreBand(64) === "50-64" && scoreBand(65) === "65-79" && scoreBand(79) === "65-79" && scoreBand(80) === "80-100" && scoreBand(100) === "80-100");
+
+  check("cro: personaBucket prefers Apollo's own seniority, title-cased", personaBucket("Some Title", "c_suite") === "C Suite");
+  check("cro: personaBucket falls back to a title keyword match when Apollo has nothing", personaBucket("VP of Engineering", null) === "VP" && personaBucket("Director of Ops", undefined) === "Director");
+  check("cro: personaBucket falls back further to a generic IC bucket for an unrecognised title", personaBucket("Account Executive", null) === "Other / IC (from title, no Apollo seniority)");
+  check("cro: personaBucket with nothing at all", personaBucket(null, null) === "(no title recorded)");
+
+  const flags = { replied: (r: SliceInputProspect) => r.replied, interested: (r: SliceInputProspect) => r.interested, meetingBooked: (r: SliceInputProspect) => r.meetingBooked };
+  const p = (over: Partial<SliceInputProspect>): SliceInputProspect => ({
+    playId: "play1",
+    channel: "EMAIL_ONLY",
+    score: 70,
+    title: null,
+    primarySignal: "Recently raised Series B",
+    messagingAngle: null,
+    apolloSeniority: null,
+    replied: false,
+    interested: false,
+    meetingBooked: false,
+    ...over,
+  });
+
+  // A small slice (below MIN_SLICE_SAMPLE_SIZE) is flagged; a slice that clears it is not.
+  const thin = [p({}), p({ replied: true })];
+  const thinRows = buildSliceRows(thin, () => "only-bucket", flags);
+  check("cro: a slice under the minimum sample size is flagged insufficientData", thinRows.length === 1 && thinRows[0]?.added === 2 && thinRows[0]?.insufficientData === true, thinRows);
+
+  const thick = Array.from({ length: MIN_SLICE_SAMPLE_SIZE }, (_, i) => p({ replied: i < 3, interested: i < 1 }));
+  const thickRows = buildSliceRows(thick, () => "only-bucket", flags);
+  check(
+    "cro: a slice at the minimum sample size is not flagged, and its rates are computed correctly",
+    thickRows.length === 1 && thickRows[0]?.insufficientData === false && thickRows[0]?.added === MIN_SLICE_SAMPLE_SIZE && thickRows[0]?.replied === 3 && thickRows[0]?.replyRate === "30.0%" && thickRows[0]?.interested === 1 && thickRows[0]?.positiveRate === "10.0%",
+    thickRows,
+  );
+
+  // buildPlaySlices groups a mixed cohort into all four axes correctly, and different plays'
+  // prospects never mix (the caller is expected to have already filtered to one play — this just
+  // checks the aggregation itself doesn't accidentally key on playId).
+  const cohort: SliceInputProspect[] = [
+    p({ primarySignal: "Series B", apolloSeniority: "vp", channel: "EMAIL_AND_LINKEDIN", score: 85, replied: true }),
+    p({ primarySignal: "Series B", apolloSeniority: "vp", channel: "EMAIL_AND_LINKEDIN", score: 82 }),
+    p({ primarySignal: "Hiring 5 engineers", apolloSeniority: "director", channel: "EMAIL_ONLY", score: 68, interested: true }),
+  ];
+  const slices = buildPlaySlices(cohort);
+  check("cro: buildPlaySlices bySignal groups by exact primarySignal text", slices.bySignal.find((r) => r.value === "Series B")?.added === 2 && slices.bySignal.find((r) => r.value === "Hiring 5 engineers")?.added === 1, slices.bySignal);
+  check("cro: buildPlaySlices byPersona groups by title-cased Apollo seniority", slices.byPersona.find((r) => r.value === "Vp")?.added === 2, slices.byPersona);
+  check("cro: buildPlaySlices byScoreBand groups by band, not raw score", slices.byScoreBand.find((r) => r.value === "80-100")?.added === 2 && slices.byScoreBand.find((r) => r.value === "65-79")?.added === 1, slices.byScoreBand);
+  check("cro: buildPlaySlices byChannel separates EMAIL_AND_LINKEDIN from EMAIL_ONLY", slices.byChannel.find((r) => r.value === "EMAIL_AND_LINKEDIN")?.added === 2 && slices.byChannel.find((r) => r.value === "EMAIL_ONLY")?.added === 1, slices.byChannel);
+  check("cro: every row in this tiny cohort is flagged insufficientData (well under the minimum)", [...slices.bySignal, ...slices.byPersona, ...slices.byScoreBand, ...slices.byChannel].every((r) => r.insufficientData === true));
 }
 
 // Podcast voice providers: Google Gemini TTS as the alternative to Cartesia

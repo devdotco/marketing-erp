@@ -28,6 +28,24 @@
  * Rate limit: 60 requests/minute across all endpoints, any key. A 429 means stop, not retry
  * immediately — see lib/agent-handlers/linkedin-engager-delivery.ts's batch executor.
  *
+ * No removeAimfoxCampaignAudience / pauseAimfoxLead export exists here on purpose (2026-09-17,
+ * checked for lib/webhooks/outbound-pause.ts's "stop on positive signal" feature). A "Remove
+ * Profile From Campaign" action DOES exist in Aimfox's product surface — it's listed as a Campaign
+ * operation (alongside Add Profile to Campaign, Pause, Resume) in Aimfox's own official n8n
+ * integration node ("built and maintained by Aimfox partners and verified by n8n" —
+ * help.aimfox.com/en/articles/13859154-aimfox-x-n8n-integration), and Aimfox's Make.com app lists
+ * a separate "Pause a Campaign" / "Resume a Campaign" pair (whole-campaign, not per-lead —
+ * apps.make.com/aimfox). So a per-lead removal almost certainly has a real REST endpoint behind
+ * it. But docs.aimfox.com serves a JS-rendered empty shell to a plain, unauthenticated fetch (same
+ * problem the header above already notes for the conversation endpoints), and neither the n8n node
+ * listing nor the Make app page exposes the underlying HTTP method/path/body — only the product
+ * label. Per this task's own instruction not to guess an endpoint, this file adds no function for
+ * it. lib/webhooks/outbound-pause.ts records "cannot pause Aimfox" as a known limitation instead
+ * of fabricating a call. Whoever next has authenticated access to docs.aimfox.com (or Aimfox
+ * support) should confirm the real contract and fill this in — likely `DELETE
+ * /campaigns/{id}/audience` mirroring addAimfoxCampaignAudience's `POST`, but that is a guess and
+ * must be verified before use.
+ *
  * Every function does exactly one HTTP call and returns the parsed body or throws a plain `Error`
  * (message prefixed `http_<status>:` on a non-2xx response, `unreachable:` on a network failure) —
  * callers build their own `AgentInputError` with context, matching lib/integrations/apollo.ts.
