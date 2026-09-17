@@ -319,7 +319,12 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
           <div className="card" style={{ padding: 0, overflow: "hidden" }}>
             <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h2 style={{ fontSize: 14, fontWeight: 600 }}>Recent runs</h2>
-              <Link href={`/runs?agent=${slug}`} style={{ fontSize: 12, color: "var(--text-dim)", textDecoration: "none" }}>View all →</Link>
+              <div style={{ display: "flex", gap: 14 }}>
+                {slug === "keyword-research" && (
+                  <Link href="/agents/keyword-research/history" style={{ fontSize: 12, color: "var(--text-dim)", textDecoration: "none" }}>Scan history →</Link>
+                )}
+                <Link href={`/runs?agent=${slug}`} style={{ fontSize: 12, color: "var(--text-dim)", textDecoration: "none" }}>View all →</Link>
+              </div>
             </div>
             {recentRuns.length === 0 ? (
               <div style={{ padding: "32px 20px", textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
