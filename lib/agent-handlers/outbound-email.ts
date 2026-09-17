@@ -74,9 +74,13 @@ async function listCampaignsCached(apiKey: string): Promise<Array<{ id: string; 
  * all. Only a play whose campaign was typed as plain text while Instantly wasn't connected yet
  * (playConfig.instantlyCampaignName only) falls back to a by-name search, same convention as
  * every other by-name lookup in this codebase (Aimfox, GHL pipelines).
+ *
+ * `apiKey` is always a real, connected key here — outboundEmailHandler refuses the whole run
+ * before this is ever called if Instantly isn't connected (see its own doc comment), so there is
+ * no "not connected, resolve nothing yet" branch to fall back to.
  */
 async function resolveInstantlyCampaign(
-  apiKey: string | null,
+  apiKey: string,
   playConfig: OutboundPlayConfig,
   playName: string,
 ): Promise<{ campaignId: string; campaignName: string }> {
@@ -93,12 +97,6 @@ async function resolveInstantlyCampaign(
   }
 
   const targetName = plan.targetName;
-  if (!apiKey) {
-    // Not connected — nothing to resolve against yet; the delivery stages with the typed name and
-    // activates as a simulation, matching every other agent's "not connected" behaviour.
-    return { campaignId: targetName, campaignName: targetName };
-  }
-
   const campaigns = await listCampaignsCached(apiKey);
   const match = campaigns.find((c) => c.name === targetName) ?? campaigns.find((c) => c.name.toLowerCase().includes(targetName.toLowerCase()));
   if (!match) {
@@ -258,18 +256,30 @@ export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
     return { output: { error: "No prospectId(s) in run.input.prospectId / run.input.prospectIds" }, costUsd: 0 };
   }
 
+  // Instantly is this agent's only send channel — checked before the prospect lookup below (a DB
+  // query that would otherwise run for nothing) and, more importantly, before generateVariables()
+  // starts spending Anthropic tokens writing personalisation for prospects that would just sit
+  // staged forever with nowhere real to send. This used to stage anyway and let approval silently
+  // fabricate `instantly_...` lead ids instead (see outbound-email-delivery.ts) — refusing here,
+  // up front, is the legible version: names the integration, says where to connect it, and spends
+  // nothing on a run that can't complete for real.
+  const instantlyIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
+  });
+  if (!instantlyIntegration) {
+    throw new AgentInputError(
+      "Instantly isn't connected for this workspace, so Outbound Email has no live campaign to add these leads to.",
+      "Connect Instantly in Settings → Integrations → Instantly, then run Outbound Email again.",
+      "instantly_not_connected",
+    );
+  }
+  const connected = true;
+  const apiKey = (await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials)).apiKey;
+
   const prospects = await prisma.outboundProspect.findMany({
     where: { id: { in: allIds }, workspaceId: run.agentConfig.workspaceId },
     include: { play: true },
   });
-
-  const instantlyIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "INSTANTLY" } },
-  });
-  const connected = Boolean(instantlyIntegration);
-  const apiKey = instantlyIntegration
-    ? (await decryptCredentials<{ apiKey: string }>(instantlyIntegration.encryptedCredentials)).apiKey
-    : null;
 
   const playConfigCache = new Map<string, OutboundPlayConfig>();
   const campaignCache = new Map<string, { campaignId: string; campaignName: string }>();
@@ -365,9 +375,10 @@ export const outboundEmailHandler: AgentHandler = async (run, updateStatus) => {
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
     approvalRequired: true,
-    approvalNote: connected
-      ? `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Instantly campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Instantly yet.`
-      : `No Instantly integration is connected — approving this run will record simulated lead adds instead of live ones.`,
+    // Instantly being connected is no longer conditional here — the handler refuses the whole run
+    // above if it isn't (see that check's doc comment) — so this note only ever describes the real,
+    // live-send path.
+    approvalNote: `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Instantly campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Instantly yet.`,
   };
 
   await updateStatus("AWAITING_APPROVAL", output);

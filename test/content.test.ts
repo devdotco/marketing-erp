@@ -66,6 +66,10 @@ import {
   planCampaignResolution,
   selectPeopleToReveal,
   dedupeNewProspects,
+  resolveScoringWeights,
+  computeWeightedTotal,
+  DEFAULT_SCORING_WEIGHTS,
+  type ScoringDimension,
 } from "@/lib/agent-handlers/outbound-play-config";
 import { planScoutChaining, planStrategistChaining } from "@/lib/agent-handlers/outbound-chain-plan";
 import {
@@ -830,16 +834,23 @@ check(
     firstEmailActivation,
   );
 
-  // No Instantly integration connected → simulate, still no network call.
+  // No Instantly integration connected → refuse (2026-09-17: this used to fabricate an
+  // `instantly_...` lead id and report the send as successful — see outbound-email-delivery.ts's
+  // doc comment for why that's worse than no send for a real campaign). Still no network call.
   let simEmailCalls = 0;
-  const simulatedEmail = await activateOutboundEmailDelivery(
-    { ...emailDelivery, connected: false },
-    { addLead: async () => { simEmailCalls++; return { id: "x" }; } },
-  );
+  let simEmailErr: unknown = null;
+  try {
+    await activateOutboundEmailDelivery(
+      { ...emailDelivery, connected: false },
+      { addLead: async () => { simEmailCalls++; return { id: "x" }; } },
+    );
+  } catch (e) {
+    simEmailErr = e;
+  }
   check(
-    "activateOutboundEmailDelivery simulates (no network call) when Instantly isn't connected",
-    simEmailCalls === 0 && simulatedEmail.source === "simulation" && simulatedEmail.status === "activated",
-    simulatedEmail,
+    "activateOutboundEmailDelivery refuses (no network call, no fabricated id) when Instantly isn't connected",
+    simEmailCalls === 0 && simEmailErr instanceof AgentInputError && simEmailErr.code === "instantly_not_connected",
+    simEmailErr,
   );
 
   // --- Outbound LinkedIn / Aimfox --------------------------------------------------------
@@ -885,15 +896,22 @@ check(
     liFirstActivation,
   );
 
+  // No Aimfox integration connected → refuse, same reasoning as the Instantly case above. Still no
+  // network call.
   let simLiCalls = 0;
-  const simulatedLi = await activateOutboundLinkedinDelivery(
-    { ...liDelivery, connected: false },
-    { addProfile: async () => { simLiCalls++; return {}; } },
-  );
+  let simLiErr: unknown = null;
+  try {
+    await activateOutboundLinkedinDelivery(
+      { ...liDelivery, connected: false },
+      { addProfile: async () => { simLiCalls++; return {}; } },
+    );
+  } catch (e) {
+    simLiErr = e;
+  }
   check(
-    "activateOutboundLinkedinDelivery simulates (no network call) when Aimfox isn't connected",
-    simLiCalls === 0 && simulatedLi.source === "simulation" && simulatedLi.status === "activated",
-    simulatedLi,
+    "activateOutboundLinkedinDelivery refuses (no network call, no fabricated id) when Aimfox isn't connected",
+    simLiCalls === 0 && simLiErr instanceof AgentInputError && simLiErr.code === "aimfox_not_connected",
+    simLiErr,
   );
 
   // --- Outbound Revenue / erp.io CRM ------------------------------------------------------
@@ -1351,6 +1369,78 @@ check(
 }
 
 // ---------------------------------------------------------------------------
+// Scoring weights (lib/agent-handlers/outbound-play-config.ts) — resolveScoringWeights turns a
+// play's (partial, possibly-unbalanced) scoringWeights into the six integer maxima the Strategist's
+// prompt and tool schema use, always summing to exactly 100; computeWeightedTotal recomputes a
+// scored prospect's total from its raw dimension scores, clamped to those maxima. Both are
+// deliberately pure/no-network so the normalisation math — the part most likely to have an
+// off-by-one — is checked here rather than only by eyeballing a live run.
+// ---------------------------------------------------------------------------
+{
+  const defaultsOnly = resolveScoringWeights({});
+  check(
+    "resolveScoringWeights: no overrides returns DEFAULT_SCORING_WEIGHTS untouched (already sums to 100)",
+    defaultsOnly.signal === 25 && defaultsOnly.serviceFit === 20 && defaultsOnly.firmographic === 25 &&
+      defaultsOnly.persona === 15 && defaultsOnly.timing === 10 && defaultsOnly.dataQuality === 5,
+    defaultsOnly,
+  );
+  check(
+    "resolveScoringWeights: undefined/null input behaves the same as {}",
+    JSON.stringify(resolveScoringWeights(undefined)) === JSON.stringify(defaultsOnly) &&
+      JSON.stringify(resolveScoringWeights(null)) === JSON.stringify(defaultsOnly),
+  );
+
+  const sumTo100 = (w: Record<ScoringDimension, number>) => Object.values(w).reduce((a: number, b: number) => a + b, 0);
+  check("resolveScoringWeights: always sums to exactly 100 for the defaults", sumTo100(defaultsOnly) === 100, defaultsOnly);
+
+  // A play that only raised `timing` (25 instead of the default 10) — every dimension's weight
+  // (not just the one that changed) shifts a little once normalised, since the other five now make
+  // up a smaller share of a bigger pre-normalisation sum (115 instead of 100).
+  const timingHeavy = resolveScoringWeights({ timing: 25 });
+  check("resolveScoringWeights: one raised dimension still sums to exactly 100", sumTo100(timingHeavy) === 100, timingHeavy);
+  check("resolveScoringWeights: the raised dimension's normalised share grows relative to its old default", timingHeavy.timing > defaultsOnly.timing, timingHeavy);
+
+  // Weights that don't sum to 100 at all — the case the running total in PlaysManager.tsx warns
+  // about. Still always normalises to exactly 100, never silently left at the raw sum.
+  const lopsided = resolveScoringWeights({ signal: 10, serviceFit: 10, firmographic: 10, persona: 10, timing: 10, dataQuality: 5 }); // raw sum 55
+  check("resolveScoringWeights: a raw sum far from 100 still normalises to exactly 100", sumTo100(lopsided) === 100, lopsided);
+
+  // Every weight zeroed — normalising would divide by zero, so this falls back to the defaults
+  // rather than asking Claude to score six 0-point dimensions.
+  const allZero = resolveScoringWeights({ signal: 0, serviceFit: 0, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 });
+  check("resolveScoringWeights: all-zero weights fall back to the defaults instead of dividing by zero", JSON.stringify(allZero) === JSON.stringify(defaultsOnly), allZero);
+
+  // A negative or non-finite override is treated as unset (falls back to that dimension's default)
+  // rather than propagating a bad value into the prompt/tool schema.
+  const badValue = resolveScoringWeights({ signal: -5, serviceFit: NaN });
+  check("resolveScoringWeights: a negative override falls back to the default for that dimension", badValue.signal === 25, badValue);
+  check("resolveScoringWeights: a NaN override falls back to the default for that dimension", badValue.serviceFit === 20, badValue);
+
+  // computeWeightedTotal: sums six raw dimension scores, clamped to the resolved weights.
+  const weights = { signal: 25, serviceFit: 20, firmographic: 25, persona: 15, timing: 10, dataQuality: 5 };
+  check(
+    "computeWeightedTotal: sums exact-fit dimension scores",
+    computeWeightedTotal({ signal: 20, serviceFit: 15, firmographic: 20, persona: 10, timing: 8, dataQuality: 4 }, weights) === 77,
+  );
+  check(
+    "computeWeightedTotal: a dimension score above its weight is clamped down, not left to inflate the total",
+    computeWeightedTotal({ signal: 999, serviceFit: 0, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 }, weights) === 25,
+  );
+  check(
+    "computeWeightedTotal: a negative dimension score is clamped to 0, not subtracted",
+    computeWeightedTotal({ signal: -10, serviceFit: 20, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 }, weights) === 20,
+  );
+  check(
+    "computeWeightedTotal: a missing/non-numeric dimension score counts as 0 rather than throwing",
+    computeWeightedTotal({ signal: 20 }, weights) === 20,
+  );
+  check(
+    "computeWeightedTotal: every dimension maxed out sums to exactly 100 for the default weights",
+    computeWeightedTotal(DEFAULT_SCORING_WEIGHTS, DEFAULT_SCORING_WEIGHTS) === 100,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Campaign resolution from a play's config — replaces outbound-email.ts's old CAMPAIGN_MAP and
 // outbound-linkedin.ts's old AIMFOX_CAMPAIGN_MAP (both keyed by play slug). No slug-derived name
 // convention anywhere in this decision.
@@ -1428,7 +1518,7 @@ check(
   check("planScoutChaining: enqueues Strategist with exactly the new prospect ids", scoutPlan?.agentSlug === "outbound-strategist" && JSON.stringify(scoutPlan.input.prospectIds) === JSON.stringify(["p1", "p2", "p3"]), scoutPlan);
   check("planScoutChaining: is deterministic — calling it again with the same output plans the same thing", JSON.stringify(planScoutChaining(scoutOutput, autoAdvanceOn)) === JSON.stringify(scoutPlan));
   check("planScoutChaining: autoAdvance off plans nothing", planScoutChaining(scoutOutput, autoAdvanceOff) === null);
-  check("planScoutChaining: no prospectIds plans nothing (e.g. a simulation run)", planScoutChaining({ playSlug: "acme-icp", prospectIds: [] }, autoAdvanceOn) === null);
+  check("planScoutChaining: no prospectIds plans nothing (e.g. a run that matched but revealed no emails)", planScoutChaining({ playSlug: "acme-icp", prospectIds: [] }, autoAdvanceOn) === null);
   check("planScoutChaining: no playSlug plans nothing", planScoutChaining({ prospectIds: ["p1"] }, autoAdvanceOn) === null);
 
   const strategistOutput = {

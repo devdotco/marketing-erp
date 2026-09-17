@@ -37,7 +37,7 @@ export interface OutboundLinkedinDelivery {
   message1: string;
   message2: string;
   aimfoxLeadId?: string;
-  source?: "aimfox_live" | "simulation";
+  source?: "aimfox_live";
   /** Set only on a delivery that failed to activate within a batch that had at least one other
    * delivery succeed this same approval call — see on-approve.ts's outboundLinkedinOnApprove.
    * Absent on every successfully staged/activated delivery. */
@@ -91,13 +91,18 @@ export async function activateOutboundLinkedinDelivery(
   if (isChannelActivated(delivery)) return delivery;
 
   if (!delivery.connected || !deps.apiKey) {
-    return {
-      ...delivery,
-      status: "activated",
-      activatedAt: new Date().toISOString(),
-      aimfoxLeadId: `aimfox_${delivery.prospectId.slice(-8)}_${Date.now()}`,
-      source: "simulation",
-    };
+    // outbound-linkedin.ts's staging handler now refuses the whole run up front when Aimfox isn't
+    // connected (see its own doc comment), so reaching this branch means either a run staged
+    // before that refusal shipped, or Aimfox was disconnected between staging and approval. This
+    // used to fabricate an `aimfox_...` lead id and report the connection request as sent — for a
+    // real campaign, that's worse than no send: nothing actually queued in Aimfox, but the
+    // prospect's record would still carry a lead id implying it had. Refuse instead, same as
+    // on-approve.ts's own `channel_disconnected` check for the "was connected, isn't now" case.
+    throw new AgentInputError(
+      `Aimfox isn't connected for this workspace, so ${delivery.firstName} can't be added to campaign "${delivery.campaignName}".`,
+      "Connect Aimfox in Settings → Integrations → Aimfox, then approve this run again.",
+      "aimfox_not_connected",
+    );
   }
 
   const addProfile = deps.addProfile ?? addProfileToAimfoxCampaign;

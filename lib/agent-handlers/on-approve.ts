@@ -197,10 +197,11 @@ async function outboundEmailOnApprove(
       results.push(activated);
       anyActivatedThisCall = true;
 
-      // Best-effort pipeline bookkeeping — the lead add already happened (or was simulated); a
-      // failure writing it back to the prospect record must not undo that or block the approval
-      // from completing. The approve route's own retry loop is what durably persists `activated`
-      // onto run.output (see app/api/runs/[runId]/approve/route.ts).
+      // Best-effort pipeline bookkeeping — the lead add already happened for real (Instantly
+      // rejecting it throws inside activateOutboundEmailDelivery and is caught below, never
+      // reaches here); a failure writing that back to the prospect record must not undo the send
+      // or block the approval from completing. The approve route's own retry loop is what durably
+      // persists `activated` onto run.output (see app/api/runs/[runId]/approve/route.ts).
       await prisma.outboundProspect
         .updateMany({
           where: { id: activated.prospectId, workspaceId: run.agentConfig.workspaceId },
