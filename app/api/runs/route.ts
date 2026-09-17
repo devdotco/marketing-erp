@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { enqueueAgentRun } from "@/lib/queue";
+import { createAgentRun } from "@/lib/agents/create-run";
 import { getActiveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 
 export const dynamic = "force-dynamic";
@@ -38,22 +38,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Agent is not enabled for this workspace" }, { status: 400 });
   }
 
-  const run = await prisma.agentRun.create({
-    data: {
-      workspaceId,
-      agentConfigId: agentConfig.id,
-      input: (input ?? {}) as object,
-      status: "PENDING",
-      triggeredBy: session.user.id!,
-    },
+  const run = await createAgentRun({
+    workspaceId,
+    agentConfigId: agentConfig.id,
+    input,
+    triggeredBy: session.user.id!,
   });
-
-  try {
-    await enqueueAgentRun(run.id);
-  } catch (err) {
-    // Queue failure shouldn't block the response — run stays PENDING and can be retried
-    console.error("Failed to enqueue agent run:", err);
-  }
 
   return NextResponse.json({ runId: run.id }, { status: 201 });
 }
