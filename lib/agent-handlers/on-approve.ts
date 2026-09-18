@@ -22,6 +22,7 @@ import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { AgentInputError } from "@/lib/ai/errors";
 import { resolveCrmConnection } from "@/lib/integrations/crm-connection";
+import { payloadHeaders, type PayloadCredentials } from "@/lib/integrations/payload";
 import {
   activateInstantlyChannel,
   activateApolloSequence,
@@ -434,7 +435,90 @@ async function metaPosterOnApprove(
   return { ...output, pendingPosts: posts, publishedCount };
 }
 
+/**
+ * Blog Writer: when the workspace has Payload CMS connected and the run was configured
+ * to target Payload, publish the approved article as a draft. The HTML in output.content
+ * is already fully rendered (with image URLs), so no re-upload is needed here.
+ *
+ * Idempotent: skips if cmsPublish.source is already "live" (a retried approval cannot
+ * create a second post). Returns undefined when cmsTarget is "None (draft only)" or the
+ * Payload integration isn't connected — those cases just flip to APPROVED with no side effect.
+ */
+async function blogWriterOnApprove(
+  run: AgentRun & { agentConfig: AgentConfig },
+): Promise<Record<string, unknown> | undefined> {
+  const output = (run.output ?? {}) as Record<string, unknown>;
+
+  const existing = output.cmsPublish as Record<string, unknown> | undefined;
+  if (existing?.source === "live") return; // already published — idempotent
+
+  const cmsTarget = String(output.cmsTarget ?? "");
+  if (!cmsTarget || cmsTarget === "None (draft only)") return;
+  if (cmsTarget !== "Payload") return; // WordPress/Storyblok/Webflow on-approval not yet wired
+
+  const integration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "PAYLOAD" } },
+  });
+  if (!integration) {
+    throw new AgentInputError(
+      "The Payload CMS integration was disconnected after this article was written.",
+      "Reconnect it under Settings → Integrations → Payload CMS, then approve this run again.",
+      "channel_disconnected",
+    );
+  }
+
+  const creds = await decryptCredentials<PayloadCredentials>(integration.encryptedCredentials);
+
+  if (creds.bodyFormat === "lexical") {
+    throw new AgentInputError(
+      "This connection's Body format is set to Lexical — HTML→Lexical conversion isn't implemented.",
+      "Switch Body format to html under Settings → Integrations → Payload CMS, then approve again.",
+      "lexical_not_supported",
+    );
+  }
+
+  const html = String(output.content ?? "");
+  const title = String(output.title ?? "Untitled");
+  const slug = String(
+    output.slug ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+  );
+  const metaDescription = String(output.metaDescription ?? "");
+
+  const resp = await fetch(`${creds.baseUrl}/api/${creds.postsCollection}`, {
+    method: "POST",
+    redirect: "error",
+    headers: { ...payloadHeaders(creds), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      slug,
+      [creds.bodyField]: html,
+      excerpt: metaDescription,
+      _status: "draft",
+      ...(creds.tenantId ? { tenant: creds.tenantId } : {}),
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Payload API ${resp.status}: ${(await resp.text().catch(() => "")).slice(0, 300)}`);
+  }
+
+  const result = (await resp.json()) as { doc?: { id: string | number }; id?: string | number };
+  const id = result.doc?.id ?? result.id;
+
+  return {
+    ...output,
+    cmsPublish: {
+      source: "live",
+      cmsTarget: "Payload",
+      publishStatus: "draft",
+      postId: id != null ? String(id) : "unknown",
+      liveUrl: `${creds.baseUrl}/admin/collections/${creds.postsCollection}`,
+      publishedAt: new Date().toISOString(),
+    },
+  };
+}
+
 const ON_APPROVE: Partial<Record<string, OnApproveHandler>> = {
+  "blog-writer": blogWriterOnApprove,
   "email-marketing": emailMarketingOnApprove,
   "prospector": prospectorOnApprove,
   "outbound-email": outboundEmailOnApprove,
