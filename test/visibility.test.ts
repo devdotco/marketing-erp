@@ -164,6 +164,19 @@ const brand: BrandIdentity = {
     geminiDomain({ url: "https://www.bbc.co.uk/news/x", title: "A long headline" }) === "bbc.co.uk",
     geminiDomain({ url: "https://www.bbc.co.uk/news/x", title: "A long headline" }),
   );
+  // The regression: a headline label on a redirect URL used to record
+  // Google's own redirector as a cited publisher, where it climbed to the top
+  // of the citation table. Dropping the source is the smaller error.
+  check(
+    "geminiDomain: a prose title on a redirect URL yields null, not Google's redirector",
+    geminiDomain({ url: redirect.url, title: "Best CRM tools of 2026" }) === null,
+    geminiDomain({ url: redirect.url, title: "Best CRM tools of 2026" }),
+  );
+  check(
+    "geminiDomain: a redirect URL with no title at all yields null",
+    geminiDomain({ url: redirect.url }) === null,
+    geminiDomain({ url: redirect.url }),
+  );
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

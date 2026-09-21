@@ -1,4 +1,5 @@
 import type { KeyVerifier } from "./types";
+import { ENGINE_MODELS } from "@/lib/answer-engines/models";
 
 /**
  * Key checks for the answer engines AI visibility captures from.
@@ -68,7 +69,7 @@ const perplexity: KeyVerifier = async (credentials) => {
         Authorization: `Bearer ${credentials.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "sonar", messages: [{ role: "user", content: "." }], max_tokens: 1 }),
+      body: JSON.stringify({ model: ENGINE_MODELS.PERPLEXITY, messages: [{ role: "user", content: "." }], max_tokens: 1 }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (res.status === 401) {

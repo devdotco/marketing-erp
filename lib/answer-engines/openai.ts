@@ -1,8 +1,9 @@
 import { arr, dedupeCitations, rec, str } from "./parse";
-import { EngineShapeError, type AnswerEngineClient, type AskOptions, type EngineAnswer } from "./types";
+import { ENGINE_MODELS } from "./models";
+import { askSignal, EngineShapeError, type AnswerEngineClient, type AskOptions, type EngineAnswer } from "./types";
 
 const ENDPOINT = "https://api.openai.com/v1/responses";
-const MODEL = "gpt-5";
+const MODEL = ENGINE_MODELS.OPENAI;
 
 /**
  * ChatGPT's model, answering with the hosted web_search tool.
@@ -31,7 +32,7 @@ export function openAiEngine(apiKey: string): AnswerEngineClient {
           tools: [{ type: "web_search" }],
           max_output_tokens: opts.maxTokens ?? 2048,
         }),
-        signal: opts.signal,
+        signal: askSignal(opts),
       });
 
       if (!res.ok) {

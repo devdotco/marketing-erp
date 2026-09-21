@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { dimensionKeyFor, METRICS } from "./observations";
+import { ALL_ENGINES } from "@/lib/answer-engines";
 
 export interface SeriesPoint {
   day: string;
@@ -130,7 +131,13 @@ export async function visibilityByEngine(
       workspaceId,
       subject: "brand",
       metric: METRICS.VISIBILITY,
-      dimensionKey: { startsWith: "engine=" },
+      // Exact keys, not startsWith("engine="). The slice key is a sorted
+      // "k=v;k=v" string, so a future compound slice like
+      // "engine=CLAUDE;topic=pricing" ALSO starts with "engine=" and would be
+      // silently averaged into the per-engine figure. Verified against
+      // Postgres: the prefix matches both. Listing the engines keeps this
+      // read pinned to the slice it means.
+      dimensionKey: { in: ALL_ENGINES.map((engine) => dimensionKeyFor({ engine })) },
       observedOn: { gte: since },
     },
     orderBy: { observedOn: "desc" },

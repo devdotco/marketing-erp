@@ -1,8 +1,9 @@
 import { arr, dedupeCitations, rec, str } from "./parse";
-import { EngineShapeError, type AnswerEngineClient, type AskOptions, type EngineAnswer } from "./types";
+import { ENGINE_MODELS } from "./models";
+import { askSignal, EngineShapeError, type AnswerEngineClient, type AskOptions, type EngineAnswer } from "./types";
 
 const ENDPOINT = "https://api.perplexity.ai/chat/completions";
-const MODEL = "sonar";
+const MODEL = ENGINE_MODELS.PERPLEXITY;
 
 /**
  * Perplexity, which is a search product first and therefore the engine whose
@@ -31,7 +32,7 @@ export function perplexityEngine(apiKey: string): AnswerEngineClient {
           messages: [{ role: "user", content: prompt }],
           max_tokens: opts.maxTokens ?? 2048,
         }),
-        signal: opts.signal,
+        signal: askSignal(opts),
       });
 
       if (!res.ok) {

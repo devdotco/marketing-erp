@@ -3,7 +3,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { createMessage } from "@/lib/ai/messages";
 import { dedupeCitations } from "./parse";
-import type { AnswerEngineClient, AskOptions, EngineAnswer } from "./types";
+import { ENGINE_TIMEOUT_MS, type AnswerEngineClient, type AskOptions, type EngineAnswer } from "./types";
 
 /** The model id that answered, recorded per capture. See EngineAnswer.model. */
 const MODEL = MODELS.standard;
@@ -21,12 +21,18 @@ export function claudeEngine(client: Anthropic): AnswerEngineClient {
     engine: "CLAUDE",
     name: "Claude",
     async ask(prompt: string, opts: AskOptions = {}): Promise<EngineAnswer> {
-      const message = await createMessage(client, {
-        model: MODEL,
-        max_tokens: opts.maxTokens ?? 2048,
-        messages: [{ role: "user", content: prompt }],
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
-      });
+      // The same deadline the fetch-based engines get. createMessage streams,
+      // so this bounds the whole stream rather than time-to-first-byte.
+      const message = await createMessage(
+        client,
+        {
+          model: MODEL,
+          max_tokens: opts.maxTokens ?? 2048,
+          messages: [{ role: "user", content: prompt }],
+          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        },
+        { timeout: ENGINE_TIMEOUT_MS, signal: opts.signal },
+      );
 
       return {
         engine: "CLAUDE",

@@ -87,6 +87,13 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
     enginesMeasured: capture.engines.map((e) => ENGINE_NAMES[e]),
     promptsTracked: capture.prompts,
     capturesTaken: capture.captured,
+    ...(capture.skippedPrompts > 0
+      ? {
+          promptsNotAsked: capture.skippedPrompts,
+          promptsNotAskedNote:
+            "Beyond the per-run cap. They stay tracked; raise the cap or pause some prompts if you want them measured.",
+        }
+      : {}),
     visibility: {
       latestPct: visibility.latest,
       changePct: visibility.change,

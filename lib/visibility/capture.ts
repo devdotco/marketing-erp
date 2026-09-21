@@ -6,6 +6,8 @@ import { ENGINE_NAMES, availableEngines, geminiDomain, hostOf, type AnswerEngine
 import { analyseMentions, classifySentiment } from "./analyse";
 import { resolveBrand, type BrandIdentity } from "./brand";
 import { METRICS, dayKey, recordObservations, type ObservationInput } from "./observations";
+import { MAX_PROMPTS_PER_CAPTURE } from "./budget";
+import { pruneAnswerText } from "./retention";
 
 export interface CaptureFailure {
   prompt: string;
@@ -17,6 +19,8 @@ export interface CaptureResult {
   day: string;
   engines: AnswerEngine[];
   prompts: number;
+  /** Active prompts beyond MAX_PROMPTS_PER_CAPTURE that this run did not ask. */
+  skippedPrompts: number;
   captured: number;
   failures: CaptureFailure[];
   costUsd: number;
@@ -66,14 +70,28 @@ export async function captureVisibility(
     );
   }
 
-  const prompts = await prisma.trackedPrompt.findMany({
-    where: {
-      workspaceId,
-      active: true,
-      ...(opts.promptIds?.length ? { id: { in: opts.promptIds } } : {}),
-    },
-    orderBy: { createdAt: "asc" },
-  });
+  // Capped, not unbounded. See MAX_PROMPTS_PER_CAPTURE — a pasted list of six
+  // hundred prompts must not silently become a forty-fold spend increase on
+  // the customer's own key, run by a scheduler nobody is watching.
+  const [promptTotal, prompts] = await Promise.all([
+    prisma.trackedPrompt.count({
+      where: {
+        workspaceId,
+        active: true,
+        ...(opts.promptIds?.length ? { id: { in: opts.promptIds } } : {}),
+      },
+    }),
+    prisma.trackedPrompt.findMany({
+      where: {
+        workspaceId,
+        active: true,
+        ...(opts.promptIds?.length ? { id: { in: opts.promptIds } } : {}),
+      },
+      orderBy: { createdAt: "asc" },
+      take: MAX_PROMPTS_PER_CAPTURE,
+    }),
+  ]);
+  const skippedPrompts = Math.max(promptTotal - prompts.length, 0);
 
   if (prompts.length === 0) {
     throw new AgentInputError(
@@ -146,7 +164,7 @@ export async function captureVisibility(
       // Citations are replaced wholesale, not merged: the second capture of a
       // day is a correction of the first, and merging would leave links from
       // an answer that no longer exists counting towards citation share.
-      await prisma.citation.deleteMany({ where: { captureId: capture.id } });
+      await prisma.citation.deleteMany({ where: { captureId: capture.id, workspaceId } });
       const citations = answer.citations
         .map((c) => {
           const domain = engine.engine === "GEMINI" ? geminiDomain(c) : hostOf(c.url);
@@ -193,10 +211,21 @@ export async function captureVisibility(
 
   const observations = await deriveDay(workspaceId, day, brand);
 
+  // Drop prose past the retention window. Metrics, citations and the capture
+  // rows themselves are kept — only the text goes, and only once it is far too
+  // old to re-derive from. Failing to prune must never fail a capture that
+  // otherwise succeeded.
+  const pruned = await pruneAnswerText(workspaceId).catch((err) => {
+    console.error(`[visibility] pruning answer text failed for ${workspaceId}:`, err);
+    return 0;
+  });
+  if (pruned > 0) console.log(`[visibility] pruned answer text on ${pruned} old captures`);
+
   return {
     day,
     engines: engines.map((e) => e.engine),
     prompts: prompts.length,
+    skippedPrompts,
     captured,
     failures,
     costUsd,
@@ -241,23 +270,27 @@ export async function deriveDay(workspaceId: string, day: string, brandIn?: Bran
     if (n === 0) continue;
 
     const mentioned = slice.rows.filter((c) => c.brandMentioned);
-    push("brand", METRICS.CAPTURES, n, slice.dimensions);
-    push("brand", METRICS.MENTIONS, mentioned.length, slice.dimensions);
-    push("brand", METRICS.VISIBILITY, pct(mentioned.length, n), slice.dimensions);
+    push(BRAND_SUBJECT, METRICS.CAPTURES, n, slice.dimensions);
+    push(BRAND_SUBJECT, METRICS.MENTIONS, mentioned.length, slice.dimensions);
+    push(BRAND_SUBJECT, METRICS.VISIBILITY, pct(mentioned.length, n), slice.dimensions);
 
     const ranked = mentioned.map((c) => c.brandRank).filter((r): r is number => typeof r === "number");
     if (ranked.length > 0) {
-      push("brand", METRICS.BRAND_RANK, mean(ranked), slice.dimensions);
+      push(BRAND_SUBJECT, METRICS.BRAND_RANK, mean(ranked), slice.dimensions);
     }
 
     const scored = mentioned
       .map((c) => SENTIMENT_SCORE[c.sentiment ?? ""])
       .filter((v): v is number => typeof v === "number");
     if (scored.length > 0) {
-      push("brand", METRICS.SENTIMENT, mean(scored), slice.dimensions);
+      push(BRAND_SUBJECT, METRICS.SENTIMENT, mean(scored), slice.dimensions);
     }
 
     for (const competitor of brand.competitors) {
+      // "brand" is this workspace's own subject. A competitor literally named
+      // "brand" would otherwise overwrite our own visibility row through the
+      // same compound unique — unlikely, and silent if it ever happened.
+      if (competitor.name === BRAND_SUBJECT) continue;
       const hits = slice.rows.filter((c) => c.competitors.includes(competitor.name)).length;
       push(competitor.name, METRICS.MENTIONS, hits, slice.dimensions);
       push(competitor.name, METRICS.VISIBILITY, pct(hits, n), slice.dimensions);
@@ -278,6 +311,9 @@ export async function deriveDay(workspaceId: string, day: string, brandIn?: Bran
   await recordObservations(workspaceId, rows);
   return rows.length;
 }
+
+/** The reserved Observation.subject for the workspace's own brand. */
+export const BRAND_SUBJECT = "brand";
 
 const SENTIMENT_SCORE: Record<string, number> = { POSITIVE: 1, NEUTRAL: 0, NEGATIVE: -1 };
 

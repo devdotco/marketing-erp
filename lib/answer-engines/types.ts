@@ -25,6 +25,26 @@ export interface AskOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * How long one engine may take before the capture gives up on it.
+ *
+ * A capture is a fan-out over a bounded worker pool. Without a deadline, one
+ * engine that accepts a connection and never answers holds a pool slot for as
+ * long as the process lives, and the run neither finishes nor fails — it just
+ * stops, with no error to read. Ninety seconds is generous for a grounded
+ * answer and short enough that a wedged engine costs one slot for a minute and
+ * a half rather than a night.
+ *
+ * A timed-out engine is recorded as a failure for that prompt, like any other,
+ * and the day still derives from what the rest returned.
+ */
+export const ENGINE_TIMEOUT_MS = 90_000;
+
+/** The caller's signal if it gave one, otherwise the standard deadline. */
+export function askSignal(opts: AskOptions): AbortSignal {
+  return opts.signal ?? AbortSignal.timeout(ENGINE_TIMEOUT_MS);
+}
+
 export interface AnswerEngineClient {
   engine: AnswerEngine;
   /** Display name for the UI. */
