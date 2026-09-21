@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createOutboundPlay, updateOutboundPlay, setOutboundPlayEnabled } from "@/lib/actions/outbound-plays";
 import { ResourceSelect } from "@/components/ui/ResourceSelect";
-import type { OutboundPlayConfig } from "@/lib/agent-handlers/outbound-play-config";
+import { FORM_D_INDUSTRY_GROUPS, type OutboundPlayConfig } from "@/lib/agent-handlers/outbound-play-config";
 
 type PlayRow = {
   id: string;
@@ -29,15 +29,36 @@ const EMPTY_CONFIG: OutboundPlayConfig = {
   routingThresholds: { emailAndLinkedin: 80, emailOnly: 65, watchlist: 50 },
   autoAdvance: true,
   dailySourcingCap: 30,
+  capitalRaise: {
+    enabled: false,
+    lookbackDays: 30,
+    minOfferingUsd: 1_000_000,
+    industryGroups: [],
+    states: [],
+    excludePooledInvestmentFunds: true,
+    requireAmountSold: false,
+    onlyRecentlyIncorporated: false,
+    includeAmendments: false,
+    contactRelationships: ["Executive Officer"],
+    contactsPerIssuer: 2,
+    dailyTick: false,
+  },
 };
 
 function toConfig(raw: unknown): OutboundPlayConfig {
-  const c = (raw ?? {}) as Partial<OutboundPlayConfig> & { icp?: Partial<OutboundPlayConfig["icp"]> };
+  const c = (raw ?? {}) as Partial<OutboundPlayConfig> & {
+    icp?: Partial<OutboundPlayConfig["icp"]>;
+    capitalRaise?: Partial<OutboundPlayConfig["capitalRaise"]>;
+  };
   return {
     ...EMPTY_CONFIG,
     ...c,
     icp: { ...EMPTY_CONFIG.icp, ...(c.icp ?? {}) },
     routingThresholds: { ...EMPTY_CONFIG.routingThresholds, ...(c.routingThresholds ?? {}) },
+    // Spread over the defaults rather than taking the stored object wholesale: plays created
+    // before capital-raise sourcing existed have no `capitalRaise` key at all, and one saved by
+    // an older build may be missing individual fields.
+    capitalRaise: { ...EMPTY_CONFIG.capitalRaise, ...(c.capitalRaise ?? {}) },
   };
 }
 
@@ -77,6 +98,13 @@ function PlayForm({
 
   function updateIcp<K extends keyof OutboundPlayConfig["icp"]>(key: K, value: OutboundPlayConfig["icp"][K]) {
     setConfig((c) => ({ ...c, icp: { ...c.icp, [key]: value } }));
+  }
+
+  function updateCapitalRaise<K extends keyof OutboundPlayConfig["capitalRaise"]>(
+    key: K,
+    value: OutboundPlayConfig["capitalRaise"][K],
+  ) {
+    setConfig((c) => ({ ...c, capitalRaise: { ...c.capitalRaise, [key]: value } }));
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -156,6 +184,188 @@ function PlayForm({
             <input style={fieldStyle} value={config.icp.technologies.join(", ")} onChange={(e) => updateIcp("technologies", splitList(e.target.value))} />
           </div>
         </div>
+      </div>
+
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+        <p style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>Capital raise (SEC Form D)</p>
+        <p style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10, maxWidth: 680 }}>
+          Source prospects from companies that just filed a Form D with the SEC — the filing every company makes
+          within 15 days of the first sale in a private raise. They have money to spend and the filing says so on
+          the public record, with a date and a dollar figure. EDGAR is free and needs no account; resolving the
+          officers who signed each filing into contacts uses your Apollo.io connection.
+        </p>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={config.capitalRaise.enabled}
+            onChange={(e) => updateCapitalRaise("enabled", e.target.checked)}
+          />
+          Source from SEC Form D filings
+        </label>
+
+        {config.capitalRaise.enabled && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+              <div>
+                <label style={label}>Filed within (days)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={90}
+                  style={fieldStyle}
+                  value={config.capitalRaise.lookbackDays}
+                  onChange={(e) => updateCapitalRaise("lookbackDays", Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label style={label}>Min offering (USD)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={100_000}
+                  style={fieldStyle}
+                  value={config.capitalRaise.minOfferingUsd}
+                  onChange={(e) => updateCapitalRaise("minOfferingUsd", Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label style={label}>Max offering (USD — blank for none)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={100_000}
+                  style={fieldStyle}
+                  value={config.capitalRaise.maxOfferingUsd ?? ""}
+                  onChange={(e) =>
+                    updateCapitalRaise("maxOfferingUsd", e.target.value === "" ? undefined : Number(e.target.value))
+                  }
+                />
+              </div>
+              <div>
+                <label style={label}>Contacts per company</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  style={fieldStyle}
+                  value={config.capitalRaise.contactsPerIssuer}
+                  onChange={(e) => updateCapitalRaise("contactsPerIssuer", Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+              <div>
+                <label style={label}>Form D industry groups (blank = all)</label>
+                <select
+                  multiple
+                  size={6}
+                  style={{ ...fieldStyle, height: "auto" }}
+                  value={config.capitalRaise.industryGroups}
+                  onChange={(e) =>
+                    updateCapitalRaise(
+                      "industryGroups",
+                      [...e.target.selectedOptions].map((o) => o.value),
+                    )
+                  }
+                >
+                  {FORM_D_INDUSTRY_GROUPS.map((group) => (
+                    <option key={group} value={group}>{group}</option>
+                  ))}
+                </select>
+                <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
+                  The SEC&apos;s own fixed list — the filer picks exactly one. Separate from the ICP keywords above,
+                  which are Apollo&apos;s free text.
+                </p>
+              </div>
+              <div>
+                <label style={label}>Issuer states (2-letter, blank = anywhere)</label>
+                <input
+                  style={fieldStyle}
+                  value={config.capitalRaise.states.join(", ")}
+                  onChange={(e) => updateCapitalRaise("states", splitList(e.target.value).map((s) => s.toUpperCase()))}
+                  placeholder="CA, NY, TX"
+                />
+                <label style={{ ...label, marginTop: 12 }}>Signatory roles to contact</label>
+                <input
+                  style={fieldStyle}
+                  value={config.capitalRaise.contactRelationships.join(", ")}
+                  onChange={(e) => updateCapitalRaise("contactRelationships", splitList(e.target.value))}
+                  placeholder="Executive Officer, Director"
+                />
+                <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
+                  A Form D names its Executive Officers, Directors and Promoters. Officers sign nearly every filing
+                  and are the decision maker in most plays.
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={config.capitalRaise.excludePooledInvestmentFunds}
+                  onChange={(e) => updateCapitalRaise("excludePooledInvestmentFunds", e.target.checked)}
+                />
+                Exclude investment funds
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={config.capitalRaise.requireAmountSold}
+                  onChange={(e) => updateCapitalRaise("requireAmountSold", e.target.checked)}
+                />
+                Only if money has already come in
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={config.capitalRaise.onlyRecentlyIncorporated}
+                  onChange={(e) => updateCapitalRaise("onlyRecentlyIncorporated", e.target.checked)}
+                />
+                Only companies under 5 years old
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={config.capitalRaise.includeAmendments}
+                  onChange={(e) => updateCapitalRaise("includeAmendments", e.target.checked)}
+                />
+                Include amended filings (D/A)
+              </label>
+            </div>
+            <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 6, maxWidth: 680 }}>
+              Keep &quot;Exclude investment funds&quot; on unless you sell to funds: about half of all Form D filings
+              are VC, PE and hedge funds raising their own vehicles rather than operating companies with a budget.
+            </p>
+
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+                cursor: "pointer",
+                marginTop: 12,
+                paddingTop: 12,
+                borderTop: "1px solid var(--border)",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={config.capitalRaise.dailyTick}
+                onChange={(e) => updateCapitalRaise("dailyTick", e.target.checked)}
+              />
+              Pull new filings automatically once a day
+            </label>
+            <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4, maxWidth: 680 }}>
+              Runs the Scout against this play every morning, up to the daily sourcing cap below, and surfaces the
+              batch for approval like any other run. Companies already in your pipeline are skipped before any
+              Apollo credit is spent.
+            </p>
+          </>
+        )}
       </div>
 
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>

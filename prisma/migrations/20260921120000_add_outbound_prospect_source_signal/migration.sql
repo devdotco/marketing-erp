@@ -1,0 +1,12 @@
+-- The buying signal a prospect was sourced ON, kept separately from what the Strategist later
+-- concluded (intelligence) and from what Apollo said about them (apolloEnrichment).
+--
+-- Added for SEC Form D capital-raise sourcing: a prospect sourced because their company just
+-- filed a Form D carries a dated, public, verifiable funding fact, and OutboundProspect had
+-- nowhere to put it — so the single strongest thing known about that prospect was dropped between
+-- Outbound Scout and Outbound Strategist, whose prompt then (correctly) refuses to assert a
+-- funding round it wasn't given.
+--
+-- Additive and nullable: every existing prospect keeps working with sourceSignal = NULL, which is
+-- exactly what an ICP-search-sourced prospect has.
+ALTER TABLE "OutboundProspect" ADD COLUMN "sourceSignal" JSONB;

@@ -261,6 +261,47 @@ export function mapApolloJobPostings(raw: RawApolloJobPosting[] | undefined, now
   };
 }
 
+/**
+ * The "verified SEC filing" half of the scoring prompt, built from OutboundProspect.sourceSignal.
+ *
+ * Returns null for every prospect sourced by ICP search (sourceSignal is null there), so the
+ * prompt is byte-identical to what it was before capital-raise sourcing existed unless a real
+ * filing is on the record. When there is one, the facts are presented the same way the Apollo
+ * block presents its own: named source, explicitly citable, and explicitly not to be extended —
+ * a Form D says what was offered and sold, and nothing about why or from whom, so the model is
+ * told where the record stops.
+ */
+export function buildSourceSignalBlock(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const signal = raw as Record<string, unknown>;
+  if (signal.source !== "sec_form_d") return null;
+
+  const filing = (signal.secFormD ?? {}) as Record<string, unknown>;
+  const primary = typeof signal.primarySignal === "string" ? signal.primarySignal : "";
+  const additional = Array.isArray(signal.additionalSignals)
+    ? signal.additionalSignals.filter((s): s is string => typeof s === "string")
+    : [];
+
+  const lines = [
+    "Verified SEC EDGAR data for this prospect's company (public record — cite these in apolloFactsUsed prefixed \"per SEC Form D filing\" when you use them, and never contradict or extend them):",
+    primary ? `Filing: ${primary}` : "Filing: an SEC Form D was filed by this company.",
+  ];
+  if (filing.filedAt) lines.push(`Filed: ${String(filing.filedAt)}`);
+  if (filing.offeringAmount !== null && filing.offeringAmount !== undefined) {
+    lines.push(`Total offering amount (USD): ${String(filing.offeringAmount)}`);
+  }
+  if (filing.amountSold !== null && filing.amountSold !== undefined) {
+    lines.push(`Amount sold to date (USD): ${String(filing.amountSold)}`);
+  }
+  if (filing.industryGroup) lines.push(`Form D industry group: ${String(filing.industryGroup)}`);
+  if (additional.length > 0) lines.push(`Also on the filing: ${additional.join("; ")}`);
+  if (filing.url) lines.push(`Source: ${String(filing.url)}`);
+  lines.push(
+    "This is a dated, public funding event and is the reason this prospect was sourced — weigh it in the timing and observable-signal scores. A Form D states what is being offered and what has been sold; it does NOT state the investors, the valuation, the round name (Seed/Series A/etc.), or what the money is for. Do not infer any of those — put any such claim in inferredAssumptions.",
+  );
+  return lines.join("\n");
+}
+
 function normalizeProspects(raw: unknown): Array<Record<string, unknown>> {
   const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
   return list.filter((p): p is Record<string, unknown> => !!p && typeof p === "object" && !!(p as Record<string, unknown>).email);
@@ -319,7 +360,7 @@ export const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
             minItems: 0,
             items: { type: "string" },
             description:
-              "Specific facts pulled from the Apollo data supplied above (e.g. 'Series B, per Apollo funding data', '340 employees per Apollo org enrichment', '4 open Senior Engineer postings per Apollo job postings') that grounded primarySignal, companyContext, or a proof point. Empty array if no Apollo data was supplied — never invent an entry here.",
+              "Specific facts pulled from the verified source blocks supplied above — Apollo data (e.g. 'Series B, per Apollo funding data', '340 employees per Apollo org enrichment', '4 open Senior Engineer postings per Apollo job postings') and, when an SEC filing block is present, facts from it prefixed 'per SEC Form D filing' (e.g. 'per SEC Form D filing, $25M offering with $1M sold as of 2026-09-18') — that grounded primarySignal, companyContext, or a proof point. Empty array if no verified source data was supplied — never invent an entry here.",
           },
           inferredAssumptions: {
             type: "array",
@@ -389,6 +430,12 @@ async function scoreProspect(
       ].join("\n")
     : "No Apollo.io data is available for this prospect (not connected, or nothing fetched this run). Score and write the Intelligence Object from the prospect record alone — do not fabricate funding, tech stack, or hiring facts, and list every such claim in intelligence.inferredAssumptions instead of apolloFactsUsed.";
 
+  // The event this prospect was SOURCED on, when there was one. Presented as its own verified
+  // block rather than folded into the Apollo one: it comes from a different source (a public SEC
+  // filing), and the whole reason capital-raise sourcing exists is that this fact should drive the
+  // timing and signal scores. Absent for ICP-search prospects, which is most of them.
+  const sourceSignalBlock = buildSourceSignalBlock(prospect.sourceSignal);
+
   const systemPrompt = `You are an ICP scoring specialist for the outbound play "${play.name}".
 ${serviceOffer ? `\nWhat is being sold: ${serviceOffer}` : ""}
 ${proofPoints.length ? `\nProof points available to reference: ${proofPoints.join(" | ")}` : ""}
@@ -409,14 +456,14 @@ Channel routing rules for this play (the total below decides the actual routing 
 - ${thresholds.watchlist}-${thresholds.emailOnly - 1}: WATCHLIST
 - <${thresholds.watchlist}: DISCARDED
 
-Never fabricate a funding round, tech-stack entry, headcount figure, or hiring signal. Every fact in apolloFactsUsed must trace back to the Apollo data block you were given; anything else you assert belongs in inferredAssumptions instead. Call submit_prospect_intelligence exactly once with the complete result — no other text.`;
+Never fabricate a funding round, tech-stack entry, headcount figure, or hiring signal. Every fact in apolloFactsUsed must trace back to the Apollo data block or the SEC filing block you were given; anything else you assert belongs in inferredAssumptions instead. Call submit_prospect_intelligence exactly once with the complete result — no other text.`;
 
   const userPrompt = `Score this prospect for play "${play.name}" and generate their Prospect Intelligence Object.
 
 Prospect data:
 ${JSON.stringify(prospect, null, 2)}
 
-${apolloBlock}`;
+${apolloBlock}${sourceSignalBlock ? `\n\n${sourceSignalBlock}` : ""}`;
 
   const message = await createMessage(client, {
     model: MODELS.standard,
@@ -491,6 +538,11 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
       title: r.title ?? undefined,
       company: r.company,
       companyDomain: r.companyDomain ?? undefined,
+      // Carried through so a prospect sourced on a discrete event (today: an SEC Form D filing)
+      // reaches scoring with that event intact. Without this the strongest, most verifiable fact
+      // about a capital-raise prospect is dropped at the Scout/Strategist boundary, and the
+      // scoring prompt correctly refuses to assert a funding round it was never given.
+      sourceSignal: r.sourceSignal ?? undefined,
     }));
   }
 

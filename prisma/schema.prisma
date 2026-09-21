@@ -391,6 +391,14 @@ model OutboundProspect {
   /// days) decides whether a later run re-spends a credit or reuses this. Never contains a
   /// personal email or phone reveal — see lib/agent-handlers/outbound-strategist.ts.
   apolloEnrichment  Json?
+  /// The buying signal this prospect was SOURCED on, as opposed to what the Strategist concluded
+  /// (`intelligence`) or what Apollo said about them (`apolloEnrichment`). Written by Outbound
+  /// Scout at sourcing time and read back by the Strategist, which puts it in front of the model
+  /// as verified, citable source data. Today only the SEC Form D capital-raise sourcing mode sets
+  /// it — `{ source: "sec_form_d", primarySignal, additionalSignals, secFormD: { cik, accession,
+  /// filedAt, offeringAmount, amountSold, industryGroup, url } }`. NULL for every prospect sourced
+  /// by ICP search, which is every prospect created before this column existed.
+  sourceSignal      Json?
   instantlyLeadId   String?
   aimfoxLeadId      String?
   ghlContactId      String?

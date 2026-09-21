@@ -35,6 +35,98 @@ export const OutboundPlayIcpSchema = z.object({
 });
 export type OutboundPlayIcp = z.infer<typeof OutboundPlayIcpSchema>;
 
+/**
+ * Capital-raise sourcing: find the play's ICP among companies that just filed an SEC Form D.
+ *
+ * A Form D is due within 15 days of the first sale in a Regulation D private offering, so a fresh
+ * one marks a company that has just taken money and has budget it did not have last month —
+ * a dated, public, verifiable buying signal rather than an inferred one. The filing is free and
+ * keyless (see lib/integrations/sec-edgar.ts); only turning its named officers into reachable
+ * contacts costs anything, and that is Apollo's existing per-person reveal.
+ *
+ * Defaults are tuned to operating companies, because raw Form D volume is not: in a sample of 45
+ * consecutive filings, 22 were pooled investment funds raising their own vehicles. Hence
+ * `excludePooledInvestmentFunds` defaulting on — a play that sells to funds turns it off.
+ */
+export const OutboundCapitalRaiseSchema = z.object({
+  /** Master switch. Off means the Scout's capital-raise mode refuses for this play, and the daily
+   * tick skips it entirely. */
+  enabled: z.boolean().default(false),
+  /** How far back to search EDGAR by filed date. 30 days keeps a raise "recent" while covering
+   * the 15-day filing deadline plus a fortnight of working the list. */
+  lookbackDays: z.number().int().min(1).max(90).default(30),
+  /** Smallest total offering to count as a real raise. Below ~$1M is usually a friends-and-family
+   * round or a single-asset LLC with no budget to sell into. */
+  minOfferingUsd: z.number().min(0).default(1_000_000),
+  /** Optional ceiling — a play selling to seed-stage companies doesn't want a $500M raise. */
+  maxOfferingUsd: z.number().min(0).optional(),
+  /** Form D's own fixed industry taxonomy (FORM_D_INDUSTRY_GROUPS). Empty means every industry. */
+  industryGroups: z.array(z.string()).default([]),
+  /** Two-letter state codes matched against the issuer's business address. Empty means anywhere.
+   * Separate from the ICP's `geographies`, which are Apollo's free-text location strings. */
+  states: z.array(z.string()).default([]),
+  /** See the schema doc — half of all Form D volume is funds raising funds. */
+  excludePooledInvestmentFunds: z.boolean().default(true),
+  /** Require money actually taken in (totalAmountSold > 0), not just an offering announced. */
+  requireAmountSold: z.boolean().default(false),
+  /** Keep only issuers that told the SEC they were formed within the last five years. */
+  onlyRecentlyIncorporated: z.boolean().default(false),
+  /** D/A amendments usually update a raise that closed months ago — the opposite of the timing
+   * signal this mode exists for, so they're excluded unless asked for. */
+  includeAmendments: z.boolean().default(false),
+  /** Which signatory roles are worth an Apollo credit. Executive officers sign nearly every
+   * Form D and are the decision maker in most plays; directors are a weaker but usable fallback. */
+  contactRelationships: z.array(z.string()).default(["Executive Officer"]),
+  /** How many named people per issuer to resolve. 2 covers the CEO-plus-one case without
+   * multiplying the credit spend across a whole board. */
+  contactsPerIssuer: z.number().int().min(1).max(5).default(2),
+  /** Whether app/api/cron/outbound-form-d enqueues a Scout run for this play once a day. */
+  dailyTick: z.boolean().default(false),
+});
+export type OutboundCapitalRaise = z.infer<typeof OutboundCapitalRaiseSchema>;
+
+/** Form D's fixed industry taxonomy, exactly as the filings spell it — note "and", never "&"
+ * ("Oil and Gas", "REITS and Finance", "Other Banking and Financial Services"). Offered in the
+ * play editor so a workspace picks real values instead of guessing at free text that would match
+ * nothing. Verified against live filings 2026-09-21. */
+export const FORM_D_INDUSTRY_GROUPS = [
+  "Agriculture",
+  "Commercial Banking",
+  "Insurance",
+  "Investing",
+  "Investment Banking",
+  "Pooled Investment Fund",
+  "Other Banking and Financial Services",
+  "Business Services",
+  "Coal Mining",
+  "Electric Utilities",
+  "Energy Conservation",
+  "Environmental Services",
+  "Oil and Gas",
+  "Other Energy",
+  "Biotechnology",
+  "Health Insurance",
+  "Hospitals and Physicians",
+  "Pharmaceuticals",
+  "Other Health Care",
+  "Manufacturing",
+  "Commercial",
+  "Construction",
+  "REITS and Finance",
+  "Residential",
+  "Other Real Estate",
+  "Retailing",
+  "Restaurants",
+  "Computers",
+  "Telecommunications",
+  "Other Technology",
+  "Airlines and Airports",
+  "Lodging and Conventions",
+  "Tourism and Travel Services",
+  "Other Travel",
+  "Other",
+] as const;
+
 const ScoringWeightsSchema = z
   .object({
     signal: z.number().min(0).max(25),
@@ -88,6 +180,9 @@ export const OutboundPlayConfigSchema = z.object({
   autoAdvance: z.boolean().default(true),
   /** Upper bound on how many prospects Scout sources for this play in one run. */
   dailySourcingCap: z.number().int().min(1).max(500).default(30),
+  /** SEC Form D sourcing — see OutboundCapitalRaiseSchema. prefault, not default, for the same
+   * reason `icp` uses it: a default object would skip the inner per-field defaults. */
+  capitalRaise: OutboundCapitalRaiseSchema.prefault({}),
 });
 export type OutboundPlayConfig = z.infer<typeof OutboundPlayConfigSchema>;
 
@@ -225,4 +320,81 @@ export function dedupeNewProspects<T extends { email?: unknown }>(prospects: T[]
     const email = typeof p.email === "string" ? p.email.toLowerCase() : "";
     return email.length > 0 && !existingEmails.has(email);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Daily capital-raise tick — which plays app/api/cron/outbound-form-d should enqueue a Scout run
+// for. Pure: the route does the querying, this decides. Kept here (rather than in the route) so
+// the skip rules are unit-testable without a database, and so "why did my play not run last
+// night" has one readable answer instead of being spread through a handler.
+// ---------------------------------------------------------------------------
+
+/** A play as the tick sees it — the row's own fields plus its parsed config. */
+export interface FormDTickPlay {
+  slug: string;
+  name: string;
+  enabled: boolean;
+  config: OutboundPlayConfig;
+}
+
+export type FormDTickSkipReason =
+  | "play_disabled"
+  | "capital_raise_disabled"
+  | "daily_tick_disabled"
+  | "already_ran_today";
+
+export interface FormDTickPlan {
+  due: Array<{ playSlug: string; playName: string; maxProspects: number }>;
+  skipped: Array<{ playSlug: string; reason: FormDTickSkipReason }>;
+}
+
+/**
+ * Decides which plays are due a capital-raise Scout run this tick.
+ *
+ * `recentlyRanSlugs` is the idempotency guard and the reason this isn't just a filter: the tick is
+ * driven by an external timer (a systemd unit POSTing the cron route), and a timer that fires
+ * twice — a retry, a manual kick, a host that ran a catch-up after being down — must not source
+ * and bill the same play twice in one day. The route passes in the play slugs that already have a
+ * capital-raise Scout run inside the dedupe window, and those are skipped rather than re-queued.
+ */
+export function planFormDDailyTick(plays: FormDTickPlay[], recentlyRanSlugs: Set<string>): FormDTickPlan {
+  const plan: FormDTickPlan = { due: [], skipped: [] };
+
+  for (const play of plays) {
+    if (!play.enabled) {
+      plan.skipped.push({ playSlug: play.slug, reason: "play_disabled" });
+      continue;
+    }
+    if (!play.config.capitalRaise.enabled) {
+      plan.skipped.push({ playSlug: play.slug, reason: "capital_raise_disabled" });
+      continue;
+    }
+    if (!play.config.capitalRaise.dailyTick) {
+      plan.skipped.push({ playSlug: play.slug, reason: "daily_tick_disabled" });
+      continue;
+    }
+    if (recentlyRanSlugs.has(play.slug)) {
+      plan.skipped.push({ playSlug: play.slug, reason: "already_ran_today" });
+      continue;
+    }
+    plan.due.push({ playSlug: play.slug, playName: play.name, maxProspects: play.config.dailySourcingCap });
+  }
+
+  return plan;
+}
+
+/**
+ * Which sourcing mode a Scout run is asking for.
+ *
+ * The Run modal's `select` fields post their human-readable label, not a key (see
+ * lib/agents/inputs.ts — a select value passes through uncoerced), and this value also arrives
+ * from the daily cron and from saved agent config, where it may already be the internal key. So
+ * this normalises all of them rather than comparing against one exact string in three places, and
+ * anything unrecognised falls back to the mode that has always been the default.
+ */
+export function parseSourcingMode(raw: unknown): "icp_search" | "capital_raise" {
+  if (typeof raw !== "string") return "icp_search";
+  const value = raw.toLowerCase();
+  if (value.includes("capital") || value.includes("form d") || value === "capital_raise") return "capital_raise";
+  return "icp_search";
 }
