@@ -96,6 +96,8 @@ model Workspace {
   answerCaptures    AnswerCapture[]
   competitors       Competitor[]
   observations      Observation[]
+  crawlerDaily      CrawlerDaily[]
+  referralDaily     ReferralDaily[]
   /// Whether this workspace may fall back to the platform's own Anthropic key.
   /// Off by default: every tenant brings its own, so model spend lands on the
   /// account that asked for the work. Only a super admin turns this on, and
@@ -246,6 +248,10 @@ enum IntegrationProvider {
   /// Lets Email Marketing stage sequences/enrollments there in addition to
   /// Mailchimp/Klaviyo/Instantly/Apollo. See lib/integrations/crm-erp-io.ts.
   CRM_ERP_IO
+  /// Cloudflare Logpush destination for crawler + AI-referral analytics.
+  /// Holds no API key — the credentials carry the per-workspace webhook token
+  /// and the site hostnames this workspace owns. See lib/crawlers/ingest.ts.
+  CLOUDFLARE_LOGPUSH
   /// Answer-engine keys for AI visibility capture (lib/answer-engines/*).
   /// Captures are BYOK like every other model call: we measure the engines a
   /// workspace has paid to reach, and refuse the rest rather than guess.
@@ -737,4 +743,76 @@ model Observation {
   @@unique([workspaceId, subject, metric, dimensionKey, observedOn])
   @@index([workspaceId, metric, observedOn])
   @@index([workspaceId, subject, metric, observedOn])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crawler and AI-referral analytics
+//
+// Fed by Cloudflare Logpush rather than a JavaScript tag. Two reasons that is
+// the right source and not just the convenient one: a crawler never runs
+// JavaScript, so a tag cannot see the half of this that matters at all; and a
+// human arriving from an AI answer is counted even with an ad blocker, with
+// nothing for a consent banner to suppress.
+//
+// Stored pre-aggregated by day. A busy site pushes millions of log lines and
+// almost none of them are individually interesting — what is wanted is "which
+// pages did which engine read, and how often". One row per (day, bot, path)
+// makes the ingest an upsert with an increment and keeps the table small
+// enough that nobody has to think about retention.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One AI crawler's requests to one path on one UTC day.
+model CrawlerDaily {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// YYYY-MM-DD, UTC. Written by the ingest, never derived in SQL.
+  day          String
+  /// AI_CRAWLERS key — "GPTBot", "ClaudeBot". See lib/crawlers/bots.ts.
+  bot          String
+  path         String
+  hits         Int       @default(0)
+  /// Hits whose source IP actually passed the operator's published check.
+  /// A user agent is a claim; this is the part of it that was tested.
+  verifiedHits Int       @default(0)
+  /// Hits that got a 4xx or 5xx. A crawler being served errors is the single
+  /// most actionable thing this table can surface, and it is invisible in any
+  /// tag-based analytics because the page never rendered.
+  errorHits    Int       @default(0)
+  lastSeenAt   DateTime  @default(now())
+
+  @@unique([workspaceId, day, bot, path])
+  @@index([workspaceId, day])
+  @@index([workspaceId, bot, day])
+}
+
+/// Humans arriving from one AI surface to one path on one UTC day.
+model ReferralDaily {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  day         String
+  /// AI_REFERRERS key — "ChatGPT", "Perplexity". See lib/crawlers/referrers.ts.
+  source      String
+  path        String
+  visits      Int       @default(0)
+  lastSeenAt  DateTime  @default(now())
+
+  @@unique([workspaceId, day, source, path])
+  @@index([workspaceId, day])
+}
+
+/// One Logpush batch we accepted, so a redelivery is not counted twice.
+///
+/// Cloudflare retries a batch it did not get a 2xx for, and a retry after a
+/// partial write would double every counter in it. The id is a hash of the
+/// batch body: cheap, needs nothing from Cloudflare, and is stable across a
+/// retry of the identical payload — which is exactly what a retry is.
+model LogBatchReceipt {
+  hash        String   @id
+  workspaceId String
+  lines       Int
+  receivedAt  DateTime @default(now())
+
+  @@index([receivedAt])
 }

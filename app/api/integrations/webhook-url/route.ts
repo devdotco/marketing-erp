@@ -6,8 +6,10 @@ import { isWebhookProvider } from "@/lib/security/webhook-token";
 export const dynamic = "force-dynamic";
 
 /**
- * The active workspace's webhook URL for Instantly or Aimfox — the thing an
- * admin pastes into the vendor. Workspace admins only: the URL is the secret.
+ * The active workspace's webhook URL for a provider that authenticates by URL
+ * alone — Instantly, Aimfox, or the Cloudflare Logpush destination. The thing
+ * an admin pastes into the vendor. Workspace admins only: the URL is the
+ * secret.
  *
  * GET returns it, minting a token for an integration connected before tokens
  * existed. POST rotates it (the old URL stops working immediately).
@@ -18,7 +20,7 @@ async function handle(req: NextRequest, rotate: boolean) {
 
   const provider = (req.nextUrl.searchParams.get("provider") ?? "").toUpperCase();
   if (!isWebhookProvider(provider)) {
-    return NextResponse.json({ error: "provider must be INSTANTLY or AIMFOX" }, { status: 400 });
+    return NextResponse.json({ error: "Unknown webhook provider" }, { status: 400 });
   }
 
   const token = await ensureWebhookToken(who.workspaceId, provider, { rotate });

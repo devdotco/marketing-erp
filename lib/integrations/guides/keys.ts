@@ -989,4 +989,67 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       { label: "Perplexity: API documentation", url: "https://docs.perplexity.ai/" },
     ],
   },
+  CLOUDFLARE_LOGPUSH: {
+    provider: "CLOUDFLARE_LOGPUSH",
+    summary:
+      "Streams your Cloudflare request logs here so you can see which AI crawlers read which pages, whether they were served errors, and how many humans arrived from an AI answer. Reads server logs rather than a JavaScript tag \u2014 a crawler never runs JavaScript, so a tag cannot see the half of this that matters at all.",
+    timeMinutes: 15,
+    youWillNeed: [
+      "A Cloudflare account with the site already proxied (orange cloud)",
+      "Logpush, which is available on Pro and above \u2014 it is not on the Free plan",
+      "Admin or Super Administrator on the Cloudflare account, since Logpush jobs are account-level",
+      "Workspace admin here, because the destination URL is the only thing authenticating the feed",
+    ],
+    steps: [
+      {
+        title: "Save this connection first",
+        body: "Enter the hostnames this workspace owns and save. That generates your destination URL, which appears on this page once saved. Log lines for any other hostname are discarded, so a Logpush job covering a whole Cloudflare account cannot attribute a different site's traffic to this workspace.",
+      },
+      {
+        title: "Copy your destination URL",
+        body: "It appears on this page after saving and contains a secret token. **Treat it like a password** \u2014 anyone holding it can write counts into this workspace. Rotate it here if it leaks; the old URL stops working immediately and you re-paste the new one into Cloudflare.",
+      },
+      {
+        title: "Create the Logpush job in Cloudflare",
+        body: "In Cloudflare go to **Analytics & Logs \u2192 Logpush \u2192 Create a Logpush job**, choose the **HTTP destination**, and paste your URL. Cloudflare will probe it before it lets you save \u2014 that probe is expected and should succeed straight away.",
+      },
+      {
+        title: "Choose the dataset and fields",
+        body: "Pick the **HTTP requests** dataset, then select exactly these fields: **ClientRequestHost**, **ClientRequestPath**, **ClientRequestUserAgent**, **ClientIP**, **ClientRequestReferer**, **EdgeResponseStatus**, **EdgeStartTimestamp**. Fewer fields means smaller batches and a faster ingest; extra fields are ignored but cost you bandwidth.",
+      },
+      {
+        title: "Enable the job and wait",
+        body: "Cloudflare batches logs and delivers them every few minutes. Nothing appears instantly. Give it an hour before judging whether it works, and longer before the crawler table means anything \u2014 a crawler that visits weekly needs a week.",
+      },
+    ],
+    verify: [
+      "Open AI Visibility \u2192 Crawlers. Once a batch has landed you will see bots, paths and hit counts.",
+      "If the page is still empty after an hour, check the job's status in Cloudflare \u2014 it shows the last delivery and the last error.",
+      "Crawler counts and AI referral counts fill in independently. Seeing one but not the other is normal on a quiet site.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "Cloudflare will not save the job \u2014 the destination test fails.",
+        fix: "The URL is wrong or the token was rotated after you copied it. Copy it again from this page. The URL must be the whole thing including the token at the end.",
+      },
+      {
+        symptom: "The job runs but nothing appears here.",
+        fix: "Almost always the hostname filter. If you entered hostnames on this page, they must match the ClientRequestHost in the logs exactly \u2014 \"example.com\" does not match \"shop.example.com\". Clear the field to accept every host in the job, then narrow it once data is arriving.",
+      },
+      {
+        symptom: "Crawler hits show but every one is unverified.",
+        fix: "Expected for most operators \u2014 Anthropic, Perplexity and several others publish nothing to check a request against, so their traffic is counted and honestly labelled unverified. Google, Bing, Apple and OpenAI can be verified, and those should show verified counts within a day.",
+      },
+      {
+        symptom: "Logpush is missing from the Cloudflare menu.",
+        fix: "The zone is on the Free plan. Logpush starts at Pro.",
+      },
+    ],
+    privacy:
+      "Cloudflare sends us one line per request for the fields listed above. We keep no raw log lines: each batch is aggregated into per-day counts of (crawler, page) and (AI source, page) and then discarded, so nothing identifying a visitor is stored. Client IPs are used in memory only, to check a crawler is who it claims, and are never written to the database. Stop the feed any time by disabling the job in Cloudflare or pressing Disconnect here.",
+    docs: [
+      { label: "Cloudflare: Logpush HTTP destination", url: "https://developers.cloudflare.com/logs/get-started/enable-destinations/http/" },
+      { label: "Cloudflare: HTTP requests log fields", url: "https://developers.cloudflare.com/logs/reference/log-fields/zone/http_requests/" },
+    ],
+  },
 };

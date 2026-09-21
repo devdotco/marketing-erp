@@ -1,10 +1,11 @@
 /**
  * Per-workspace webhook tokens — the pure half (no database). Server-only.
  *
- * Neither Instantly nor Aimfox signs webhook deliveries (no HMAC): the only
- * delivery auth either offers is the URL and custom headers you configure. So
- * each workspace gets its own random secret, carried in the webhook URL path
- * (or an `x-webhook-token` header).
+ * None of these providers signs its deliveries (no HMAC): the only delivery
+ * auth any of them offers is the URL and custom headers you configure. That is
+ * true of Cloudflare Logpush too — an HTTP destination is a URL plus optional
+ * headers and nothing else. So each workspace gets its own random secret,
+ * carried in the webhook URL path (or an `x-webhook-token` header).
  *
  * Shape: `<workspaceId>.<secret>`. The workspace id is not the secret — it only
  * says whose stored token to compare against, so verifying is one row read
@@ -14,7 +15,7 @@
  */
 import { randomBytes } from "node:crypto";
 
-export const WEBHOOK_PROVIDERS = ["INSTANTLY", "AIMFOX"] as const;
+export const WEBHOOK_PROVIDERS = ["INSTANTLY", "AIMFOX", "CLOUDFLARE_LOGPUSH"] as const;
 export type WebhookProvider = (typeof WEBHOOK_PROVIDERS)[number];
 
 export function isWebhookProvider(provider: string): provider is WebhookProvider {

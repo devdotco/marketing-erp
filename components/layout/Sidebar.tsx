@@ -63,6 +63,7 @@ const NAV: ErpNavSection[] = [
     label: "Growth",
     items: [
       { label: "AI Visibility", href: "/visibility", icon: Radar },
+      { label: "AI Crawlers", href: "/visibility/crawlers", icon: Bot },
       { label: "SEO", href: "/agents/suite/seo", icon: Search },
       { label: "Link Building", href: "/agents/suite/link-building", icon: Link2 },
     ],

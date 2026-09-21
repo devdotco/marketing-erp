@@ -120,6 +120,20 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
       fields: apiKey("Settings → API Keys → Create Private API Key, with Campaigns read/write access."),
     },
   },
+  CLOUDFLARE_LOGPUSH: {
+    name: "Cloudflare Logpush",
+    method: {
+      kind: "key",
+      fields: [
+        {
+          key: "hosts",
+          label: "Site hostnames",
+          placeholder: "example.com, blog.example.com",
+          hint: "The hostnames this workspace owns, comma separated. Log lines for any other host are ignored, so one Cloudflare account pushing a whole zone cannot attribute another site's traffic here. Leave blank to accept every host in the job.",
+        },
+      ],
+    },
+  },
   OPENAI: {
     name: "OpenAI",
     method: {
