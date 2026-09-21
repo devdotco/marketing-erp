@@ -110,7 +110,7 @@ export default async function CrawlersPage() {
           label="Verified"
           value={hasData && totalHits > 0 ? Math.round((totalVerified / totalHits) * 1000) / 10 : null}
           unit="%"
-          hint="Most operators publish nothing to check against"
+          hint="Checked against operators' published IP ranges"
         />
         <StatTile label="Served an error" value={hasData ? totalErrors : null} hint="Fix these first" />
         <StatTile label="Visits from AI answers" value={hasData ? totalVisits : null} hint="Undercounts — see below" />
@@ -164,9 +164,10 @@ export default async function CrawlersPage() {
         <div className="card">
           <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Which crawlers came</h2>
           <p style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 14, lineHeight: 1.6 }}>
-            A user agent is a claim. Verified means the request&apos;s source address actually passed the
-            operator&apos;s published check — most operators publish none, and those are counted and labelled
-            honestly rather than dropped.
+            A user agent is a claim. Verified means the request&apos;s source address was matched against the
+            operator&apos;s own published IP ranges and passed. Every operator that publishes ranges is checked —
+            OpenAI, Anthropic, Perplexity, Google, Microsoft and Apple. The handful that publish nothing are
+            counted and labelled unverified rather than dropped, because unverified is not the same as fake.
           </p>
           {bots.length === 0 ? (
             <p style={{ fontSize: 13, color: "var(--text-dim)", margin: 0 }}>No crawler requests recorded yet.</p>

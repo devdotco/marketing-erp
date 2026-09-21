@@ -7,8 +7,11 @@
  * batches, and the host filter that stops one Logpush job attributing another
  * site's traffic to this workspace.
  *
- * Every fixture uses a crawler whose verification method is "none"
- * (ClaudeBot, PerplexityBot), so nothing here makes a DNS or HTTP call.
+ * Every fixture uses a crawler whose verification method is genuinely "none"
+ * (Amazonbot, CCBot), so nothing here makes a DNS or HTTP call. That matters
+ * more than it looks: ClaudeBot and PerplexityBot were the original fixtures
+ * and both became range-verified, which would have quietly turned this suite
+ * into a network test that fails on a plane.
  */
 import { gzipSync } from "node:zlib";
 import { prisma } from "@/lib/prisma";
@@ -39,7 +42,7 @@ function line(over: Record<string, unknown> = {}): string {
     RayID: RUN,
     ClientRequestHost: "acme.com",
     ClientRequestPath: "/pricing",
-    ClientRequestUserAgent: "Mozilla/5.0 (compatible; ClaudeBot/1.0)",
+    ClientRequestUserAgent: "Mozilla/5.0 (compatible; Amazonbot/0.1)",
     ClientIP: "203.0.113.10",
     ClientRequestReferer: "",
     EdgeResponseStatus: 200,
@@ -58,7 +61,7 @@ async function main() {
     line(),
     line(),
     line({ ClientRequestPath: "/about" }),
-    line({ ClientRequestUserAgent: "PerplexityBot/1.0", ClientRequestPath: "/pricing" }),
+    line({ ClientRequestUserAgent: "CCBot/2.0", ClientRequestPath: "/pricing" }),
     line({ ClientRequestPath: "/gone", EdgeResponseStatus: 404 }),
     // A human arriving from ChatGPT.
     line({ ClientRequestUserAgent: "Mozilla/5.0 Safari", ClientRequestReferer: "https://chatgpt.com/c/1", ClientRequestPath: "/pricing" }),
@@ -74,13 +77,13 @@ async function main() {
   check("referral hits counted once, not twice", r1.referralHits === 1, r1);
 
   const pricing = await prisma.crawlerDaily.findUnique({
-    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "ClaudeBot", path: "/pricing" } },
+    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "Amazonbot", path: "/pricing" } },
   });
   check("repeated requests to one path are one row with a count", pricing?.hits === 2, pricing);
-  check("nothing was verified — ClaudeBot publishes nothing to check", pricing?.verifiedHits === 0, pricing);
+  check("nothing was verified — Amazonbot publishes nothing to check against", pricing?.verifiedHits === 0, pricing);
 
   const gone = await prisma.crawlerDaily.findUnique({
-    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "ClaudeBot", path: "/gone" } },
+    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "Amazonbot", path: "/gone" } },
   });
   check("a 404 served to a crawler is recorded as an error", gone?.errorHits === 1, gone);
 
@@ -98,7 +101,7 @@ async function main() {
   const r2 = await ingestLogBatch(ws.id, first, { hosts: ["acme.com"] });
   check("a redelivered batch is recognised as a duplicate", r2.duplicate === true, r2);
   const afterRetry = await prisma.crawlerDaily.findUnique({
-    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "ClaudeBot", path: "/pricing" } },
+    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "Amazonbot", path: "/pricing" } },
   });
   check("a retry does not double the counters", afterRetry?.hits === 2, afterRetry);
 
@@ -107,7 +110,7 @@ async function main() {
   const r3 = await ingestLogBatch(ws.id, second, { hosts: ["acme.com"] });
   check("a genuinely new batch is accepted", r3.duplicate === false, r3);
   const afterSecond = await prisma.crawlerDaily.findUnique({
-    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "ClaudeBot", path: "/pricing" } },
+    where: { workspaceId_day_bot_path: { workspaceId: ws.id, day: "2026-09-20", bot: "Amazonbot", path: "/pricing" } },
   });
   check("a second batch increments the day rather than overwriting it", afterSecond?.hits === 3, afterSecond);
 

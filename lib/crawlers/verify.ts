@@ -55,9 +55,18 @@ export async function verifyCrawler(
       result = await verifyReverseDns(ip, crawler.verification.suffixes);
     } else if (crawler.verification.method === "ip-ranges") {
       const cidrs = await publishedRanges(crawler.verification.url);
-      // An empty list means the fetch failed, not that the IP is bogus.
-      // Calling that "spoofed" would invent an attack out of a network blip.
-      result = cidrs.length === 0 ? "unverified" : ipInAny(ip, cidrs) ? "verified" : "spoofed";
+      if (cidrs.length > 0) {
+        result = ipInAny(ip, cidrs) ? "verified" : "spoofed";
+      } else if (crawler.verification.rdnsSuffixes) {
+        // The feed is unreachable. Fall back to the operator's other
+        // documented method rather than downgrading a day of genuine
+        // crawling to "unverified" because someone else's CDN had a bad hour.
+        result = await verifyReverseDns(ip, crawler.verification.rdnsSuffixes);
+      } else {
+        // An empty list means the fetch failed, not that the IP is bogus.
+        // Calling that "spoofed" would invent an attack out of a network blip.
+        result = "unverified";
+      }
     }
   } catch {
     result = "unverified";

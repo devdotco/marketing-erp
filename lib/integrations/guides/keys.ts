@@ -1038,7 +1038,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       },
       {
         symptom: "Crawler hits show but every one is unverified.",
-        fix: "Expected for most operators \u2014 Anthropic, Perplexity and several others publish nothing to check a request against, so their traffic is counted and honestly labelled unverified. Google, Bing, Apple and OpenAI can be verified, and those should show verified counts within a day.",
+        fix: "Expected only for the operators that publish nothing \u2014 Amazon, Meta, ByteDance, Common Crawl and a few others. OpenAI, Anthropic, Perplexity, Google, Microsoft and Apple all publish IP ranges and are checked against them, so those should show verified counts within a day. If they do not, run `npm run check:crawler-ranges` \u2014 one of the published feeds has probably moved.",
       },
       {
         symptom: "Logpush is missing from the Cloudflare menu.",
