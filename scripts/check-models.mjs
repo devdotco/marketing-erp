@@ -19,6 +19,36 @@ if (!registry) {
 }
 const ids = [...registry[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 
+/**
+ * Answer-engine model ids (lib/answer-engines/models.ts).
+ *
+ * Only Anthropic ids can be verified against a live API from here — we hold no
+ * key for the others, and BYOK means we never will. What CAN be enforced is
+ * that they all live in one file, so a stale id is a one-line fix found by
+ * reading one file rather than a hunt through four clients. That is the half
+ * of the Anthropic lesson that transfers.
+ */
+const engineSrc = fs.readFileSync(new URL("../lib/answer-engines/models.ts", import.meta.url), "utf8");
+const engineRegistry = engineSrc.match(/export const ENGINE_MODELS[^=]*= \{([\s\S]*?)\};/);
+if (!engineRegistry) {
+  console.error("Could not find ENGINE_MODELS in lib/answer-engines/models.ts");
+  process.exit(2);
+}
+const engineIds = [...engineRegistry[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+const engineStrays = [];
+/**
+ * Ids that must not appear outside the registry.
+ *
+ * Anthropic's are caught separately. Ids naming a different modality — image,
+ * speech, embedding — are excluded: those are other product surfaces with
+ * their own modules (lib/images/*, lib/voice/*), and sweeping them in here
+ * would fail the build on untouched code, which is how a useful check gets
+ * switched off. This gate is about the models that answer a tracked prompt.
+ */
+const ENGINE_ID_PATTERN = /"(gpt-[\w.-]+|o\d[\w.-]*|gemini-[\w.-]+|sonar[\w.-]*)"/g;
+const ENGINE_ID_HOLDERS = ["lib/answer-engines/models.ts"];
+const OTHER_MODALITIES = /(image|tts|speech|audio|embed|whisper|realtime)/i;
+
 // Anything still hardcoding a model id bypasses the registry — catch that too.
 const strays = [];
 
@@ -53,6 +83,11 @@ for (const dir of ["lib", "app", "workers"]) {
         for (const m of text.matchAll(/model:\s*"(claude-[^"]+)"/g)) {
           strays.push(`${full}: ${m[1]}`);
         }
+        if (!ENGINE_ID_HOLDERS.includes(full)) {
+          for (const m of text.matchAll(ENGINE_ID_PATTERN)) {
+            if (!OTHER_MODALITIES.test(m[1])) engineStrays.push(`${full}: ${m[1]}`);
+          }
+        }
         if (!KEY_HOLDERS.includes(full) && /new Anthropic\s*\(/.test(text)) {
           rogueClients.push(full);
         }
@@ -75,6 +110,16 @@ for (const id of ids) {
   }
 }
 
+console.log("\nAnswer-engine models (lib/answer-engines/models.ts) — not verifiable from here, BYOK:");
+for (const id of engineIds) console.log(`  set   ${id}`);
+
+if (engineStrays.length) {
+  failed = true;
+  console.error("\nAnswer-engine model ids found outside the registry — move them into");
+  console.error("lib/answer-engines/models.ts, or a stale one becomes four edits instead of one:");
+  for (const s of engineStrays) console.error(`  ${s}`);
+}
+
 if (strays.length) {
   failed = true;
   console.error("\nHardcoded model ids found — move these into lib/ai/models.ts:");
@@ -95,4 +140,4 @@ if (failed) {
   console.error("\nCheck failed. Do not deploy.");
   process.exit(1);
 }
-console.log("\nAll referenced models are available, and every Anthropic client is workspace-scoped.");
+console.log("\nAll referenced models are available, every Anthropic client is workspace-scoped,\nand every answer-engine id lives in the registry.");

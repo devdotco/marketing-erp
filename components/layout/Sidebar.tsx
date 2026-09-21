@@ -4,7 +4,7 @@ import { useTransition } from "react";
 import {
   LayoutDashboard, FileText, Mic, Share2, Search, Link2, BarChart2,
   TrendingUp, Mail, Bot, Crosshair, Target, PenSquare, CalendarClock,
-  UserCheck, Activity, Plug,
+  UserCheck, Activity, Plug, Radar,
 } from "lucide-react";
 import { AppRail, ModuleSidebar, buildRailItems } from "@erp-ui";
 import type { ErpBrand, ErpNavSection } from "@erp-ui";
@@ -62,6 +62,8 @@ const NAV: ErpNavSection[] = [
   {
     label: "Growth",
     items: [
+      { label: "AI Visibility", href: "/visibility", icon: Radar },
+      { label: "AI Crawlers", href: "/visibility/crawlers", icon: Bot },
       { label: "SEO", href: "/agents/suite/seo", icon: Search },
       { label: "Link Building", href: "/agents/suite/link-building", icon: Link2 },
     ],

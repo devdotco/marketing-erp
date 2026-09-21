@@ -7,6 +7,8 @@ import { getAgent } from "@/lib/agents";
 import Link from "next/link";
 import { RunActions } from "./RunActions";
 import { ArticleStats } from "@/components/runs/ArticleStats";
+import { ProvenanceBanner } from "@/components/runs/ProvenanceBanner";
+import { withoutProvenance } from "@/lib/agents/provenance";
 import { KeywordResearchReport } from "@/components/runs/KeywordResearchReport";
 import { buildKeywordReport, compareScans, isKeywordResearchOutput } from "@/lib/reports/keyword-research";
 import { previousKeywordScan } from "@/lib/reports/keyword-scans";
@@ -153,6 +155,12 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       <div className="run-layout">
         {/* Output */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Where these figures came from. Above everything, because it changes
+              how the whole panel should be read — see lib/agents/provenance.ts. */}
+          {hasReadableOutput && (
+            <ProvenanceBanner output={output} agentSlug={run.agentConfig.agentSlug} />
+          )}
+
           {runError?.code === "no_api_key" && (
             <ByokPrompt />
           )}
@@ -279,7 +287,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               <details className="card">
                 <summary style={{ fontSize: 12, color: "var(--text-dim)", cursor: "pointer" }}>Raw output (JSON)</summary>
                 <pre style={{ fontSize: 11, fontFamily: "monospace", overflow: "auto", maxHeight: 400, background: "var(--surface-2)", padding: 14, borderRadius: "var(--radius)", color: "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 10 }}>
-                  {JSON.stringify(output, null, 2)}
+                  {JSON.stringify(withoutProvenance(output ?? {}), null, 2)}
                 </pre>
               </details>
             </>
@@ -330,7 +338,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                     wordBreak: "break-word",
                   }}
                 >
-                  {JSON.stringify(output, null, 2)}
+                  {JSON.stringify(withoutProvenance(output ?? {}), null, 2)}
                 </pre>
               )}
             </div>

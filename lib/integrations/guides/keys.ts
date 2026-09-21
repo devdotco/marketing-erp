@@ -828,4 +828,228 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       { label: "Google AI Studio: API keys", url: "https://ai.google.dev/gemini-api/docs/api-key" },
     ],
   },
+  OPENAI: {
+    provider: "OPENAI",
+    summary:
+      "Lets AI Search Visibility ask OpenAI's model what it says about you, and keep the answer. It is the model behind ChatGPT, not the ChatGPT app — the app layers its own prompt and memory on top — so read it as a close proxy for what a customer is told, not as the consumer product itself.",
+    timeMinutes: 5,
+    youWillNeed: [
+      "An OpenAI account at platform.openai.com (a ChatGPT Plus subscription is a different thing and does not include API access)",
+      "A payment method on the OpenAI account with some credit on it — a new account has none, and every call fails until it does",
+      "Owner or member access to the project you create the key in",
+    ],
+    steps: [
+      {
+        title: "Open the API keys page",
+        body: "Sign in at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). If you only ever used ChatGPT, you will be asked to create a developer account — that is expected, and it is free to create.",
+      },
+      {
+        title: "Add credit before you create the key",
+        body: "Go to **Settings → Billing** and add a payment method, then add credit. This is the single most common reason a key that looks correct fails on its first capture: the key is valid, the account balance is zero, and the error says nothing about money.",
+      },
+      {
+        title: "Create a secret key",
+        body: "Back on the API keys page, choose **Create new secret key**, name it something you will recognise later such as \"erp.io AI visibility\", and copy it. OpenAI shows it once; if you lose it, delete that key and make another.",
+      },
+      {
+        title: "Paste it here and save",
+        body: "Paste the key into the field on this page and save. We check it against OpenAI immediately, so a bad key is a form error now rather than a gap in your trend line next week.",
+      },
+    ],
+    verify: [
+      "This page shows OpenAI as connected once the key is saved.",
+      "Open **AI Visibility** — OpenAI appears in the engines list at the top of the page.",
+      "Run **AI Search Visibility** once. The run's Measured panel names OpenAI among the engines it captured from.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "The key is rejected when you save it.",
+        fix: "Copy it again whole — a key truncated on paste is the usual cause. If it still fails, the key may have been revoked; create a new one on the API keys page.",
+      },
+      {
+        symptom: "The key saves, but every capture fails with a quota or billing error.",
+        fix: "The account has no credit. Add a payment method and credit under Settings → Billing. A brand-new OpenAI account starts at zero, and API access is billed separately from any ChatGPT subscription.",
+      },
+      {
+        symptom: "Captures stop part-way through a day.",
+        fix: "You hit a rate limit on a new account's low tier. The run records which calls failed and keeps the rest; raising your usage tier at OpenAI, or tracking fewer prompts, resolves it.",
+      },
+    ],
+    privacy:
+      "The key is encrypted before it is stored and is used only to send your tracked prompts to OpenAI and read the answers back. It is never used to generate content elsewhere in this app. Revoke it any time on OpenAI's API keys page, or press Disconnect here — both take effect immediately, and captures already taken are unaffected.",
+    docs: [
+      { label: "OpenAI: API keys", url: "https://platform.openai.com/api-keys" },
+      { label: "OpenAI: billing and credit", url: "https://platform.openai.com/settings/organization/billing/overview" },
+    ],
+  },
+  GOOGLE_GEMINI: {
+    provider: "GOOGLE_GEMINI",
+    summary:
+      "Lets AI Search Visibility ask Gemini what it says about you, grounded with Google Search — the same grounding that sits behind AI Overviews. Usually the engine where a traditional SEO gap shows up first.",
+    timeMinutes: 4,
+    youWillNeed: [
+      "A Google account",
+      "Access to Google AI Studio at aistudio.google.com (free to enter)",
+      "A Google Cloud project — AI Studio creates one for you if you have none",
+    ],
+    steps: [
+      {
+        title: "Open Google AI Studio",
+        body: "Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and sign in with the Google account you want this billed to. This is a different product from the Gemini consumer app; a Gemini subscription does not give you a key.",
+      },
+      {
+        title: "Create an API key",
+        body: "Choose **Create API key**, and pick an existing Google Cloud project or let AI Studio make one. Copy the key when it appears.",
+      },
+      {
+        title: "Check the free tier covers you, or enable billing",
+        body: "The free tier is generous enough for a small prompt list. If you track many prompts, enable billing on that Cloud project — grounded requests are billed per search as well as per token, so a large list moves faster than you would expect.",
+      },
+      {
+        title: "Paste it here and save",
+        body: "Paste the key into the field on this page and save. We call Google straight away to confirm the key works and the Generative Language API is enabled on its project.",
+      },
+    ],
+    verify: [
+      "This page shows Google Gemini as connected once the key is saved.",
+      "Open **AI Visibility** — Gemini appears in the engines list.",
+      "After a capture, the citation table shows publisher domains. Gemini returns a Google redirect rather than the source link, so we read the publisher from the result's own label — seeing real domains there means grounding is working.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "Google rejects the key when you save it.",
+        fix: "Make sure it came from aistudio.google.com/apikey and not from a Cloud console credential of another type, and that the Generative Language API is enabled on the key's project.",
+      },
+      {
+        symptom: "Captures succeed but carry no citations.",
+        fix: "The answer was not grounded. That is a real measurement, not a fault — it means Gemini answered from its own knowledge without searching, which is itself worth knowing about that prompt.",
+      },
+      {
+        symptom: "Captures fail with a quota error partway through the day.",
+        fix: "You have exhausted the free tier's daily allowance. Enable billing on the Cloud project behind the key, or track fewer prompts.",
+      },
+    ],
+    privacy:
+      "The key is encrypted before it is stored and is used only to send your tracked prompts to Gemini and read the answers back. Revoke it any time in Google AI Studio, or press Disconnect here. Captures already taken are unaffected.",
+    docs: [
+      { label: "Google: get a Gemini API key", url: "https://ai.google.dev/gemini-api/docs/api-key" },
+      { label: "Google: grounding with Google Search", url: "https://ai.google.dev/gemini-api/docs/google-search" },
+    ],
+  },
+  PERPLEXITY: {
+    provider: "PERPLEXITY",
+    summary:
+      "Lets AI Search Visibility ask Perplexity what it says about you. Perplexity is a search product first, so its answers carry the most complete source lists of any engine we measure — which makes it the best read on which sites are shaping answers in your category.",
+    timeMinutes: 5,
+    youWillNeed: [
+      "A Perplexity account",
+      "A payment method on that account — API usage is billed separately from a Perplexity Pro subscription and Pro credits do not cover it",
+    ],
+    steps: [
+      {
+        title: "Open the API settings",
+        body: "Sign in at [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api). This is separate from the Perplexity app you may already use.",
+      },
+      {
+        title: "Add a payment method and buy credit",
+        body: "Add a card and purchase API credit. A Perplexity Pro subscription does not include API credit, and a key on a zero-credit account fails every call with a payment error rather than an authentication one.",
+      },
+      {
+        title: "Generate an API key",
+        body: "Choose **Generate** and copy the key. Name it for this app if Perplexity offers the option, so you can revoke the right one later.",
+      },
+      {
+        title: "Paste it here and save",
+        body: "Paste the key into the field on this page and save. We make one tiny request to confirm it can actually reach the API — a fraction of a cent, and the only thing that proves a key works before your first real capture.",
+      },
+    ],
+    verify: [
+      "This page shows Perplexity as connected once the key is saved.",
+      "Open **AI Visibility** — Perplexity appears in the engines list.",
+      "After a capture, the \"What the answers cite\" table fills out. Perplexity usually contributes the most rows there.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "Saving the key returns a payment error.",
+        fix: "The key is valid but the account has no API credit. Buy credit on the API settings page — a Pro subscription is not the same thing.",
+      },
+      {
+        symptom: "Perplexity rejects the key.",
+        fix: "Copy it again whole, and make sure it is an API key from the API settings page rather than any other token. If it still fails, generate a new one and revoke the old.",
+      },
+      {
+        symptom: "Captures have answers but no sources.",
+        fix: "Tell us — Perplexity has changed the field its citations arrive in more than once, and an answer with no sources from this engine usually means the response shape moved again rather than that it found nothing.",
+      },
+    ],
+    privacy:
+      "The key is encrypted before it is stored and is used only to send your tracked prompts to Perplexity and read the answers back. Revoke it any time on Perplexity's API settings page, or press Disconnect here. Captures already taken are unaffected.",
+    docs: [
+      { label: "Perplexity: API settings", url: "https://www.perplexity.ai/settings/api" },
+      { label: "Perplexity: API documentation", url: "https://docs.perplexity.ai/" },
+    ],
+  },
+  CLOUDFLARE_LOGPUSH: {
+    provider: "CLOUDFLARE_LOGPUSH",
+    summary:
+      "Streams your Cloudflare request logs here so you can see which AI crawlers read which pages, whether they were served errors, and how many humans arrived from an AI answer. Reads server logs rather than a JavaScript tag \u2014 a crawler never runs JavaScript, so a tag cannot see the half of this that matters at all.",
+    timeMinutes: 15,
+    youWillNeed: [
+      "A Cloudflare account with the site already proxied (orange cloud)",
+      "Logpush, which is available on Pro and above \u2014 it is not on the Free plan",
+      "Admin or Super Administrator on the Cloudflare account, since Logpush jobs are account-level",
+      "Workspace admin here, because the destination URL is the only thing authenticating the feed",
+    ],
+    steps: [
+      {
+        title: "Save this connection first",
+        body: "Enter the hostnames this workspace owns and save. That generates your destination URL, which appears on this page once saved. Log lines for any other hostname are discarded, so a Logpush job covering a whole Cloudflare account cannot attribute a different site's traffic to this workspace.",
+      },
+      {
+        title: "Copy your destination URL",
+        body: "It appears on this page after saving and contains a secret token. **Treat it like a password** \u2014 anyone holding it can write counts into this workspace. Rotate it here if it leaks; the old URL stops working immediately and you re-paste the new one into Cloudflare.",
+      },
+      {
+        title: "Create the Logpush job in Cloudflare",
+        body: "In Cloudflare go to **Analytics & Logs \u2192 Logpush \u2192 Create a Logpush job**, choose the **HTTP destination**, and paste your URL. Cloudflare will probe it before it lets you save \u2014 that probe is expected and should succeed straight away.",
+      },
+      {
+        title: "Choose the dataset and fields",
+        body: "Pick the **HTTP requests** dataset, then select exactly these fields: **ClientRequestHost**, **ClientRequestPath**, **ClientRequestUserAgent**, **ClientIP**, **ClientRequestReferer**, **EdgeResponseStatus**, **EdgeStartTimestamp**. Fewer fields means smaller batches and a faster ingest; extra fields are ignored but cost you bandwidth.",
+      },
+      {
+        title: "Enable the job and wait",
+        body: "Cloudflare batches logs and delivers them every few minutes. Nothing appears instantly. Give it an hour before judging whether it works, and longer before the crawler table means anything \u2014 a crawler that visits weekly needs a week.",
+      },
+    ],
+    verify: [
+      "Open AI Visibility \u2192 Crawlers. Once a batch has landed you will see bots, paths and hit counts.",
+      "If the page is still empty after an hour, check the job's status in Cloudflare \u2014 it shows the last delivery and the last error.",
+      "Crawler counts and AI referral counts fill in independently. Seeing one but not the other is normal on a quiet site.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "Cloudflare will not save the job \u2014 the destination test fails.",
+        fix: "The URL is wrong or the token was rotated after you copied it. Copy it again from this page. The URL must be the whole thing including the token at the end.",
+      },
+      {
+        symptom: "The job runs but nothing appears here.",
+        fix: "Almost always the hostname filter. If you entered hostnames on this page, they must match the ClientRequestHost in the logs exactly \u2014 \"example.com\" does not match \"shop.example.com\". Clear the field to accept every host in the job, then narrow it once data is arriving.",
+      },
+      {
+        symptom: "Crawler hits show but every one is unverified.",
+        fix: "Expected only for the operators that publish nothing \u2014 Amazon, Meta, ByteDance, Common Crawl and a few others. OpenAI, Anthropic, Perplexity, Google, Microsoft and Apple all publish IP ranges and are checked against them, so those should show verified counts within a day. If they do not, run `npm run check:crawler-ranges` \u2014 one of the published feeds has probably moved.",
+      },
+      {
+        symptom: "Logpush is missing from the Cloudflare menu.",
+        fix: "The zone is on the Free plan. Logpush starts at Pro.",
+      },
+    ],
+    privacy:
+      "Cloudflare sends us one line per request for the fields listed above. We keep no raw log lines: each batch is aggregated into per-day counts of (crawler, page) and (AI source, page) and then discarded, so nothing identifying a visitor is stored. Client IPs are used in memory only, to check a crawler is who it claims, and are never written to the database. Stop the feed any time by disabling the job in Cloudflare or pressing Disconnect here.",
+    docs: [
+      { label: "Cloudflare: Logpush HTTP destination", url: "https://developers.cloudflare.com/logs/get-started/enable-destinations/http/" },
+      { label: "Cloudflare: HTTP requests log fields", url: "https://developers.cloudflare.com/logs/reference/log-fields/zone/http_requests/" },
+    ],
+  },
 };

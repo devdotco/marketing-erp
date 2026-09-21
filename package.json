@@ -12,7 +12,12 @@
     "postinstall": "prisma skills sync || exit 0",
     "test:mirror": "esbuild test/mirror.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/mirror.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/mirror.test.mjs && esbuild test/mirror-apply.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/mirror-apply.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/mirror-apply.test.mjs",
     "test:cron": "esbuild test/cron.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/cron.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/cron.test.mjs",
-    "test": "esbuild test/content.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/content.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/content.test.mjs"
+    "test": "esbuild test/content.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/content.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/content.test.mjs",
+    "test:visibility": "esbuild test/visibility.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/visibility.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/visibility.test.mjs",
+    "test:visibility:db": "esbuild test/visibility-db.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/visibility-db.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/visibility-db.test.mjs",
+    "test:crawlers": "esbuild test/crawlers.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/crawlers.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/crawlers.test.mjs",
+    "test:crawlers:db": "esbuild test/crawlers-db.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/crawlers-db.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/crawlers-db.test.mjs",
+    "check:crawler-ranges": "node scripts/check-crawler-ranges.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",

@@ -19,6 +19,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 export async function createMessage(
   client: Anthropic,
   params: Anthropic.MessageCreateParamsNonStreaming,
+  options?: { timeout?: number; signal?: AbortSignal },
 ): Promise<Anthropic.Message> {
-  return client.messages.stream(params).finalMessage();
+  return client.messages.stream(params, options).finalMessage();
 }

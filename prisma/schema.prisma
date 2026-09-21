@@ -47,44 +47,44 @@ model VerificationToken {
 // ─── Users ────────────────────────────────────────────────────────────────
 
 model User {
-  id            String           @id @default(cuid())
-  name          String?
-  email         String           @unique
-  emailVerified DateTime?
-  image         String?
-  passwordHash  String?
-  referralSource String?         // e.g. "digitalmarketers.ai"
+  id             String            @id @default(cuid())
+  name           String?
+  email          String            @unique
+  emailVerified  DateTime?
+  image          String?
+  passwordHash   String?
+  referralSource String? // e.g. "digitalmarketers.ai"
   /// The app.erp.io shell user (`VibeUser.id`) this account IS. The identity join for the
   /// Marketing/CRM mirror and the hand-off: set at first link — by shell id, else by a VERIFIED
   /// email — and never moved to another shell user. Null = no shell user has claimed this account;
   /// the mirror never removes memberships from those. See lib/shell-mirror.
-  shellUserId   String?          @unique
-  accounts      Account[]
-  sessions      Session[]
-  memberships   WorkspaceMember[]
-  invitations   Invitation[]     @relation("InvitedBy")
-  notifications Notification[]
-  createdAt     DateTime         @default(now())
+  shellUserId    String?           @unique
+  accounts       Account[]
+  sessions       Session[]
+  memberships    WorkspaceMember[]
+  invitations    Invitation[]      @relation("InvitedBy")
+  notifications  Notification[]
+  createdAt      DateTime          @default(now())
 }
 
 // ─── Workspaces ────────────────────────────────────────────────────────────
 
 model Workspace {
-  id              String            @id @default(cuid())
-  name            String
-  slug            String            @unique
+  id                String             @id @default(cuid())
+  name              String
+  slug              String             @unique
   /// The app.erp.io organisation this workspace mirrors. Null for workspaces
   /// created here before the shell hand-off existed, and for any created by
   /// local sign-up — they are not wrong, they simply have no counterpart.
-  shellOrgId      String?           @unique
-  plan            WorkspacePlan     @default(FREE)
-  members         WorkspaceMember[]
-  agentConfigs    AgentConfig[]
-  runs            AgentRun[]
-  integrations    Integration[]
-  invitations     Invitation[]
-  businessProfile BusinessProfile?
-  notifications   Notification[]
+  shellOrgId        String?            @unique
+  plan              WorkspacePlan      @default(FREE)
+  members           WorkspaceMember[]
+  agentConfigs      AgentConfig[]
+  runs              AgentRun[]
+  integrations      Integration[]
+  invitations       Invitation[]
+  businessProfile   BusinessProfile?
+  notifications     Notification[]
   oauthStates       OAuthState[]
   outboundPlays     OutboundPlay[]
   outboundProspects OutboundProspect[]
@@ -92,13 +92,19 @@ model Workspace {
   socialPosts       SocialPost[]
   editorialProfile  EditorialProfile?
   generatedAssets   GeneratedAsset[]
+  trackedPrompts    TrackedPrompt[]
+  answerCaptures    AnswerCapture[]
+  competitors       Competitor[]
+  observations      Observation[]
+  crawlerDaily      CrawlerDaily[]
+  referralDaily     ReferralDaily[]
   /// Whether this workspace may fall back to the platform's own Anthropic key.
   /// Off by default: every tenant brings its own, so model spend lands on the
   /// account that asked for the work. Only a super admin turns this on, and
   /// only for workspaces we operate ourselves.
-  allowPlatformKey  Boolean           @default(false)
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  allowPlatformKey  Boolean            @default(false)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 }
 
 enum WorkspacePlan {
@@ -108,17 +114,17 @@ enum WorkspacePlan {
 }
 
 model WorkspaceMember {
-  id          String      @id @default(cuid())
+  id          String     @id @default(cuid())
   workspaceId String
-  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   userId      String
-  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role        MemberRole  @default(VIEWER)
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        MemberRole @default(VIEWER)
   /// Where this membership came from: `mirror` (pushed by the shell, which may remove it), `app`
   /// (invited or created here — the mirror never removes it) or `legacy` (predates the mirror;
   /// never removed by it). Owner decision 2026-09-14: in-app invites stay.
-  source      String      @default("app")
-  createdAt   DateTime    @default(now())
+  source      String     @default("app")
+  createdAt   DateTime   @default(now())
 
   @@unique([workspaceId, userId])
 }
@@ -133,16 +139,16 @@ enum MemberRole {
 // ─── Agent configuration ───────────────────────────────────────────────────
 
 model AgentConfig {
-  id          String      @id @default(cuid())
+  id          String     @id @default(cuid())
   workspaceId String
-  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   agentSlug   String
-  enabled     Boolean     @default(false)
-  config      Json        @default("{}")
+  enabled     Boolean    @default(false)
+  config      Json       @default("{}")
   schedule    String?
   runs        AgentRun[]
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
   @@unique([workspaceId, agentSlug])
 }
@@ -150,30 +156,30 @@ model AgentConfig {
 // ─── Agent runs ───────────────────────────────────────────────────────────
 
 model AgentRun {
-  id              String      @id @default(cuid())
-  workspaceId     String
-  workspace       Workspace   @relation(fields: [workspaceId], references: [id])
-  agentConfigId   String
-  agentConfig     AgentConfig @relation(fields: [agentConfigId], references: [id])
-  status          RunStatus   @default(PENDING)
-  input           Json?
-  output          Json?
-  metadata        Json?
-  costUsd         Decimal     @default(0) @db.Decimal(10, 6)
-  triggeredBy     String?
-  approvedBy      String?
-  rejectedBy      String?
-  rejectionNote   String?
-  startedAt       DateTime?
-  completedAt     DateTime?
-  createdAt       DateTime    @default(now())
+  id            String      @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace   @relation(fields: [workspaceId], references: [id])
+  agentConfigId String
+  agentConfig   AgentConfig @relation(fields: [agentConfigId], references: [id])
+  status        RunStatus   @default(PENDING)
+  input         Json?
+  output        Json?
+  metadata      Json?
+  costUsd       Decimal     @default(0) @db.Decimal(10, 6)
+  triggeredBy   String?
+  approvedBy    String?
+  rejectedBy    String?
+  rejectionNote String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime    @default(now())
   /// The run that enqueued this one automatically — currently only the Outbound Engine's
   /// Scout → Strategist → (Email Outbound + LinkedIn Outbound) pipeline chaining
   /// (lib/agent-handlers/chaining.ts). Null for every run started directly (by a person, a
   /// schedule, or a webhook) — which is every run created before this column existed.
-  parentRunId     String?
-  parentRun       AgentRun?   @relation("AgentRunChain", fields: [parentRunId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  childRuns       AgentRun[]  @relation("AgentRunChain")
+  parentRunId   String?
+  parentRun     AgentRun?   @relation("AgentRunChain", fields: [parentRunId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  childRuns     AgentRun[]  @relation("AgentRunChain")
 
   /// At most one child run per agent per parent — chaining.ts relies on this to make enqueuing a
   /// child idempotent (a unique-constraint violation on create means "already chained", not an
@@ -242,6 +248,16 @@ enum IntegrationProvider {
   /// Lets Email Marketing stage sequences/enrollments there in addition to
   /// Mailchimp/Klaviyo/Instantly/Apollo. See lib/integrations/crm-erp-io.ts.
   CRM_ERP_IO
+  /// Cloudflare Logpush destination for crawler + AI-referral analytics.
+  /// Holds no API key — the credentials carry the per-workspace webhook token
+  /// and the site hostnames this workspace owns. See lib/crawlers/ingest.ts.
+  CLOUDFLARE_LOGPUSH
+  /// Answer-engine keys for AI visibility capture (lib/answer-engines/*).
+  /// Captures are BYOK like every other model call: we measure the engines a
+  /// workspace has paid to reach, and refuse the rest rather than guess.
+  OPENAI
+  GOOGLE_GEMINI
+  PERPLEXITY
   /// Bring-your-own-key image generation for the Blog Writer's AI-generated
   /// image blocks. See lib/images/*.
   OPENAI_IMAGES
@@ -270,22 +286,22 @@ model Invitation {
 // ─── Business profile (populated by Onboarder agent) ─────────────────────
 
 model BusinessProfile {
-  id                     String    @id @default(cuid())
-  workspaceId            String    @unique
-  workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  businessName           String
-  websiteUrl             String?
-  industry               String?
-  targetAudience         String?
-  uniqueValueProp        String?
-  brandVoice             Json?
-  goals                  Json?
-  competitors            String[]
-  onboardingCompletedAt  DateTime?
-  onboardingStep         Int       @default(1)
-  lastRefreshedAt        DateTime?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
+  id                    String    @id @default(cuid())
+  workspaceId           String    @unique
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  businessName          String
+  websiteUrl            String?
+  industry              String?
+  targetAudience        String?
+  uniqueValueProp       String?
+  brandVoice            Json?
+  goals                 Json?
+  competitors           String[]
+  onboardingCompletedAt DateTime?
+  onboardingStep        Int       @default(1)
+  lastRefreshedAt       DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 }
 
 // ─── Editorial ─────────────────────────────────────────────────────────────
@@ -327,14 +343,14 @@ model Notification {
 // ─── OAuth PKCE state storage ─────────────────────────────────────────────
 
 model OAuthState {
-  id            String    @id @default(cuid())
-  workspaceId   String
-  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  state         String    @unique
-  provider      String
-  codeVerifier  String?
-  expiresAt     DateTime
-  createdAt     DateTime  @default(now())
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  state        String    @unique
+  provider     String
+  codeVerifier String?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
 }
 
 // ─── Outbound Engine ─────────────────────────────────────────────────────────
@@ -550,4 +566,253 @@ model SignedRequestReceipt {
   expiresAt DateTime
 
   @@index([expiresAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI search visibility — the measurement spine
+//
+// Until these tables existed, nothing in the product could answer "is this
+// better than last week?". Every result any agent had ever produced lived as
+// unstructured JSON on one AgentRun row, so nothing was comparable across
+// runs, and the one agent that reported on AI search simulated its figures.
+//
+// The shape is deliberately narrow: a prompt we track, an answer an engine
+// actually gave, the citations inside that answer, and a generic time-series
+// row everything else is derived into. Views are built over Observation, so a
+// new metric is a new row type rather than a new table.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which answer engines we can capture from. Adding one means adding a client
+/// in lib/answer-engines/ and a per-workspace key — captures are BYOK, like
+/// every other model call in this app.
+enum AnswerEngine {
+  CLAUDE
+  GEMINI
+  PERPLEXITY
+  OPENAI
+}
+
+enum TrackedPromptSource {
+  /// Typed in by a person.
+  MANUAL
+  /// Proposed by the model from the business profile, then kept.
+  SUGGESTED
+  /// Derived from a real Search Console query with impressions behind it.
+  SEARCH_CONSOLE
+}
+
+/// A question we ask the engines on a schedule. The unit of measurement.
+model TrackedPrompt {
+  id          String              @id @default(cuid())
+  workspaceId String
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  text        String
+  /// Free-text grouping ("pricing", "alternatives") so visibility can be read
+  /// by theme rather than one prompt at a time.
+  topic       String?
+  locale      String              @default("en-US")
+  source      TrackedPromptSource @default(MANUAL)
+  active      Boolean             @default(true)
+  captures    AnswerCapture[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  /// One row per question per locale. Re-adding the same prompt updates it
+  /// rather than splitting its history in two.
+  @@unique([workspaceId, text, locale])
+  @@index([workspaceId, active])
+}
+
+/// One engine's actual answer to one tracked prompt, at one moment.
+///
+/// `answerText` is kept in full on purpose. Every metric here is derived, and
+/// derivations get corrected — brand-term matching especially. Keeping the
+/// answer means a fix can be applied to history instead of only to captures
+/// taken after the fix shipped.
+model AnswerCapture {
+  id             String        @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  promptId       String
+  prompt         TrackedPrompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  engine         AnswerEngine
+  /// The exact model id that answered. Visibility moves when an engine ships a
+  /// new model, and without this the trend line has an unexplained step in it.
+  model          String
+  answerText     String
+  citations      Citation[]
+  /// Did the brand appear at all, by any of its terms?
+  brandMentioned Boolean       @default(false)
+  /// 1 = the first brand named in the answer. Null when not mentioned.
+  brandRank      Int?
+  /// POSITIVE | NEUTRAL | NEGATIVE | null when not classified.
+  sentiment      String?
+  /// Tracked competitors named in this answer, by competitor name.
+  competitors    String[]
+  costUsd        Decimal       @default(0) @db.Decimal(10, 6)
+  /// The run that took this capture, when one did. Null for a manual capture.
+  runId          String?
+  capturedAt     DateTime      @default(now())
+
+  /// The capture day, as YYYY-MM-DD in UTC. Written by the capture pipeline,
+  /// not derived in SQL, so the uniqueness below is a plain index: one capture
+  /// per prompt per engine per day. A re-run on the same day updates rather
+  /// than double-counting, which is what makes a retry safe.
+  capturedOn String
+
+  @@unique([promptId, engine, capturedOn])
+  @@index([workspaceId, capturedAt])
+  @@index([workspaceId, engine, capturedAt])
+}
+
+/// A source an engine cited inside an answer. One row per link.
+model Citation {
+  id          String        @id @default(cuid())
+  captureId   String
+  capture     AnswerCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  /// Denormalised so the "which domains influence answers about us" view is a
+  /// groupBy on one table rather than a join through captures on every read.
+  workspaceId String
+  domain      String
+  url         String
+  /// Order of appearance in the answer, 1-based.
+  position    Int
+  /// True when the domain is the workspace's own site.
+  isOwned     Boolean       @default(false)
+  capturedAt  DateTime      @default(now())
+
+  @@index([workspaceId, domain, capturedAt])
+  @@index([captureId])
+}
+
+/// A competitor to measure share of voice against.
+///
+/// BusinessProfile.competitors is a bare String[] of names, which is enough to
+/// put in a prompt and not enough to measure: share of voice needs a stable
+/// identity and the domain to recognise in a citation. Seeded from that array
+/// the first time visibility runs.
+model Competitor {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  domain      String?
+  /// Other strings that mean this competitor in an answer.
+  aliases     String[]
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  @@unique([workspaceId, name])
+}
+
+/// The generic time-series row. Everything chartable derives into this.
+///
+/// One table rather than one per metric: the dashboard, the trend arrows and
+/// (later) the signal detectors all read the same shape, so adding "citation
+/// share by engine" is a new `metric` value, not a migration.
+model Observation {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// What the figure is about: "brand", a competitor name, a domain, a URL.
+  subject      String
+  /// What was measured: "visibility", "citation_share", "brand_rank",
+  /// "sentiment_score", "answer_mentions".
+  metric       String
+  /// How it was sliced — { engine: "CLAUDE", topic: "pricing" }. Kept as JSON
+  /// because the useful slices differ per metric and a column per slice would
+  /// be mostly nulls.
+  dimensions   Json      @default("{}")
+  /// The same slice as a stable string ("engine=CLAUDE;topic=pricing", keys
+  /// sorted, empty string for no slice). Postgres cannot put a JSON column in
+  /// a unique index, and without one a recompute APPENDS a second row for the
+  /// same day instead of correcting the first — which is how a trend line
+  /// quietly doubles. Written by recordObservations(); never set it by hand.
+  dimensionKey String    @default("")
+  value        Float
+  /// Which system the figure came from, mirroring lib/agents/grounding.ts's
+  /// evidence sources: "ANSWER_CAPTURE", "GSC", "CRAWL_LOGS".
+  source       String
+  /// The UTC day this figure describes, YYYY-MM-DD. One row per subject +
+  /// metric + dimensions + day; a recompute overwrites rather than appends.
+  observedOn   String
+  observedAt   DateTime  @default(now())
+
+  /// One figure per subject + metric + slice + day. Makes a recompute an
+  /// upsert, so re-running a capture corrects the day rather than duplicating it.
+  @@unique([workspaceId, subject, metric, dimensionKey, observedOn])
+  @@index([workspaceId, metric, observedOn])
+  @@index([workspaceId, subject, metric, observedOn])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crawler and AI-referral analytics
+//
+// Fed by Cloudflare Logpush rather than a JavaScript tag. Two reasons that is
+// the right source and not just the convenient one: a crawler never runs
+// JavaScript, so a tag cannot see the half of this that matters at all; and a
+// human arriving from an AI answer is counted even with an ad blocker, with
+// nothing for a consent banner to suppress.
+//
+// Stored pre-aggregated by day. A busy site pushes millions of log lines and
+// almost none of them are individually interesting — what is wanted is "which
+// pages did which engine read, and how often". One row per (day, bot, path)
+// makes the ingest an upsert with an increment and keeps the table small
+// enough that nobody has to think about retention.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One AI crawler's requests to one path on one UTC day.
+model CrawlerDaily {
+  id           String    @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// YYYY-MM-DD, UTC. Written by the ingest, never derived in SQL.
+  day          String
+  /// AI_CRAWLERS key — "GPTBot", "ClaudeBot". See lib/crawlers/bots.ts.
+  bot          String
+  path         String
+  hits         Int       @default(0)
+  /// Hits whose source IP actually passed the operator's published check.
+  /// A user agent is a claim; this is the part of it that was tested.
+  verifiedHits Int       @default(0)
+  /// Hits that got a 4xx or 5xx. A crawler being served errors is the single
+  /// most actionable thing this table can surface, and it is invisible in any
+  /// tag-based analytics because the page never rendered.
+  errorHits    Int       @default(0)
+  lastSeenAt   DateTime  @default(now())
+
+  @@unique([workspaceId, day, bot, path])
+  @@index([workspaceId, day])
+  @@index([workspaceId, bot, day])
+}
+
+/// Humans arriving from one AI surface to one path on one UTC day.
+model ReferralDaily {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  day         String
+  /// AI_REFERRERS key — "ChatGPT", "Perplexity". See lib/crawlers/referrers.ts.
+  source      String
+  path        String
+  visits      Int       @default(0)
+  lastSeenAt  DateTime  @default(now())
+
+  @@unique([workspaceId, day, source, path])
+  @@index([workspaceId, day])
+}
+
+/// One Logpush batch we accepted, so a redelivery is not counted twice.
+///
+/// Cloudflare retries a batch it did not get a 2xx for, and a retry after a
+/// partial write would double every counter in it. The id is a hash of the
+/// batch body: cheap, needs nothing from Cloudflare, and is stable across a
+/// retry of the identical payload — which is exactly what a retry is.
+model LogBatchReceipt {
+  hash        String   @id
+  workspaceId String
+  lines       Int
+  receivedAt  DateTime @default(now())
+
+  @@index([receivedAt])
 }

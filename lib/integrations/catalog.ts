@@ -120,6 +120,47 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
       fields: apiKey("Settings → API Keys → Create Private API Key, with Campaigns read/write access."),
     },
   },
+  CLOUDFLARE_LOGPUSH: {
+    name: "Cloudflare Logpush",
+    method: {
+      kind: "key",
+      fields: [
+        {
+          key: "hosts",
+          label: "Site hostnames",
+          placeholder: "example.com, blog.example.com",
+          hint: "The hostnames this workspace owns, comma separated. Log lines for any other host are ignored, so one Cloudflare account pushing a whole zone cannot attribute another site's traffic here. Leave blank to accept every host in the job.",
+        },
+      ],
+    },
+  },
+  OPENAI: {
+    name: "OpenAI",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "platform.openai.com/api-keys. Used to capture what GPT says about you for AI Search Visibility. It is the model behind ChatGPT, not the ChatGPT app itself — the app adds its own prompt and memory on top, so treat this as a close proxy rather than the consumer product.",
+      ),
+    },
+  },
+  GOOGLE_GEMINI: {
+    name: "Google Gemini",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "aistudio.google.com/apikey. Used to capture what Gemini says about you, grounded with Google Search — the same grounding behind AI Overviews.",
+      ),
+    },
+  },
+  PERPLEXITY: {
+    name: "Perplexity",
+    method: {
+      kind: "key",
+      fields: apiKey(
+        "perplexity.ai/settings/api. Used to capture what Perplexity says about you. It is a search product first, so its answers carry the most complete citations of any engine we measure.",
+      ),
+    },
+  },
   OPENAI_IMAGES: {
     name: "OpenAI Images",
     method: {
