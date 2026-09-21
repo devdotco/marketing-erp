@@ -1,359 +1,211 @@
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import { googleCredentials, liveCallFailed } from "@/lib/integrations/google";
-import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
-import { AgentInputError } from "@/lib/ai/errors";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
-import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
+import { resolveInputs, num } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { withProvenance } from "@/lib/agents/provenance";
+import { ENGINE_NAMES } from "@/lib/answer-engines";
+import { captureVisibility } from "@/lib/visibility/capture";
+import { addPrompts, suggestPrompts } from "@/lib/visibility/prompts";
+import { METRICS } from "@/lib/visibility/observations";
+import {
+  citationAuthority,
+  deltaOf,
+  readSeries,
+  shareOfVoice,
+  visibilityByEngine,
+} from "@/lib/visibility/series";
 
-function formatDate(d: Date): string {
-  return d.toISOString().split("T")[0];
-}
-
+/**
+ * AI Search Visibility — what the engines actually say about this brand.
+ *
+ * This handler used to simulate. It sent one Haiku call asking the model to
+ * imagine how ChatGPT, Perplexity, Gemini and Claude *would* answer and
+ * whether the brand *would* be cited, then returned a citation-share
+ * percentage built entirely out of that guess — alongside real Search Console
+ * figures, in the same object, distinguished only by a `source` field nothing
+ * rendered. A customer comparing us to a product that captures real answers
+ * would have found that in about a minute.
+ *
+ * It now asks the engines. Every figure below comes from a stored
+ * AnswerCapture (lib/visibility/capture.ts); the only model judgement in the
+ * output is the `recommendations` block, which is labelled as such and carries
+ * no numbers of its own.
+ *
+ * With no engine connected it refuses, and that refusal is the feature. The
+ * alternative — producing a plausible number anyway — is exactly what was
+ * wrong before.
+ */
 export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
-  // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).
-  const { client } = await resolveAnthropic(run.agentConfig.workspaceId);
-
+  const workspaceId = run.agentConfig.workspaceId;
   const config = resolveInputs(run);
-  const testQueries = String(config.testQueries ?? "");
-  const competitors = String(config.competitors ?? "");
-  const generateLlmsTxt = config.generateLlmsTxt !== false;
-  const siteUrl = String(config.siteUrl ?? "");
-  const targetDomain = str(config, "targetDomain");
-  const brandTerms = lines(config, "brandTerms", 20);
-  const targetPlatforms = str(config, "targetPlatforms", "all");
-  // Every query is answered once per engine inside a single 4k-token reply, so
-  // the count is capped where that reply can still hold them.
-  const testQueryCount = num(config, "testQueryCount", 10, { min: 1, max: 25 });
-  const industryContext = str(config, "industryContext");
-  const includeCompetitorBenchmark = config.includeCompetitorBenchmark === true;
+  const windowDays = num(config, "windowDays", 30, { min: 7, max: 180 });
+  const autoSuggest = config.autoSuggestPrompts !== false;
 
-  const businessProfile = await prisma.businessProfile.findFirst({
-    where: { workspaceId: run.agentConfig.workspaceId },
-  });
+  let costUsd = 0;
+  let seeded: { added: number; groundedInSearchConsole: boolean } | null = null;
 
-  const brandContext = businessProfile
-    ? [
-        businessProfile.businessName ? `Business: ${businessProfile.businessName}` : "",
-        businessProfile.industry ? `Industry: ${businessProfile.industry}` : "",
-        businessProfile.targetAudience ? `Target audience: ${businessProfile.targetAudience}` : "",
-        businessProfile.uniqueValueProp ? `Unique value: ${businessProfile.uniqueValueProp}` : "",
-        businessProfile.websiteUrl ? `Website: ${targetDomain || siteUrl || businessProfile.websiteUrl}` : "",
-        businessProfile.competitors.length > 0
-          ? `Known competitors: ${competitors || businessProfile.competitors.join(", ")}`
-          : competitors
-            ? `Competitors to track: ${competitors}`
-            : "",
-      ].filter(Boolean).join("\n")
-    : "";
-
-  // The domain being audited: the form's Target Domain, else the GSC property,
-  // else the Business Profile website.
-  const resolvedSiteUrl = targetDomain || siteUrl || businessProfile?.websiteUrl || "";
-
-  // --- Live GSC branded query fetch ---
-  let gscBrandedContext = "";
-  let isLive = false;
-
-  const integration = await prisma.integration.findUnique({
-    where: {
-      workspaceId_provider: {
-        workspaceId: run.agentConfig.workspaceId,
-        provider: "GOOGLE_SEARCH_CONSOLE",
-      },
-    },
-  });
-
-  // Not connected → simulating below is fine. Connected but the call fails →
-  // fail the run rather than quietly ship simulated data as "live".
-  if (integration) {
-    try {
-      // Refreshes the hour-long access token first.
-      const creds = await googleCredentials(integration);
-
-      // Only the explicit "siteUrl" dropdown value is validated against the
-      // grant here — resolvedSiteUrl (Target Domain / Business Profile) is not
-      // a property the user picked, so it's used only if nothing else resolves.
-      const propertyUrl = (await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, siteUrl)) || resolvedSiteUrl;
-      if (!propertyUrl) {
-        throw new AgentInputError(
-          "Google Search Console is connected, but no property has been selected.",
-          "Open Integrations → Google Search Console and choose a property.",
-          "integration_not_configured",
-        );
+  // A workspace that has never set prompts up cannot be measured, and making
+  // its first run a dead end is a poor trade when we can propose a list from
+  // its own Search Console demand. Seeding is one-time: it only fires when
+  // there are no prompts at all, never on top of a list someone curated.
+  if (autoSuggest) {
+    const existing = await prisma.trackedPrompt.count({ where: { workspaceId, active: true } });
+    if (existing === 0) {
+      const suggested = await suggestPrompts(workspaceId, { count: 20 });
+      costUsd += suggested.costUsd;
+      if (suggested.suggestions.length > 0) {
+        const added = await addPrompts(workspaceId, suggested.suggestions);
+        seeded = { added, groundedInSearchConsole: suggested.groundedInSearchConsole };
       }
-      const encodedUrl = encodeURIComponent(propertyUrl);
-      const apiBase = `https://www.googleapis.com/webmasters/v3/sites/${encodedUrl}/searchAnalytics/query`;
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${creds.access_token}`,
-        "Content-Type": "application/json",
-      };
-
-      const today = new Date();
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
-      const ninetyDaysAgo = new Date(yesterday);
-      ninetyDaysAgo.setDate(yesterday.getDate() - 89);
-
-      type GscRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
-      type GscResponse = { rows?: GscRow[] };
-
-      const res = await fetch(apiBase, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          startDate: formatDate(ninetyDaysAgo),
-          endDate: formatDate(yesterday),
-          dimensions: ["query"],
-          rowLimit: 25000,
-        }),
-      });
-      if (!res.ok) {
-        throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-      }
-
-      const data = (await res.json()) as GscResponse;
-      const rows = data.rows ?? [];
-
-      // Build brand name tokens for matching (business name + domain parts)
-      const brandTokens: string[] = brandTerms.map((t) => t.toLowerCase());
-      if (businessProfile?.businessName) {
-        // Break the name into words, filter short words
-        brandTokens.push(
-          ...businessProfile.businessName
-            .toLowerCase()
-            .split(/\s+/)
-            .filter((w) => w.length > 3)
-        );
-      }
-      if (resolvedSiteUrl) {
-        // Extract domain without TLD
-        const domainMatch = resolvedSiteUrl.match(/(?:https?:\/\/)?(?:www\.)?([^./]+)/);
-        if (domainMatch?.[1]) brandTokens.push(domainMatch[1].toLowerCase());
-      }
-
-      // Separate branded vs non-branded queries
-      const isBranded = (query: string): boolean => {
-        if (brandTokens.length === 0) return false;
-        const q = query.toLowerCase();
-        return brandTokens.some((t) => q.includes(t));
-      };
-
-      const brandedRows = rows
-        .filter((r) => isBranded(r.keys[0]))
-        .sort((a, b) => b.impressions - a.impressions)
-        .slice(0, 200);
-
-      const nonBrandedHighImpression = rows
-        .filter((r) => !isBranded(r.keys[0]))
-        .sort((a, b) => b.impressions - a.impressions)
-        .slice(0, 100);
-
-      const totalBrandedImpressions = brandedRows.reduce((s, r) => s + r.impressions, 0);
-      const totalBrandedClicks = brandedRows.reduce((s, r) => s + r.clicks, 0);
-      const avgBrandedPosition =
-        brandedRows.length > 0
-          ? brandedRows.reduce((s, r) => s + r.position, 0) / brandedRows.length
-          : 0;
-
-      const totalNonBrandedImpressions = nonBrandedHighImpression.reduce((s, r) => s + r.impressions, 0);
-      const totalNonBrandedClicks = nonBrandedHighImpression.reduce((s, r) => s + r.clicks, 0);
-
-      gscBrandedContext = `REAL GSC BRANDED + QUERY DATA (last 90 days, ${formatDate(ninetyDaysAgo)} to ${formatDate(yesterday)}):
-Property: ${propertyUrl}
-Total queries with data: ${rows.length}
-Brand tokens used for matching: ${brandTokens.join(", ") || "none (no business name configured)"}
-
-BRANDED QUERIES (${brandedRows.length} matched):
-- Total branded impressions: ${totalBrandedImpressions}
-- Total branded clicks: ${totalBrandedClicks}
-- Avg branded position: ${avgBrandedPosition.toFixed(2)}
-Top branded queries:
-${JSON.stringify(brandedRows.map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, ctr: r.ctr, position: r.position })), null, 2)}
-
-TOP NON-BRANDED HIGH-IMPRESSION QUERIES (relevant for AI citation gap analysis):
-- Total impressions: ${totalNonBrandedImpressions}
-- Total clicks: ${totalNonBrandedClicks}
-Top queries:
-${JSON.stringify(nonBrandedHighImpression.map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, ctr: r.ctr, position: r.position })), null, 2)}`;
-
-      isLive = true;
-    } catch (err) {
-      if (err instanceof AgentInputError) throw err;
-      throw liveCallFailed("Google Search Console", err instanceof Error ? err.message : String(err));
     }
   }
 
-  const systemPrompt = [
-    "You are an AI search visibility specialist.",
-    "Citation in LLM responses depends on: topical authority, schema markup, brand mention frequency, and content that directly answers user questions.",
-    "Focus recommendations on these levers — not vanity metrics.",
-    "Be specific about which content gaps or authority gaps explain low citation probability.",
-    "Return ONLY valid JSON — no markdown fences, no preamble.",
-    brandContext ? `\nClient context:\n${brandContext}` : "",
-  ].filter(Boolean).join("\n");
+  const capture = await captureVisibility(workspaceId, { runId: run.id });
+  costUsd += capture.costUsd;
 
-  const queries = testQueries
-    .split(/[\n,]+/)
-    .map((q) => q.trim())
-    .filter(Boolean)
-    .slice(0, testQueryCount);
+  // ── Everything below is read back out of the store, not held in memory from
+  // the capture above. That is deliberate: it proves the figures the report
+  // shows are the same ones the dashboard will show tomorrow.
+  const [overall, rank, sentiment, byEngine, voice, authority] = await Promise.all([
+    readSeries(workspaceId, { subject: "brand", metric: METRICS.VISIBILITY, days: windowDays }),
+    readSeries(workspaceId, { subject: "brand", metric: METRICS.BRAND_RANK, days: windowDays }),
+    readSeries(workspaceId, { subject: "brand", metric: METRICS.SENTIMENT, days: windowDays }),
+    visibilityByEngine(workspaceId, windowDays),
+    shareOfVoice(workspaceId, windowDays),
+    citationAuthority(workspaceId, { days: windowDays, limit: 15 }),
+  ]);
 
-  const ENGINE_NAMES: Record<string, string[]> = {
-    all: ["ChatGPT", "Perplexity", "Gemini", "Claude"],
-    chatgpt: ["ChatGPT"],
-    perplexity: ["Perplexity"],
-    "google-aio": ["Google AI Overviews"],
+  const visibility = deltaOf(overall);
+  const ahead = voice.filter((v) => !v.isBrand && v.value > (visibility.latest ?? 0));
+
+  const measured = {
+    capturedOn: capture.day,
+    enginesMeasured: capture.engines.map((e) => ENGINE_NAMES[e]),
+    promptsTracked: capture.prompts,
+    capturesTaken: capture.captured,
+    visibility: {
+      latestPct: visibility.latest,
+      changePct: visibility.change,
+      daysOfHistory: visibility.samples,
+      byEngine: byEngine.map((e) => ({
+        engine: ENGINE_NAMES[e.engine as keyof typeof ENGINE_NAMES] ?? e.engine,
+        visibilityPct: e.value,
+      })),
+      trend: overall.points,
+    },
+    positioning: {
+      meanRankWhenMentioned: deltaOf(rank).latest,
+      sentimentScore: deltaOf(sentiment).latest,
+      sentimentScale: "1 = recommended, 0 = named neutrally, -1 = criticised",
+    },
+    shareOfVoice: voice.map((v) => ({
+      name: v.isBrand ? "You" : v.subject,
+      visibilityPct: v.value,
+      isYou: v.isBrand,
+    })),
+    citationSources: authority.map((a) => ({
+      domain: a.domain,
+      citations: a.citations,
+      isYourSite: a.isOwned,
+    })),
+    failures: capture.failures.map((f) => ({
+      engine: ENGINE_NAMES[f.engine],
+      prompt: f.prompt,
+      error: f.error,
+    })),
   };
-  const engines = ENGINE_NAMES[targetPlatforms] ?? ENGINE_NAMES.all;
 
-  const benchmarkCompetitors = competitors
-    ? competitors.split(/[\n,]+/).map((c) => c.trim()).filter(Boolean)
-    : (businessProfile?.competitors ?? []);
-
-  const competitorList = competitors
-    .split(/[\n,]+/)
-    .map((c) => c.trim())
-    .filter(Boolean);
-
-  const userPrompt = [
-    `Analyse AI search visibility for: ${resolvedSiteUrl || "the client website"}`,
-    "",
-    brandTerms.length > 0 ? `Brand terms that count as a citation or mention: ${brandTerms.join(", ")}` : "",
-    industryContext ? `Industry context: ${industryContext}` : "",
-    queries.length > 0
-      ? `Test queries (${queries.length}):\n${queries.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
-      : `No test queries were supplied: write ${testQueryCount} representative queries a prospective customer${industryContext ? ` in this industry (${industryContext})` : ""} would ask an AI assistant, then test those.`,
-    `AI engines to simulate: ${engines.join(", ")}`,
-    "",
-    competitorList.length > 0
-      ? `Competing domains to track in AI citations: ${competitorList.join(", ")}`
-      : "",
-    "",
-    isLive
-      ? `REAL GSC DATA to inform your analysis:
-${gscBrandedContext}
-
-Use this real data to:
-- Assess brand authority strength from actual branded query volume and position
-- Identify topical gaps where non-branded high-impression queries have poor CTR (position > 10) — these are areas where AI engines likely cite competitors instead
-- Reference actual query volumes when explaining citation probability
-`
-      : "",
-    `For each test query, simulate how each of these AI engines (${engines.join(", ")}) would likely respond — aiEngines holds exactly one entry per engine listed:`,
-    "- Would the client's site be cited?",
-    "- If yes, at what position?",
-    "- Which competitors would more likely be cited, and why?",
-    "- What specific changes would increase citation probability?",
-    "",
-    "Scoring: citationSharePct = percentage of AI engines that would cite the client for this query (0-100)",
-    "overallCitationShare = average across all queries",
-    "",
-    generateLlmsTxt
-      ? `Generate an llms.txt file for ${resolvedSiteUrl || "the client site"} following the llms.txt spec (machine-readable site summary for AI crawlers).`
-      : "Set llmsTxt to null.",
-    "",
-    includeCompetitorBenchmark && benchmarkCompetitors.length > 0
-      ? `Competitor benchmark: estimate the same citation share for ${benchmarkCompetitors.slice(0, 3).join(", ")} across these queries and fill competitorBenchmark, so the client's score reads comparatively.`
-      : "Set competitorBenchmark to null.",
-    "",
-    "Return this exact JSON structure:",
-    JSON.stringify({
-      siteUrl: resolvedSiteUrl,
-      testDate: new Date().toISOString().split("T")[0],
-      source: isLive ? "live" : "simulation",
-      gscSummary: isLive
-        ? {
-            note: "Populated from real GSC data — see gscBrandedData field",
-          }
-        : null,
-      queryResults: [
-        {
-          query: "example test query",
-          aiEngines: [
-            {
-              engine: "ChatGPT",
-              wasCited: false,
-              citationPosition: null,
-              competitorsCited: ["competitor.com"],
-              responseExcerpt:
-                "Summary of how this AI engine would answer the query and who it would cite...",
-            },
-            {
-              engine: "Perplexity",
-              wasCited: true,
-              citationPosition: 2,
-              competitorsCited: ["competitor.com"],
-              responseExcerpt: "Summary of Perplexity's likely response...",
-            },
-            {
-              engine: "Gemini",
-              wasCited: false,
-              citationPosition: null,
-              competitorsCited: ["competitor.com"],
-              responseExcerpt: "Summary of Gemini's likely response...",
-            },
-            {
-              engine: "Claude",
-              wasCited: false,
-              citationPosition: null,
-              competitorsCited: ["competitor.com"],
-              responseExcerpt: "Summary of Claude's likely response...",
-            },
-          ],
-          citationSharePct: 25,
-          recommendation:
-            "Specific action to improve citation probability for this query...",
-        },
-      ],
-      overallCitationShare: 25,
-      competitorBenchmark: includeCompetitorBenchmark
-        ? [{ domain: "competitor.com", estimatedCitationShare: 40, whyTheyWin: "What gives them the edge in AI answers..." }]
-        : null,
-      llmsTxt: generateLlmsTxt
-        ? `# ${businessProfile?.businessName ?? "Site Name"}\n\n> One-line site description\n\n## About\n...\n\n## Key Pages\n...\n\n## Products/Services\n...`
-        : null,
-      improvementOpportunities: [
-        {
-          area: "Topical Authority | Schema Markup | Brand Mentions | Content Gaps",
-          action: "Specific action to take...",
-          expectedImpact: "Expected improvement in citation probability...",
-        },
-      ],
-      simulationNote: isLive
-        ? null
-        : "These are AI-simulated citation predictions. Real citation testing requires querying each AI engine directly.",
-    }),
-  ].filter(Boolean).join("\n");
-
+  // The one model call left, and it produces no figures — only what to do
+  // about the figures above. Kept separate in the output so the distinction
+  // survives into the UI.
+  const { client } = await resolveAnthropic(workspaceId);
   const message = await client.messages.create({
-    model: MODELS.fast,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
+    model: MODELS.standard,
+    max_tokens: 2000,
+    system: [
+      "You advise on AI search visibility, reading measurements someone else took.",
+      "Never restate a number as if you derived it, and never invent one that is not in the data given to you.",
+      "Citation in AI answers follows from being cited by the sources those answers already trust, from content that answers the question directly, and from being a recognised entity in the category — not from keyword density.",
+      "Be specific about which gap explains which figure. Say what to publish, where, and why it would change the number.",
+      "Return ONLY valid JSON, no markdown fences.",
+    ].join("\n"),
+    messages: [
+      {
+        role: "user",
+        content: [
+          "Here are this week's measurements. Recommend what to do.",
+          JSON.stringify(measured, null, 2),
+          ahead.length > 0
+            ? `Competitors currently ahead: ${ahead.map((a) => `${a.subject} (${a.value}%)`).join(", ")}`
+            : "",
+          "",
+          "Return:",
+          JSON.stringify({
+            readingOfTheData: "Two or three sentences on what these figures say.",
+            opportunities: [
+              {
+                area: "Cited sources | Content gap | Entity presence | Competitor position",
+                action: "What to do, specifically.",
+                why: "Which figure above this addresses.",
+                effort: "low | medium | high",
+              },
+            ],
+          }),
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      },
+    ],
   });
+  costUsd += estimateCostUsd(MODELS.standard, message.usage);
 
-  const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
+  let advice: Record<string, unknown>;
   try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { report: rawText };
+    const raw = textFrom(message);
+    const match = raw.match(/\{[\s\S]+\}/);
+    advice = match ? JSON.parse(match[0]) : { readingOfTheData: raw };
   } catch {
-    output = { report: rawText };
+    advice = { readingOfTheData: textFrom(message) };
   }
 
-  output.generatedAt = new Date().toISOString();
-  output.workspaceId = run.agentConfig.workspaceId;
-  output.source = isLive ? "live" : "simulation";
-  // Priced from lib/ai/models.ts — Haiku 4.5 is $1/M input, $5/M output.
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
+  const output: Record<string, unknown> = {
+    measured,
+    recommendations: advice,
+    recommendationsNote:
+      "The recommendations are the model's judgement over the measurements above. The figures are not — every one comes from a stored answer capture.",
+    ...(seeded
+      ? {
+          promptsSeeded: {
+            added: seeded.added,
+            basis: seeded.groundedInSearchConsole
+              ? "Proposed from this site's own highest-impression non-branded Search Console queries."
+              : "Proposed from the business profile. Connect Search Console for prompts grounded in demand you already have.",
+          },
+        }
+      : {}),
+    generatedAt: new Date().toISOString(),
+  };
 
-  const requireApproval = config.requireApproval !== false;
+  withProvenance(
+    output,
+    "ai-search-visibility",
+    [
+      {
+        source: "ANSWER_CAPTURE",
+        detail: `${capture.engines.map((e) => ENGINE_NAMES[e]).join(", ")} · ${capture.prompts} prompts on ${capture.day}`,
+        rows: capture.captured,
+      },
+    ],
+    capture.failures.length > 0
+      ? `${capture.failures.length} of ${capture.prompts * capture.engines.length} engine calls failed and are excluded from these figures.`
+      : undefined,
+  );
+
+  const requireApproval = config.requireApproval === true;
   if (requireApproval) {
     await updateStatus("AWAITING_APPROVAL", output);
   }
