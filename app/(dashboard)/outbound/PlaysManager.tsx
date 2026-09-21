@@ -4,7 +4,13 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createOutboundPlay, updateOutboundPlay, setOutboundPlayEnabled } from "@/lib/actions/outbound-plays";
 import { ResourceSelect } from "@/components/ui/ResourceSelect";
-import { FORM_D_INDUSTRY_GROUPS, type OutboundPlayConfig } from "@/lib/agent-handlers/outbound-play-config";
+import {
+  DEFAULT_SCORING_WEIGHTS,
+  FORM_D_INDUSTRY_GROUPS,
+  SCORING_DIMENSIONS,
+  type OutboundPlayConfig,
+  type ScoringDimension,
+} from "@/lib/agent-handlers/outbound-play-config";
 
 type PlayRow = {
   id: string;
@@ -21,7 +27,13 @@ interface PlaysManagerProps {
   isAdmin: boolean;
 }
 
-const EMPTY_CONFIG: OutboundPlayConfig = {
+// Exported for reuse by the Outbound Scout agent page's ICP panel
+// (app/(dashboard)/agents/[slug]/ScoutIcpPanel.tsx) — that panel edits the same OutboundPlay.config
+// shape through the same two server actions, so it needs the same "what does a brand-new/partial
+// config default to" and "how does a comma/newline list field parse" logic this file already has.
+// Keeping one copy here (rather than forking it) is what guarantees a play created from either
+// place produces the identical shape PlaysManager's own form would.
+export const EMPTY_CONFIG: OutboundPlayConfig = {
   icp: { titles: [], seniorities: [], departments: [], employeeRanges: [], industries: [], geographies: [], technologies: [], exclusions: [] },
   serviceOffer: "",
   proofPoints: [],
@@ -29,6 +41,7 @@ const EMPTY_CONFIG: OutboundPlayConfig = {
   routingThresholds: { emailAndLinkedin: 80, emailOnly: 65, watchlist: 50 },
   autoAdvance: true,
   dailySourcingCap: 30,
+  crmDealOn: "interested",
   capitalRaise: {
     enabled: false,
     lookbackDays: 30,
@@ -45,7 +58,7 @@ const EMPTY_CONFIG: OutboundPlayConfig = {
   },
 };
 
-function toConfig(raw: unknown): OutboundPlayConfig {
+export function toConfig(raw: unknown): OutboundPlayConfig {
   const c = (raw ?? {}) as Partial<OutboundPlayConfig> & {
     icp?: Partial<OutboundPlayConfig["icp"]>;
     capitalRaise?: Partial<OutboundPlayConfig["capitalRaise"]>;
@@ -62,11 +75,11 @@ function toConfig(raw: unknown): OutboundPlayConfig {
   };
 }
 
-function splitList(value: string): string[] {
+export function splitList(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean))];
 }
 
-const fieldStyle: React.CSSProperties = {
+export const fieldStyle: React.CSSProperties = {
   width: "100%",
   padding: "8px 10px",
   fontSize: 13,
@@ -76,7 +89,18 @@ const fieldStyle: React.CSSProperties = {
   color: "var(--text)",
 };
 
-const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.04em", display: "block", marginBottom: 4 };
+export const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.04em", display: "block", marginBottom: 4 };
+
+// Display label per scoring dimension — same six, same order, the Strategist's scoring prompt and
+// submit_prospect_intelligence tool schema present them in (lib/agent-handlers/outbound-strategist.ts).
+const SCORING_DIMENSION_LABELS: Record<ScoringDimension, string> = {
+  signal: "Signal",
+  serviceFit: "Service fit",
+  firmographic: "Firmographic",
+  persona: "Persona",
+  timing: "Timing",
+  dataQuality: "Data quality",
+};
 
 function PlayForm({
   workspaceId,
@@ -106,6 +130,29 @@ function PlayForm({
   ) {
     setConfig((c) => ({ ...c, capitalRaise: { ...c.capitalRaise, [key]: value } }));
   }
+
+  // A blank field means "not overridden" (resolveScoringWeights falls back to
+  // DEFAULT_SCORING_WEIGHTS for it — see outbound-play-config.ts), so unlike routingThresholds
+  // above (which always carries a concrete number) an unset dimension is stored as `undefined`
+  // rather than defaulted in here, and the input shows the default as a placeholder instead of a
+  // value — so it's visually distinct from a dimension someone has deliberately set to 0.
+  function updateWeight(dim: ScoringDimension, raw: string) {
+    const value = raw.trim() === "" ? undefined : Number(raw);
+    setConfig((c) => ({ ...c, scoringWeights: { ...c.scoringWeights, [dim]: value } }));
+  }
+
+  // The running total shown below the fields: each dimension's typed value, or
+  // DEFAULT_SCORING_WEIGHTS's value for one left blank — the same merge resolveScoringWeights()
+  // does at run time (outbound-play-config.ts), before that function's own normalisation step. If
+  // this doesn't add up to 100, nothing is rejected — resolveScoringWeights scales every dimension
+  // proportionally so the total Claude actually scores against still comes out to exactly 100 (see
+  // its doc comment for why that matters for routingThresholds) — but showing the raw sum here,
+  // with a note when it's off, is what lets an admin catch a typo before saving rather than
+  // discovering post-hoc that their weights got silently rescaled.
+  const rawWeightTotal = SCORING_DIMENSIONS.reduce(
+    (sum, dim) => sum + (config.scoringWeights[dim] ?? DEFAULT_SCORING_WEIGHTS[dim]),
+    0,
+  );
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -368,6 +415,34 @@ function PlayForm({
         )}
       </div>
 
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+        <p style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>Scoring weights</p>
+        <p style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
+          Per-dimension point maxima the Strategist scores against. Leave a field blank to use its default (shown as a placeholder). Doesn&apos;t need to add up to 100 exactly — it&apos;s automatically scaled to a 100-point total when scoring runs, but keeping it close to 100 makes each dimension&apos;s weight easier to reason about.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          {SCORING_DIMENSIONS.map((dim) => (
+            <div key={dim}>
+              <label style={label}>
+                {SCORING_DIMENSION_LABELS[dim]} (0–{DEFAULT_SCORING_WEIGHTS[dim]} default)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={DEFAULT_SCORING_WEIGHTS[dim]}
+                style={fieldStyle}
+                value={config.scoringWeights[dim] ?? ""}
+                placeholder={String(DEFAULT_SCORING_WEIGHTS[dim])}
+                onChange={(e) => updateWeight(dim, e.target.value)}
+              />
+            </div>
+          ))}
+        </div>
+        <p style={{ fontSize: 12, marginTop: 10, color: rawWeightTotal === 100 ? "var(--text-dim)" : "var(--danger, #c0392b)" }}>
+          Running total: {rawWeightTotal} / 100{rawWeightTotal !== 100 ? " — will be scaled to 100 automatically" : ""}
+        </p>
+      </div>
+
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <div>
           <label style={label}>Route to Email+LinkedIn at</label>
@@ -410,9 +485,37 @@ function PlayForm({
         </div>
       </div>
 
-      <div>
-        <label style={label}>GoHighLevel pipeline id (optional — falls back to a pipeline named "Outbound")</label>
-        <input style={fieldStyle} value={config.ghlPipelineId ?? ""} onChange={(e) => setConfig((c) => ({ ...c, ghlPipelineId: e.target.value || undefined }))} placeholder="e.g. qWRoUZ6kNRf4Mx3RRtgs" />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={label}>CRM pipeline (app.erp.io/crm)</label>
+          <ResourceSelect
+            id="crmPipelineId"
+            optionsUrl="/api/outbound/integrations/options?provider=CRM_ERP_IO"
+            value={config.crmPipelineId ?? ""}
+            onChange={(v) => setConfig((c) => ({ ...c, crmPipelineId: v || undefined }))}
+            fieldStyle={fieldStyle}
+            emptyLabel="Outbound (the CRM creates it on the first reply)"
+          />
+          <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+            Leave unset to use the CRM&rsquo;s own Outbound pipeline. Another pipeline only advances deals if its
+            stages are named Replied / Interested / Meeting Set, or are mapped on the play.
+          </p>
+        </div>
+        <div>
+          <label style={label}>Open a CRM deal on</label>
+          <select
+            style={fieldStyle}
+            value={config.crmDealOn}
+            onChange={(e) => setConfig((c) => ({ ...c, crmDealOn: e.target.value as "interested" | "reply" }))}
+          >
+            <option value="interested">Interest or a booked meeting (recommended)</option>
+            <option value="reply">Any reply</option>
+          </select>
+          <p style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+            Every engagement writes the contact and a timeline entry either way. A bare reply is often
+            &ldquo;remove me&rdquo;, which is why it does not open a deal by default.
+          </p>
+        </div>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 20 }}>

@@ -8,6 +8,13 @@
  * hand-triggered run goes through. Nothing here talks to EDGAR or Apollo, and nothing here sends
  * anything to a prospect.
  *
+ * Not the same thing as the agent schedule runner (lib/scheduler.ts, added alongside
+ * AgentConfig.schedule): that fires ONE run per agent config on a cron expression, with no input,
+ * which for Scout means one default ICP-search run per workspace. This tick is per-PLAY and
+ * carries `sourcingMode: capital_raise`, so a workspace can have several plays with capital-raise
+ * sourcing on and each gets its own run. The two can coexist — a scheduled Scout run passes no
+ * sourcingMode and so sources by ICP search, which the dedupe below ignores.
+ *
  * Driven by an external timer POSTing with the shared cron secret, same as
  * app/api/cron/social-publish and social-auto-post. Suggested unit (once daily, on a weekday
  * morning — EDGAR posts the previous day's filings overnight and files nothing at weekends):
@@ -21,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { constantTimeEqual } from "@/lib/security/compare";
-import { enqueueAgentRun } from "@/lib/queue";
+import { createAgentRun } from "@/lib/agents/create-run";
 import { parsePlayConfig, planFormDDailyTick, type FormDTickPlay } from "@/lib/agent-handlers/outbound-play-config";
 
 export const dynamic = "force-dynamic";
@@ -107,24 +114,21 @@ export async function POST(req: NextRequest) {
 
     for (const due of plan.due) {
       try {
-        const run = await prisma.agentRun.create({
-          data: {
-            workspaceId,
-            agentConfigId: scoutConfig.id,
-            input: {
-              playSlug: due.playSlug,
-              // The internal key, not the Run modal's label — parseSourcingMode accepts either,
-              // and this is also what the dedupe above matches on.
-              sourcingMode: "capital_raise",
-              maxProspects: due.maxProspects,
-            },
-            status: "PENDING",
-            triggeredBy: "cron:outbound-form-d",
+        // The shared creator (lib/agents/create-run.ts) that "Run now" and the schedule runner
+        // both use — same queue, same job options, same "an enqueue failure leaves the run
+        // PENDING rather than failing the caller" behaviour.
+        const run = await createAgentRun({
+          workspaceId,
+          agentConfigId: scoutConfig.id,
+          input: {
+            playSlug: due.playSlug,
+            // The internal key, not the Run modal's label — parseSourcingMode accepts either,
+            // and this is also what the dedupe above matches on.
+            sourcingMode: "capital_raise",
+            maxProspects: due.maxProspects,
           },
+          triggeredBy: "cron:outbound-form-d",
         });
-        await enqueueAgentRun(run.id).catch((err) =>
-          console.error(`[cron/outbound-form-d] failed to enqueue run ${run.id} for play ${due.playSlug}:`, err),
-        );
         enqueued.push({ workspaceId, playSlug: due.playSlug, runId: run.id });
       } catch (err) {
         // One play's failure must not cost every other workspace its daily tick.

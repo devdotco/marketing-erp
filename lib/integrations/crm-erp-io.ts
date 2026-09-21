@@ -100,3 +100,69 @@ export async function crmActivateSequence(target: CrmTarget, sequenceId: string,
     body: JSON.stringify({ segmentId }),
   });
 }
+
+// ─── Outbound Engine ──────────────────────────────────────────────────────────────────────────
+
+export type CrmStage = { id: string; key: string; name: string; position: number; outcome: string | null };
+export type CrmPipeline = { id: string; key: string; name: string; isDefault: boolean; stages: CrmStage[] };
+export type CrmPipelinesResponse = {
+  pipelines: CrmPipeline[];
+  /** The "Outbound" pipeline the CRM creates on the first engagement, and whether it exists yet. */
+  outbound: { key: string; exists: boolean; stages: { key: string; name: string }[] };
+};
+
+/** GET /api/marketing-erp/pipelines — read-only; safe while staging and in the play editor. */
+export async function crmListPipelines(target: CrmTarget): Promise<Response> {
+  return crmFetch(target, "/api/marketing-erp/pipelines", { method: "GET" });
+}
+
+export type CrmOutboundEvent = "email_reply" | "linkedin_reply" | "interested" | "meeting_booked";
+
+/** The body crm-erp-io's src/lib/crm/marketing-outbound-rules.ts validates. */
+export interface CrmOutboundEngagement {
+  prospectId: string;
+  event: CrmOutboundEvent;
+  eventKey: string;
+  occurredAt?: string;
+  contact: {
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    title?: string;
+    company?: string;
+    companyDomain?: string;
+    linkedinUrl?: string;
+    tags?: string[];
+  };
+  play: { slug: string; name: string };
+  score?: number;
+  channel?: string;
+  intelligence?: { painHypothesis?: string; primarySignal?: string; bestOffer?: string };
+  note?: string;
+  replyText?: string;
+  replyDraft?: string;
+  deal?: { create: boolean; name?: string; pipelineId?: string; stageKeys?: Partial<Record<CrmOutboundEvent, string>> };
+}
+
+export interface CrmOutboundEngagementResult {
+  personId: string;
+  personCreated: boolean;
+  companyId: string | null;
+  dealId: string | null;
+  dealCreated: boolean;
+  pipeline: { id: string; name: string } | null;
+  stage: { key: string; name: string } | null;
+  stageMoved: boolean;
+  activityId: string | null;
+  taskId: string | null;
+  duplicate: boolean;
+  warnings: string[];
+}
+
+/** POST /api/marketing-erp/outbound/engagements — writes the contact, company, deal, timeline row
+ * and follow-up task. The one CRM-mutating call Outbound Revenue makes, and only from its approval
+ * hook. Idempotent on the CRM side: the deal is keyed on `prospectId`, the timeline row and task on
+ * (prospectId, event, eventKey), so a retried approval answers `duplicate: true`. */
+export async function crmRecordOutboundEngagement(target: CrmTarget, body: CrmOutboundEngagement): Promise<Response> {
+  return crmFetch(target, "/api/marketing-erp/outbound/engagements", { method: "POST", body: JSON.stringify(body) });
+}

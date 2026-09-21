@@ -5,6 +5,7 @@ import { getHandler } from "@/lib/agent-handlers/index";
 import { runOutboundChaining } from "@/lib/agent-handlers/chaining";
 import { describeRunError } from "@/lib/ai/errors";
 import { checkModelsAvailable } from "@/lib/ai/models";
+import { startScheduler } from "@/lib/scheduler";
 
 const worker = new Worker(
   "agent-runs",
@@ -146,5 +147,11 @@ void checkModelsAvailable(true)
   });
 
 console.log("[worker] Agent worker started");
+
+// Same process as the BullMQ consumer above — see lib/scheduler.ts for why:
+// start.sh runs exactly one worker process per container, so this is the one
+// place a minute-aligned poll needs to live for every AgentConfig with a
+// schedule to actually fire, across every environment this app deploys to.
+startScheduler();
 
 export default worker;

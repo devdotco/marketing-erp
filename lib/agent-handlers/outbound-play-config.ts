@@ -140,6 +140,25 @@ const ScoringWeightsSchema = z
   .default({});
 export type OutboundScoringWeights = z.infer<typeof ScoringWeightsSchema>;
 
+/** Every dimension the Strategist scores a prospect on, in the fixed order the scoring prompt and
+ * tool schema present them. Shared so resolveScoringWeights/computeWeightedTotal and
+ * outbound-strategist.ts's ScoredProspect type always agree on the same six keys. */
+export const SCORING_DIMENSIONS = ["signal", "serviceFit", "firmographic", "persona", "timing", "dataQuality"] as const;
+export type ScoringDimension = (typeof SCORING_DIMENSIONS)[number];
+
+/** The maxima every play used to get hardcoded into the scoring prompt (and, before this, the only
+ * maxima that existed at all — scoringWeights was stored on OutboundPlayConfig but never read by
+ * anything). These stay the fallback for any dimension a play hasn't overridden, and the starting
+ * point resolveScoringWeights normalises from. */
+export const DEFAULT_SCORING_WEIGHTS: Record<ScoringDimension, number> = {
+  signal: 25,
+  serviceFit: 20,
+  firmographic: 25,
+  persona: 15,
+  timing: 10,
+  dataQuality: 5,
+};
+
 const RoutingThresholdsSchema = z
   .object({
     emailAndLinkedin: z.number().min(0).max(100).default(80),
@@ -170,11 +189,26 @@ export const OutboundPlayConfigSchema = z.object({
   instantlyCampaignName: z.string().optional(),
   aimfoxCampaignId: z.string().optional(),
   aimfoxCampaignName: z.string().optional(),
-  /** A GoHighLevel pipeline id from Settings → Business Profile → Pipelines in the sub-account.
-   * Optional — outbound-revenue.ts falls back to its existing by-name ("Outbound") resolution when
-   * unset. */
-  ghlPipelineId: z.string().optional(),
-  ghlPipelineName: z.string().optional(),
+  /** An erp.io CRM pipeline id (app.erp.io/crm), chosen from the play editor's dropdown
+   * (GET /api/outbound/integrations/options?provider=CRM_ERP_IO). Unset → the CRM's own "Outbound"
+   * pipeline, which it creates on the first engagement. Replaced `ghlPipelineId` when GoHighLevel
+   * was retired; an old play's `ghlPipelineId` is simply ignored. */
+  crmPipelineId: z.string().optional(),
+  crmPipelineName: z.string().optional(),
+  /** For a pipeline that isn't the CRM's Outbound template: which stage key each engagement means.
+   * An event with no mapping (and no stage the CRM recognises by name) leaves the deal where it is,
+   * with a warning on the run — never a silent drop into the first stage. */
+  crmStageKeys: z
+    .object({
+      email_reply: z.string().optional(),
+      linkedin_reply: z.string().optional(),
+      interested: z.string().optional(),
+      meeting_booked: z.string().optional(),
+    })
+    .optional(),
+  /** When Outbound Revenue opens a CRM deal. `interested` (default) keeps a bare reply — which may
+   * well be "please remove me" — to a contact and a timeline row; `reply` opens one on any reply. */
+  crmDealOn: z.enum(["interested", "reply"]).default("interested"),
   /** Whether a completed/approved Scout or Strategist run for this play automatically enqueues the
    * next stage. Default on — see lib/agent-handlers/chaining.ts. */
   autoAdvance: z.boolean().default(true),
@@ -268,6 +302,94 @@ export function routeByScore(total: number, thresholds: OutboundRoutingThreshold
   if (total >= thresholds.emailOnly) return "EMAIL_ONLY";
   if (total >= thresholds.watchlist) return "WATCHLIST";
   return "DISCARDED";
+}
+
+// ---------------------------------------------------------------------------
+// Scoring weights — a play's per-dimension point maxima. Stored on OutboundPlayConfig since the
+// schema's introduction but never actually read by outbound-strategist.ts: the scoring prompt and
+// SUBMIT_PROSPECT_INTELLIGENCE_TOOL's schema both hardcoded the six dimension maxima
+// (25/20/25/15/10/5) directly, so a play editor could set scoringWeights and it would silently do
+// nothing. resolveScoringWeights is what makes a play's weights real; computeWeightedTotal is what
+// makes the resulting total trustworthy enough to route on.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves a play's (partial, and possibly not summing to 100) scoringWeights into the six integer
+ * per-dimension maxima the scoring prompt and tool schema actually present to Claude — always
+ * summing to exactly 100.
+ *
+ * Two things make normalisation necessary rather than optional:
+ *  - `routingThresholds` (the 80/65/50 defaults, or a play's own cutoffs) are cutoffs against a
+ *    0-100 scale. If one play's total tops out at 100 and another's tops out at 85 (because an
+ *    admin's weights only added up to 85), the same threshold number would mean a different bar at
+ *    each play — routing would silently get easier or harder purely from an arithmetic mistake in
+ *    the play editor, not from an intentional change to the play's bar.
+ *  - The Outbound CRO agent and any future cross-play comparison reads `scoring.total` as a
+ *    percentage-like figure comparable across plays. That comparison is only meaningful if every
+ *    play's total is actually out of the same 100.
+ *
+ * A dimension left unset in the play's config falls back to DEFAULT_SCORING_WEIGHTS before
+ * normalising — so setting just one dimension (e.g. raising `timing`) reweights relative to the
+ * other five defaults, rather than requiring every field to be filled in. Any dimension set to a
+ * negative or non-finite number is treated as unset (same fallback) rather than propagating a bad
+ * value into the prompt.
+ *
+ * Uses largest-remainder rounding (scale each weight to its exact 0-100 share, floor it, then hand
+ * the few leftover points to whichever dimensions lost the most to flooring) rather than rounding
+ * each dimension independently — independent rounding can land the six maxima on 99 or 101 instead
+ * of exactly 100 depending on the inputs; largest-remainder always lands on exactly 100 (or exactly
+ * matches DEFAULT_SCORING_WEIGHTS's own 100 when every dimension is left at its default).
+ */
+export function resolveScoringWeights(weights: OutboundScoringWeights | undefined | null): Record<ScoringDimension, number> {
+  const merged: Record<ScoringDimension, number> = { ...DEFAULT_SCORING_WEIGHTS };
+  for (const dim of SCORING_DIMENSIONS) {
+    const v = weights?.[dim];
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) merged[dim] = v;
+  }
+
+  const sum = SCORING_DIMENSIONS.reduce((s, d) => s + merged[d], 0);
+  if (sum <= 0) {
+    // Every weight resolved to 0 (e.g. a play explicitly zeroed out all six) — fall back to the
+    // default split rather than dividing by zero or asking Claude to score six 0-point dimensions.
+    return { ...DEFAULT_SCORING_WEIGHTS };
+  }
+
+  const scaled = SCORING_DIMENSIONS.map((dim) => {
+    const exact = (merged[dim] / sum) * 100;
+    const floor = Math.floor(exact);
+    return { dim, floor, remainder: exact - floor };
+  });
+
+  const result = Object.fromEntries(scaled.map(({ dim, floor }) => [dim, floor])) as Record<ScoringDimension, number>;
+  let remaining = 100 - scaled.reduce((s, x) => s + x.floor, 0);
+  const byRemainderDesc = [...scaled].sort((a, b) => b.remainder - a.remainder);
+  for (let i = 0; remaining > 0 && i < byRemainderDesc.length; i++, remaining--) {
+    result[byRemainderDesc[i].dim] += 1;
+  }
+  return result;
+}
+
+/**
+ * Recomputes the 0-100 composite total from a scored prospect's six raw dimension scores, clamping
+ * each one to its resolved weight (`resolveScoringWeights`'s output) first — Claude is told each
+ * dimension's maximum in the prompt and the tool schema's description, but nothing in a JSON
+ * schema enforces an integer property's upper bound (this codebase's tool schemas rely on
+ * description text for bounds throughout, not the `maximum` keyword — see lib/content/article.ts's
+ * strictSchema), so a dimension score above its max is possible and must not inflate the total used
+ * for routing. `scores[dim]` missing or non-numeric is treated as 0 rather than thrown on, since a
+ * malformed tool call should degrade the prospect's score, not crash the run.
+ */
+export function computeWeightedTotal(
+  scores: Partial<Record<ScoringDimension, number>>,
+  weights: Record<ScoringDimension, number>,
+): number {
+  let total = 0;
+  for (const dim of SCORING_DIMENSIONS) {
+    const raw = Number(scores[dim]);
+    const clamped = Number.isFinite(raw) ? Math.min(Math.max(Math.round(raw), 0), weights[dim]) : 0;
+    total += clamped;
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------

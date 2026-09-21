@@ -67,6 +67,10 @@ import {
   planCampaignResolution,
   selectPeopleToReveal,
   dedupeNewProspects,
+  resolveScoringWeights,
+  computeWeightedTotal,
+  DEFAULT_SCORING_WEIGHTS,
+  type ScoringDimension,
 } from "@/lib/agent-handlers/outbound-play-config";
 import { planScoutChaining, planStrategistChaining } from "@/lib/agent-handlers/outbound-chain-plan";
 import {
@@ -97,8 +101,9 @@ import {
   type OutboundLinkedinDelivery,
 } from "@/lib/agent-handlers/outbound-linkedin-delivery";
 import {
-  buildGhlContactBody,
-  buildGhlOpportunityBody,
+  buildCrmEngagement,
+  crmRefusalHint,
+  wantsDeal,
   activateOutboundRevenueDelivery,
   type OutboundRevenueDelivery,
 } from "@/lib/agent-handlers/outbound-revenue-delivery";
@@ -159,6 +164,15 @@ import {
   type ProspectUpdate,
   type WebhookDeps,
 } from "@/lib/webhooks/outbound-events";
+import { planChannelPause, PAUSE_TRIGGER_EVENTS, type PauseCandidate } from "@/lib/webhooks/outbound-pause";
+import {
+  buildPlaySlices,
+  buildSliceRows,
+  personaBucket,
+  scoreBand,
+  MIN_SLICE_SAMPLE_SIZE,
+  type SliceInputProspect,
+} from "@/lib/agent-handlers/outbound-cro";
 import {
   buildGoogleTtsRequest,
   chunkDialogue,
@@ -847,16 +861,23 @@ check(
     firstEmailActivation,
   );
 
-  // No Instantly integration connected → simulate, still no network call.
+  // No Instantly integration connected → refuse (2026-09-17: this used to fabricate an
+  // `instantly_...` lead id and report the send as successful — see outbound-email-delivery.ts's
+  // doc comment for why that's worse than no send for a real campaign). Still no network call.
   let simEmailCalls = 0;
-  const simulatedEmail = await activateOutboundEmailDelivery(
-    { ...emailDelivery, connected: false },
-    { addLead: async () => { simEmailCalls++; return { id: "x" }; } },
-  );
+  let simEmailErr: unknown = null;
+  try {
+    await activateOutboundEmailDelivery(
+      { ...emailDelivery, connected: false },
+      { addLead: async () => { simEmailCalls++; return { id: "x" }; } },
+    );
+  } catch (e) {
+    simEmailErr = e;
+  }
   check(
-    "activateOutboundEmailDelivery simulates (no network call) when Instantly isn't connected",
-    simEmailCalls === 0 && simulatedEmail.source === "simulation" && simulatedEmail.status === "activated",
-    simulatedEmail,
+    "activateOutboundEmailDelivery refuses (no network call, no fabricated id) when Instantly isn't connected",
+    simEmailCalls === 0 && simEmailErr instanceof AgentInputError && simEmailErr.code === "instantly_not_connected",
+    simEmailErr,
   );
 
   // --- Outbound LinkedIn / Aimfox --------------------------------------------------------
@@ -902,103 +923,136 @@ check(
     liFirstActivation,
   );
 
+  // No Aimfox integration connected → refuse, same reasoning as the Instantly case above. Still no
+  // network call.
   let simLiCalls = 0;
-  const simulatedLi = await activateOutboundLinkedinDelivery(
-    { ...liDelivery, connected: false },
-    { addProfile: async () => { simLiCalls++; return {}; } },
-  );
+  let simLiErr: unknown = null;
+  try {
+    await activateOutboundLinkedinDelivery(
+      { ...liDelivery, connected: false },
+      { addProfile: async () => { simLiCalls++; return {}; } },
+    );
+  } catch (e) {
+    simLiErr = e;
+  }
   check(
-    "activateOutboundLinkedinDelivery simulates (no network call) when Aimfox isn't connected",
-    simLiCalls === 0 && simulatedLi.source === "simulation" && simulatedLi.status === "activated",
-    simulatedLi,
+    "activateOutboundLinkedinDelivery refuses (no network call, no fabricated id) when Aimfox isn't connected",
+    simLiCalls === 0 && simLiErr instanceof AgentInputError && simLiErr.code === "aimfox_not_connected",
+    simLiErr,
   );
 
-  // --- Outbound Revenue / GoHighLevel -----------------------------------------------------
+  // --- Outbound Revenue / erp.io CRM ------------------------------------------------------
 
-  const revDelivery: OutboundRevenueDelivery = {
-    status: "staged",
-    prospectId: "prospect_3",
+  const engagementProspect = {
+    id: "prospect_3",
+    firstName: "Sam",
+    lastName: "Lee",
+    email: "sam@beta.com",
+    title: "VP Engineering",
+    company: "Beta Co",
+    companyDomain: "beta.com",
+    linkedInUrl: "https://linkedin.com/in/samlee",
+    score: 84,
+    channel: "EMAIL_AND_LINKEDIN",
+    play: { slug: "saas", name: "SaaS founders" },
+    intelligence: { painHypothesis: "Shipping slowly", primarySignal: "Hiring 3 engineers" },
+  };
+
+  const engagement = buildCrmEngagement({
+    prospect: engagementProspect,
     event: "meeting_booked",
-    connected: true,
-    locationId: "loc_1",
-    contact: { firstName: "Sam", lastName: "Lee", email: "sam@beta.com", companyName: "Beta Co", tags: ["outbound"] },
-    wantsOpportunity: true,
-    opportunity: { name: "Dev.co — Beta Co", source: "Outbound — meeting_booked" },
-    pipelineId: "pipe_1",
-    pipelineStageId: "stage_1",
-    ghlOpportunityId: null,
-  };
-  const contactBody = buildGhlContactBody(revDelivery);
-  check("GHL contact body carries the locationId and email", contactBody.locationId === "loc_1" && contactBody.email === "sam@beta.com", contactBody);
-  const oppBody = buildGhlOpportunityBody(revDelivery, "contact_1");
-  check("GHL opportunity body targets the resolved pipeline/stage", oppBody.pipelineId === "pipe_1" && oppBody.pipelineStageId === "stage_1", oppBody);
-  check("GHL opportunity body carries the resolved contact id", oppBody.contactId === "contact_1", oppBody);
-
-  // Contact upsert always runs (idempotent on GHL's side); opportunity creation is skipped, and
-  // the existing id reused, when one already exists for this prospect — this is the guard
-  // against GHL's non-idempotent create-opportunity call firing twice on a re-approval or a
-  // second webhook for the same prospect.
-  let contactCallsExisting = 0;
-  let oppCallsExisting = 0;
-  const withExistingOpp = await activateOutboundRevenueDelivery(revDelivery, "existing_opp_1", {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => { contactCallsExisting++; return "contact_new"; },
-    createOpportunity: async () => { oppCallsExisting++; return "should-not-happen"; },
+    runId: "run_9",
+    occurredAt: new Date("2026-09-17T10:00:00.000Z"),
+    replyText: "Happy to chat Thursday.",
+    writing: { note: "Booked a meeting for Thursday.", dealName: "Beta Co — dev pod", tags: ["Outbound", "hiring"], replyDraft: "Thursday works." },
+    play: { crmDealOn: "interested", crmPipelineId: "pipe_1" },
   });
-  check("activateOutboundRevenueDelivery still upserts the contact (idempotent on GHL's side)", contactCallsExisting === 1, contactCallsExisting);
   check(
-    "activateOutboundRevenueDelivery does NOT create a second opportunity when one already exists",
-    oppCallsExisting === 0,
-    oppCallsExisting,
+    "CRM engagement carries the prospect, the play and the run as its idempotency key",
+    engagement.prospectId === "prospect_3" && engagement.eventKey === "run_9" && engagement.play.slug === "saas",
+    engagement,
   );
-  check("activateOutboundRevenueDelivery reuses the existing opportunity id instead", withExistingOpp.ghlOpportunityId === "existing_opp_1", withExistingOpp);
-
-  let oppCallsNew = 0;
-  const withNoExistingOpp = await activateOutboundRevenueDelivery(revDelivery, null, {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => "contact_new",
-    createOpportunity: async () => { oppCallsNew++; return "opp_new"; },
-  });
   check(
-    "activateOutboundRevenueDelivery creates an opportunity when none exists yet",
-    oppCallsNew === 1 && withNoExistingOpp.ghlOpportunityId === "opp_new",
-    withNoExistingOpp,
+    "CRM engagement passes the contact through with tags normalised",
+    engagement.contact.email === "sam@beta.com" && engagement.contact.companyDomain === "beta.com" && engagement.contact.tags?.[0] === "outbound",
+    engagement.contact,
   );
+  check("CRM engagement asks for a deal in the play's pipeline", engagement.deal?.create === true && engagement.deal?.pipelineId === "pipe_1", engagement.deal);
 
-  // Already-activated deliveries short-circuit entirely — no contact or opportunity call, even
-  // if an (incorrect) existingOpportunityId is passed in.
-  let contactCallsActivated = 0;
-  let oppCallsActivated = 0;
-  const activatedRev: OutboundRevenueDelivery = {
-    ...revDelivery,
-    status: "activated",
-    activatedAt: "2026-09-14T00:00:00.000Z",
-    ghlContactId: "contact_x",
-    ghlOpportunityId: "opp_x",
-  };
-  const revReturned = await activateOutboundRevenueDelivery(activatedRev, "opp_x", {
-    apiKey: "fake",
-    locationId: "loc_1",
-    upsertContact: async () => { contactCallsActivated++; return "x"; },
-    createOpportunity: async () => { oppCallsActivated++; return "x"; },
+  // A bare reply is often "take me off your list". Under the default setting it still writes the
+  // contact and the timeline entry, but it does not open a deal.
+  check("wantsDeal: interest and meetings always open a deal", wantsDeal("interested", "interested") && wantsDeal("meeting_booked", "interested"));
+  check("wantsDeal: a bare reply does not, by default", !wantsDeal("email_reply", "interested") && !wantsDeal("linkedin_reply", "interested"));
+  check("wantsDeal: unless the play says any reply should", wantsDeal("email_reply", "reply"));
+  const replyEngagement = buildCrmEngagement({
+    prospect: engagementProspect,
+    event: "email_reply",
+    runId: "run_10",
+    occurredAt: new Date("2026-09-17T10:00:00.000Z"),
+    writing: {},
+    play: { crmDealOn: "interested" },
+  });
+  check("CRM engagement for a bare reply opens no deal", replyEngagement.deal?.create === false, replyEngagement.deal);
+
+  // Approval is the only thing that writes to the CRM, and it is safe to repeat: an
+  // already-activated delivery never calls again, and the CRM answers a repeat with duplicate:true.
+  const stagedRev: OutboundRevenueDelivery = { status: "staged", prospectId: "prospect_3", event: "meeting_booked", engagement };
+  const target = { baseUrl: "https://app.erp.io/crm", auth: { kind: "service" as const, shellOrgId: "org_1" } };
+  let crmCalls = 0;
+  const activatedRev = await activateOutboundRevenueDelivery(stagedRev, {
+    target,
+    via: "service",
+    record: async () => {
+      crmCalls++;
+      return new Response(
+        JSON.stringify({
+          personId: "person_1",
+          dealId: "deal_1",
+          taskId: "task_1",
+          pipeline: { id: "pipe_1", name: "Outbound" },
+          stage: { key: "meeting_set", name: "Meeting Set" },
+          duplicate: false,
+          warnings: [],
+        }),
+        { status: 201 },
+      );
+    },
   });
   check(
-    "activateOutboundRevenueDelivery skips an already-activated delivery entirely — no contact or opportunity call",
-    contactCallsActivated === 0 && oppCallsActivated === 0 && revReturned === activatedRev,
-    revReturned,
+    "activateOutboundRevenueDelivery records the CRM's own ids",
+    crmCalls === 1 && activatedRev.crmPersonId === "person_1" && activatedRev.crmDealId === "deal_1" && activatedRev.stageName === "Meeting Set",
+    activatedRev,
   );
 
-  // No GoHighLevel integration connected → simulate, no network calls.
-  let simGhlCalls = 0;
-  const simulatedRev = await activateOutboundRevenueDelivery({ ...revDelivery, connected: false }, null, {
-    upsertContact: async () => { simGhlCalls++; return "x"; },
+  let crmCallsAgain = 0;
+  const reActivated = await activateOutboundRevenueDelivery(activatedRev, {
+    target,
+    via: "service",
+    record: async () => { crmCallsAgain++; return new Response("{}", { status: 201 }); },
   });
   check(
-    "activateOutboundRevenueDelivery simulates (no network call) when GoHighLevel isn't connected",
-    simGhlCalls === 0 && simulatedRev.source === "simulation" && simulatedRev.status === "activated",
-    simulatedRev,
+    "activateOutboundRevenueDelivery skips an already-activated delivery entirely — no CRM call",
+    crmCallsAgain === 0 && reActivated === activatedRev,
+    reActivated,
+  );
+
+  // A refusal is legible and never a fabricated success — the GoHighLevel version simulated a
+  // contact id when the integration was missing, and the run looked like it had worked.
+  let refusalMessage = "";
+  try {
+    await activateOutboundRevenueDelivery(stagedRev, {
+      target,
+      via: "service",
+      record: async () => new Response(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }), { status: 401 }),
+    });
+  } catch (err) {
+    refusalMessage = err instanceof Error ? err.message : String(err);
+  }
+  check("activateOutboundRevenueDelivery throws a legible error when the CRM refuses", refusalMessage.includes("401"), refusalMessage);
+  check(
+    "crmRefusalHint names the signing key for a signed 401, and the pipeline for a missing one",
+    crmRefusalHint(401, "unauthorized", "service").includes("MARKETING_SERVICE_PUBLIC_KEY") &&
+      crmRefusalHint(404, "pipeline_not_found", "service").includes("Outbound Engine → Plays"),
   );
 
   // --- No escape hatch: sending is never optional for these, unlike e.g. Outbound Scout ---
@@ -1342,6 +1396,78 @@ check(
 }
 
 // ---------------------------------------------------------------------------
+// Scoring weights (lib/agent-handlers/outbound-play-config.ts) — resolveScoringWeights turns a
+// play's (partial, possibly-unbalanced) scoringWeights into the six integer maxima the Strategist's
+// prompt and tool schema use, always summing to exactly 100; computeWeightedTotal recomputes a
+// scored prospect's total from its raw dimension scores, clamped to those maxima. Both are
+// deliberately pure/no-network so the normalisation math — the part most likely to have an
+// off-by-one — is checked here rather than only by eyeballing a live run.
+// ---------------------------------------------------------------------------
+{
+  const defaultsOnly = resolveScoringWeights({});
+  check(
+    "resolveScoringWeights: no overrides returns DEFAULT_SCORING_WEIGHTS untouched (already sums to 100)",
+    defaultsOnly.signal === 25 && defaultsOnly.serviceFit === 20 && defaultsOnly.firmographic === 25 &&
+      defaultsOnly.persona === 15 && defaultsOnly.timing === 10 && defaultsOnly.dataQuality === 5,
+    defaultsOnly,
+  );
+  check(
+    "resolveScoringWeights: undefined/null input behaves the same as {}",
+    JSON.stringify(resolveScoringWeights(undefined)) === JSON.stringify(defaultsOnly) &&
+      JSON.stringify(resolveScoringWeights(null)) === JSON.stringify(defaultsOnly),
+  );
+
+  const sumTo100 = (w: Record<ScoringDimension, number>) => Object.values(w).reduce((a: number, b: number) => a + b, 0);
+  check("resolveScoringWeights: always sums to exactly 100 for the defaults", sumTo100(defaultsOnly) === 100, defaultsOnly);
+
+  // A play that only raised `timing` (25 instead of the default 10) — every dimension's weight
+  // (not just the one that changed) shifts a little once normalised, since the other five now make
+  // up a smaller share of a bigger pre-normalisation sum (115 instead of 100).
+  const timingHeavy = resolveScoringWeights({ timing: 25 });
+  check("resolveScoringWeights: one raised dimension still sums to exactly 100", sumTo100(timingHeavy) === 100, timingHeavy);
+  check("resolveScoringWeights: the raised dimension's normalised share grows relative to its old default", timingHeavy.timing > defaultsOnly.timing, timingHeavy);
+
+  // Weights that don't sum to 100 at all — the case the running total in PlaysManager.tsx warns
+  // about. Still always normalises to exactly 100, never silently left at the raw sum.
+  const lopsided = resolveScoringWeights({ signal: 10, serviceFit: 10, firmographic: 10, persona: 10, timing: 10, dataQuality: 5 }); // raw sum 55
+  check("resolveScoringWeights: a raw sum far from 100 still normalises to exactly 100", sumTo100(lopsided) === 100, lopsided);
+
+  // Every weight zeroed — normalising would divide by zero, so this falls back to the defaults
+  // rather than asking Claude to score six 0-point dimensions.
+  const allZero = resolveScoringWeights({ signal: 0, serviceFit: 0, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 });
+  check("resolveScoringWeights: all-zero weights fall back to the defaults instead of dividing by zero", JSON.stringify(allZero) === JSON.stringify(defaultsOnly), allZero);
+
+  // A negative or non-finite override is treated as unset (falls back to that dimension's default)
+  // rather than propagating a bad value into the prompt/tool schema.
+  const badValue = resolveScoringWeights({ signal: -5, serviceFit: NaN });
+  check("resolveScoringWeights: a negative override falls back to the default for that dimension", badValue.signal === 25, badValue);
+  check("resolveScoringWeights: a NaN override falls back to the default for that dimension", badValue.serviceFit === 20, badValue);
+
+  // computeWeightedTotal: sums six raw dimension scores, clamped to the resolved weights.
+  const weights = { signal: 25, serviceFit: 20, firmographic: 25, persona: 15, timing: 10, dataQuality: 5 };
+  check(
+    "computeWeightedTotal: sums exact-fit dimension scores",
+    computeWeightedTotal({ signal: 20, serviceFit: 15, firmographic: 20, persona: 10, timing: 8, dataQuality: 4 }, weights) === 77,
+  );
+  check(
+    "computeWeightedTotal: a dimension score above its weight is clamped down, not left to inflate the total",
+    computeWeightedTotal({ signal: 999, serviceFit: 0, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 }, weights) === 25,
+  );
+  check(
+    "computeWeightedTotal: a negative dimension score is clamped to 0, not subtracted",
+    computeWeightedTotal({ signal: -10, serviceFit: 20, firmographic: 0, persona: 0, timing: 0, dataQuality: 0 }, weights) === 20,
+  );
+  check(
+    "computeWeightedTotal: a missing/non-numeric dimension score counts as 0 rather than throwing",
+    computeWeightedTotal({ signal: 20 }, weights) === 20,
+  );
+  check(
+    "computeWeightedTotal: every dimension maxed out sums to exactly 100 for the default weights",
+    computeWeightedTotal(DEFAULT_SCORING_WEIGHTS, DEFAULT_SCORING_WEIGHTS) === 100,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Campaign resolution from a play's config — replaces outbound-email.ts's old CAMPAIGN_MAP and
 // outbound-linkedin.ts's old AIMFOX_CAMPAIGN_MAP (both keyed by play slug). No slug-derived name
 // convention anywhere in this decision.
@@ -1419,7 +1545,7 @@ check(
   check("planScoutChaining: enqueues Strategist with exactly the new prospect ids", scoutPlan?.agentSlug === "outbound-strategist" && JSON.stringify(scoutPlan.input.prospectIds) === JSON.stringify(["p1", "p2", "p3"]), scoutPlan);
   check("planScoutChaining: is deterministic — calling it again with the same output plans the same thing", JSON.stringify(planScoutChaining(scoutOutput, autoAdvanceOn)) === JSON.stringify(scoutPlan));
   check("planScoutChaining: autoAdvance off plans nothing", planScoutChaining(scoutOutput, autoAdvanceOff) === null);
-  check("planScoutChaining: no prospectIds plans nothing (e.g. a simulation run)", planScoutChaining({ playSlug: "acme-icp", prospectIds: [] }, autoAdvanceOn) === null);
+  check("planScoutChaining: no prospectIds plans nothing (e.g. a run that matched but revealed no emails)", planScoutChaining({ playSlug: "acme-icp", prospectIds: [] }, autoAdvanceOn) === null);
   check("planScoutChaining: no playSlug plans nothing", planScoutChaining({ prospectIds: ["p1"] }, autoAdvanceOn) === null);
 
   const strategistOutput = {
@@ -2637,10 +2763,11 @@ check(
 
   // ── The whole flow, against an in-memory store ──
   type Row = ProspectCandidate & { emailRepliedAt: Date | null; linkedInRepliedAt: Date | null; interestedAt: Date | null; meetingBookedAt: Date | null; excludeUntil: Date | null };
-  function memoryDeps(rows: Row[], opts: { revenueEnabled?: boolean; failFirstUpdate?: boolean } = {}) {
+  function memoryDeps(rows: Row[], opts: { revenueEnabled?: boolean; failFirstUpdate?: boolean; failChannelPause?: boolean } = {}) {
     const receipts = new Set<string>();
     const runs: Record<string, unknown>[] = [];
     const enqueued: string[] = [];
+    const pauseCalls: Array<{ prospectId: string; event: string }> = [];
     let calls = 0;
     let failNext = opts.failFirstUpdate ?? false;
     const deps: WebhookDeps<Row> = {
@@ -2674,6 +2801,10 @@ check(
         if (update.onlyIfNull && row[update.onlyIfNull] !== null) return;
         Object.assign(row, update.data);
       },
+      async applyChannelPause(prospect, event) {
+        pauseCalls.push({ prospectId: prospect.id, event });
+        if (opts.failChannelPause) throw new Error("pause boom");
+      },
       async revenueAgentId() {
         return opts.revenueEnabled === false ? null : "cfg_revenue";
       },
@@ -2687,7 +2818,7 @@ check(
       now: () => now,
       log: () => undefined,
     };
-    return { deps, runs, enqueued, receipts, calls: () => calls };
+    return { deps, runs, enqueued, receipts, pauseCalls, calls: () => calls };
   }
   const row = (over: Partial<Row>): Row => ({ ...cand({}), emailRepliedAt: null, linkedInRepliedAt: null, interestedAt: null, meetingBookedAt: null, excludeUntil: null, ...over });
 
@@ -2696,6 +2827,7 @@ check(
     const m = memoryDeps(rows);
     const first = await processWebhook(r, "ws1", m.deps);
     check("flow: a documented Instantly reply matches the prospect and starts one Outbound Revenue run", first.status === 200 && first.outcome === "run_created" && m.runs.length === 1 && m.enqueued.length === 1, { first, runs: m.runs });
+    check("flow: applyChannelPause is called for every located event, even one that plans no pause step (email_reply)", m.pauseCalls.length === 1 && m.pauseCalls[0]?.prospectId === "p_jane" && m.pauseCalls[0]?.event === "email_reply", m.pauseCalls);
     check("flow: the run carries the prospect, our event name, the reply and the vendor event", m.runs[0]?.prospectId === "p_jane" && m.runs[0]?.event === "email_reply" && String(m.runs[0]?.replyText).startsWith("Sounds") && m.runs[0]?.sourceEvent === "reply_received", m.runs[0]);
     check("flow: the reply is recorded on the prospect", rows[0]!.status === "REPLIED" && rows[0]!.emailRepliedAt?.getTime() === now.getTime(), rows[0]);
     check("flow: a prospect with the same address in ANOTHER workspace is untouched", rows[1]!.status === "IN_SEQUENCE" && rows[1]!.emailRepliedAt === null, rows[1]);
@@ -2767,6 +2899,105 @@ check(
     const res = await processWebhook(bounced, "ws1", m.deps);
     check("flow: a bounce suppresses the prospect and starts no run", res.outcome === "updated" && rows[0]!.status === "SUPPRESSED" && m.runs.length === 0, { res, row: rows[0] });
   }
+
+  {
+    // A pause-orchestration failure (network error, bad credentials, whatever) must never turn an
+    // otherwise-successful webhook into a 500 — that would make the vendor retry a delivery that
+    // already updated the database and (if applicable) already started a Revenue run, risking a
+    // second one. See outbound-events.ts's processWebhook, which wraps deps.applyChannelPause in
+    // its own try/catch on top of runChannelPause's own never-throws contract.
+    const rows = [row({ id: "p_jane", email: "jane.doe@acme.com" })];
+    const m = memoryDeps(rows, { failChannelPause: true });
+    const res = await processWebhook(r, "ws1", m.deps);
+    check("flow: a channel-pause failure still returns 200/run_created, not 500", res.status === 200 && res.outcome === "run_created" && m.pauseCalls.length === 1, res);
+  }
+}
+
+// Outbound Engine: cross-channel "stop on positive signal" (lib/webhooks/outbound-pause.ts) and
+// the CRO's real signal/persona/channel/score-band slicing (lib/agent-handlers/outbound-cro.ts).
+// Both pure — no network, no DB.
+{
+  const withInstantly: PauseCandidate = { instantlyLeadId: "lead_1", aimfoxLeadId: null };
+  const withAimfox: PauseCandidate = { instantlyLeadId: null, aimfoxLeadId: "aimfox_1" };
+  const withBoth: PauseCandidate = { instantlyLeadId: "lead_1", aimfoxLeadId: "aimfox_1" };
+  const withNeither: PauseCandidate = { instantlyLeadId: null, aimfoxLeadId: null };
+
+  check("pause: exactly interested, meeting_booked, linkedin_reply are trigger events", [...PAUSE_TRIGGER_EVENTS].sort().join() === ["interested", "linkedin_reply", "meeting_booked"].sort().join(), [...PAUSE_TRIGGER_EVENTS]);
+  for (const untouched of ["email_reply", "bounced", "unsubscribed", "not_interested", "connection_accepted", "connection_declined"] as const) {
+    check(`pause: "${untouched}" plans nothing at all, even with both vendor ids on record`, planChannelPause(untouched, withBoth).length === 0);
+  }
+
+  const interested = planChannelPause("interested", withInstantly);
+  check("pause: interested + instantlyLeadId → one Instantly step at interestValue 1", interested.length === 1 && interested[0]?.vendor === "INSTANTLY" && interested[0]?.action === "set_interest_status" && interested[0]?.interestValue === 1, interested);
+
+  const meeting = planChannelPause("meeting_booked", withInstantly);
+  check("pause: meeting_booked + instantlyLeadId → one Instantly step at interestValue 2", meeting.length === 1 && meeting[0]?.action === "set_interest_status" && meeting[0]?.interestValue === 2, meeting);
+
+  const liReplyCross = planChannelPause("linkedin_reply", withInstantly);
+  check("pause: linkedin_reply + instantlyLeadId → cross-channel Instantly step, interestValue 1", liReplyCross.length === 1 && liReplyCross[0]?.vendor === "INSTANTLY" && liReplyCross[0]?.interestValue === 1 && /cross-channel/.test(liReplyCross[0]!.reason), liReplyCross);
+
+  check("pause: interested with only an aimfoxLeadId on record → no Instantly step, one unsupported Aimfox step", (() => {
+    const steps = planChannelPause("interested", withAimfox);
+    return steps.length === 1 && steps[0]?.vendor === "AIMFOX" && steps[0]?.action === "unsupported";
+  })());
+
+  check("pause: a trigger event with both vendor ids plans one Instantly step AND records the Aimfox limitation", (() => {
+    const steps = planChannelPause("meeting_booked", withBoth);
+    return steps.length === 2 && steps.some((s) => s.vendor === "INSTANTLY") && steps.some((s) => s.vendor === "AIMFOX" && s.action === "unsupported");
+  })());
+
+  check("pause: a trigger event with neither vendor id on record plans nothing — 'only act for prospects that actually have ... on record'", planChannelPause("interested", withNeither).length === 0);
+
+  // ── CRO slicing ──
+  check("cro: scoreBand boundaries", scoreBand(0) === "0-49" && scoreBand(49) === "0-49" && scoreBand(50) === "50-64" && scoreBand(64) === "50-64" && scoreBand(65) === "65-79" && scoreBand(79) === "65-79" && scoreBand(80) === "80-100" && scoreBand(100) === "80-100");
+
+  check("cro: personaBucket prefers Apollo's own seniority, title-cased", personaBucket("Some Title", "c_suite") === "C Suite");
+  check("cro: personaBucket falls back to a title keyword match when Apollo has nothing", personaBucket("VP of Engineering", null) === "VP" && personaBucket("Director of Ops", undefined) === "Director");
+  check("cro: personaBucket falls back further to a generic IC bucket for an unrecognised title", personaBucket("Account Executive", null) === "Other / IC (from title, no Apollo seniority)");
+  check("cro: personaBucket with nothing at all", personaBucket(null, null) === "(no title recorded)");
+
+  const flags = { replied: (r: SliceInputProspect) => r.replied, interested: (r: SliceInputProspect) => r.interested, meetingBooked: (r: SliceInputProspect) => r.meetingBooked };
+  const p = (over: Partial<SliceInputProspect>): SliceInputProspect => ({
+    playId: "play1",
+    channel: "EMAIL_ONLY",
+    score: 70,
+    title: null,
+    primarySignal: "Recently raised Series B",
+    messagingAngle: null,
+    apolloSeniority: null,
+    replied: false,
+    interested: false,
+    meetingBooked: false,
+    ...over,
+  });
+
+  // A small slice (below MIN_SLICE_SAMPLE_SIZE) is flagged; a slice that clears it is not.
+  const thin = [p({}), p({ replied: true })];
+  const thinRows = buildSliceRows(thin, () => "only-bucket", flags);
+  check("cro: a slice under the minimum sample size is flagged insufficientData", thinRows.length === 1 && thinRows[0]?.added === 2 && thinRows[0]?.insufficientData === true, thinRows);
+
+  const thick = Array.from({ length: MIN_SLICE_SAMPLE_SIZE }, (_, i) => p({ replied: i < 3, interested: i < 1 }));
+  const thickRows = buildSliceRows(thick, () => "only-bucket", flags);
+  check(
+    "cro: a slice at the minimum sample size is not flagged, and its rates are computed correctly",
+    thickRows.length === 1 && thickRows[0]?.insufficientData === false && thickRows[0]?.added === MIN_SLICE_SAMPLE_SIZE && thickRows[0]?.replied === 3 && thickRows[0]?.replyRate === "30.0%" && thickRows[0]?.interested === 1 && thickRows[0]?.positiveRate === "10.0%",
+    thickRows,
+  );
+
+  // buildPlaySlices groups a mixed cohort into all four axes correctly, and different plays'
+  // prospects never mix (the caller is expected to have already filtered to one play — this just
+  // checks the aggregation itself doesn't accidentally key on playId).
+  const cohort: SliceInputProspect[] = [
+    p({ primarySignal: "Series B", apolloSeniority: "vp", channel: "EMAIL_AND_LINKEDIN", score: 85, replied: true }),
+    p({ primarySignal: "Series B", apolloSeniority: "vp", channel: "EMAIL_AND_LINKEDIN", score: 82 }),
+    p({ primarySignal: "Hiring 5 engineers", apolloSeniority: "director", channel: "EMAIL_ONLY", score: 68, interested: true }),
+  ];
+  const slices = buildPlaySlices(cohort);
+  check("cro: buildPlaySlices bySignal groups by exact primarySignal text", slices.bySignal.find((r) => r.value === "Series B")?.added === 2 && slices.bySignal.find((r) => r.value === "Hiring 5 engineers")?.added === 1, slices.bySignal);
+  check("cro: buildPlaySlices byPersona groups by title-cased Apollo seniority", slices.byPersona.find((r) => r.value === "Vp")?.added === 2, slices.byPersona);
+  check("cro: buildPlaySlices byScoreBand groups by band, not raw score", slices.byScoreBand.find((r) => r.value === "80-100")?.added === 2 && slices.byScoreBand.find((r) => r.value === "65-79")?.added === 1, slices.byScoreBand);
+  check("cro: buildPlaySlices byChannel separates EMAIL_AND_LINKEDIN from EMAIL_ONLY", slices.byChannel.find((r) => r.value === "EMAIL_AND_LINKEDIN")?.added === 2 && slices.byChannel.find((r) => r.value === "EMAIL_ONLY")?.added === 1, slices.byChannel);
+  check("cro: every row in this tiny cohort is flagged insufficientData (well under the minimum)", [...slices.bySignal, ...slices.byPersona, ...slices.byScoreBand, ...slices.byChannel].every((r) => r.insufficientData === true));
 }
 
 // Podcast voice providers: Google Gemini TTS as the alternative to Cartesia

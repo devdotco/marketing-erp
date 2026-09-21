@@ -1,6 +1,6 @@
 /**
  * Setup guides for the API-key providers (Apollo, Instantly, Aimfox,
- * GoHighLevel, Cartesia, Google Text-to-Speech, Transistor, Ahrefs, Semrush, SearchAtlas, Mailchimp,
+ * Cartesia, Google Text-to-Speech, Transistor, Ahrefs, Semrush, SearchAtlas, Mailchimp,
  * erp.io CRM, Klaviyo). Owned separately from oauth-cms.ts so the two can be
  * filled in concurrently — merged in lib/integrations/guides/index.ts.
  *
@@ -268,7 +268,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       },
       {
         title: "Turn on Outbound Revenue (optional)",
-        body: "Replies, interest and bookings are recorded on the prospect automatically. If you also want each one written to GoHighLevel, make sure the **Outbound Revenue** agent is turned on — marketing-erp only starts it for a reply when it is on, and every CRM write still waits for your approval.",
+        body: "Replies, interest and bookings are recorded on the prospect automatically. If you also want each one written to your erp.io CRM workspace — the contact, the deal, and a suggested reply as a task — make sure the **Outbound Revenue** agent is turned on. marketing-erp only starts it for a reply when it is on, and every CRM write still waits for your approval.",
       },
     ],
     verify: [
@@ -366,7 +366,7 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     verify: [
       "The connect form calls Aimfox's accounts-list endpoint — free, read-only, and works even with a Read-only-permission key (so a successful connect here does not by itself confirm the key can add leads).",
       "A green \"Connected\" badge appears next to Aimfox in Settings → Integrations once it checks out.",
-      "Reply tracking: the next time a prospect the Outbound Engine added replies on LinkedIn, their status on the Outbound page changes to Replied. If the Outbound Revenue agent is turned on, a run also appears, waiting for approval before anything is written to GoHighLevel.",
+      "Reply tracking: the next time a prospect the Outbound Engine added replies on LinkedIn, their status on the Outbound page changes to Replied. If the Outbound Revenue agent is turned on, a run also appears, waiting for approval before anything is written to the erp.io CRM.",
     ],
     troubleshooting: [
       {
@@ -392,60 +392,6 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
       { label: "Aimfox Help Center: Webhooks", url: "https://help.aimfox.com/en/articles/10183889-webhooks" },
       { label: "Aimfox webhook events reference", url: "https://docs.aimfox.com/webhooks" },
     ],
-  },
-
-  GO_HIGH_LEVEL: {
-    provider: "GO_HIGH_LEVEL",
-    summary:
-      "Connecting GoHighLevel lets the Outbound Engine's Revenue agent create and update real contacts and sales opportunities in your GHL sub-account whenever an outbound prospect replies, shows interest, or books a meeting.",
-    timeMinutes: 8,
-    youWillNeed: [
-      "Admin access to the specific GoHighLevel sub-account (\"Location\") you want prospects and deals to land in.",
-      "A sales pipeline already set up in that sub-account, ideally named \"Outbound\", with stages this agent can match by name (e.g. Lead, Qualified Lead, Meeting Set).",
-      "The sub-account's Location ID (Settings → Business Profile, or the /location/ segment of its URL).",
-    ],
-    steps: [
-      {
-        title: "Open Private Integrations",
-        body: "In the GHL sub-account you want to connect, go to **Settings → Private Integrations**.",
-      },
-      {
-        title: "Create a new integration",
-        body: "Click **Create New Integration**, name it (e.g. \"marketing-erp\"), and grant it Contacts and Opportunities read/write scopes — the minimum this agent needs to create contacts and move opportunities through your pipeline.",
-      },
-      {
-        title: "Copy the token",
-        body: "Save it, then copy the generated token immediately — GHL only shows it once.",
-      },
-      {
-        title: "Find the Location ID",
-        body: "Go to **Settings → Business Profile** in the same sub-account and copy the Location ID (or read it from the sub-account's URL, after /location/).",
-      },
-      {
-        title: "Paste both into marketing-erp",
-        body: "Go to **Settings → Integrations → GoHighLevel → Connect**, paste the token into **Private integration token** and the ID into **Location ID**, then click **Connect**.",
-      },
-    ],
-    verify: [
-      "The connect form calls GET /locations/{locationId} — free and read-only — which confirms both that the token authenticates AND that it's authorised for this specific sub-account, not just some other one in the same agency.",
-      "A green \"Connected\" badge appears next to GoHighLevel in Settings → Integrations once it checks out.",
-    ],
-    troubleshooting: [
-      {
-        symptom: "\"GoHighLevel rejected that token, or the token isn't authorised for this location ID.\"",
-        fix: "Both the token and Location ID come from the same sub-account — Settings → Private Integrations and Settings → Business Profile. A token created in one sub-account will not work with a different sub-account's Location ID.",
-      },
-      {
-        symptom: "\"GoHighLevel couldn't find a location with that ID.\"",
-        fix: "Re-check Settings → Business Profile in the sub-account — the ID may have been mistyped, or copied from the wrong sub-account.",
-      },
-      {
-        symptom: "\"This GoHighLevel sub-account has no sales pipeline set up.\"",
-        fix: "Create a pipeline in GoHighLevel (name it \"Outbound\" so this agent finds it automatically) with at least a Lead, Qualified Lead, and Meeting Set stage.",
-      },
-    ],
-    privacy: "Both read and write. It never sends email, text, or any outbound message itself — it only writes CRM records — but it can write real Contacts and Opportunities once you approve a run, same model as Email Marketing's channels. The Revenue agent is triggered automatically whenever an outbound prospect engages (an Instantly or Aimfox reply webhook — nobody clicked \"run\"), which is exactly why the write is gated: it resolves the pipeline/stage by name (read-only) and stages the exact Contact and Opportunity fields it would write, then pauses as Awaiting Approval. Only once a workspace admin approves does it upsert the Contact (safe to repeat — GHL dedupes by email) and, for interest/meeting events, create an Opportunity in the connected sub-account's pipeline — but only if this prospect doesn't already have one; opportunity creation is not idempotent on GHL's side, so an existing id is reused rather than creating a second Opportunity. Rejecting the run makes no call to GoHighLevel at all. Disconnect any time from Settings → Integrations → GoHighLevel → Disconnect, or delete the Private Integration in GHL under Settings → Private Integrations (do this and the token stops working immediately, even if marketing-erp still shows it as connected until you disconnect there too).",
-    docs: [{ label: "GoHighLevel: Private Integration Tokens", url: "https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken/" }],
   },
 
   MAILCHIMP: {

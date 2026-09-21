@@ -1,15 +1,11 @@
 import { decryptCredentials } from "@/lib/crypto";
 import type { AgentHandler } from "./index";
-import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
-import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
-import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { apolloPeopleSearch, apolloMatchPerson } from "@/lib/integrations/apollo";
-import { parsePlayConfig, buildApolloPeopleSearchFilters, selectPeopleToReveal, dedupeNewProspects, parseSourcingMode, type OutboundPlayConfig } from "./outbound-play-config";
+import type { Prisma } from "@prisma/client";
+import { parsePlayConfig, buildApolloPeopleSearchFilters, selectPeopleToReveal, dedupeNewProspects, parseSourcingMode } from "./outbound-play-config";
 import { sourceCapitalRaiseProspects } from "./outbound-scout-capital-raise";
 
 /** People that api_search matched, capped before we spend a credit revealing
@@ -19,90 +15,9 @@ import { sourceCapitalRaiseProspects } from "./outbound-scout-capital-raise";
  * customer's whole balance in one run. */
 const MAX_REVEALS_PER_RUN = 25;
 
-async function runClaudeSimulation(
-  client: Anthropic,
-  playName: string,
-  playConfig: OutboundPlayConfig,
-  maxProspects: number,
-  includeSignals: boolean
-): Promise<{ simOutput: Record<string, unknown>; costUsd: number }> {
-  const icpSummary = [
-    playConfig.icp.titles.length ? `Titles: ${playConfig.icp.titles.join(", ")}` : null,
-    playConfig.icp.seniorities.length ? `Seniorities: ${playConfig.icp.seniorities.join(", ")}` : null,
-    playConfig.icp.employeeRanges.length ? `Employee ranges: ${playConfig.icp.employeeRanges.join(", ")}` : null,
-    playConfig.icp.industries.length ? `Industries/keywords: ${playConfig.icp.industries.join(", ")}` : null,
-    playConfig.icp.geographies.length ? `Geographies: ${playConfig.icp.geographies.join(", ")}` : null,
-    playConfig.icp.technologies.length ? `Technologies: ${playConfig.icp.technologies.join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const systemPrompt = `You are an outbound prospecting specialist. Your job is to generate a list of realistic, ICP-matched prospects for the outbound play "${playName}".
-
-${playConfig.serviceOffer ? `What is being sold: ${playConfig.serviceOffer}` : ""}
-
-Each prospect must be a real-seeming but fictional company and contact with plausible firmographics, verified contact data, and at least one observable buying signal.
-
-Always respond with valid JSON only — no markdown, no commentary.`;
-
-  const userPrompt = `Generate ${maxProspects} prospect records for the "${playName}" play.
-
-ICP:
-${icpSummary || "No ICP filters configured for this play yet — use reasonable business judgement."}
-
-${includeSignals ? "Each prospect MUST have at least one observable buying signal listed." : ""}
-
-Return exactly this JSON structure:
-{
-  "prospects": [
-    {
-      "firstName": "string",
-      "lastName": "string",
-      "email": "string (work email, use company domain)",
-      "linkedInUrl": "https://linkedin.com/in/username",
-      "title": "string",
-      "company": "string",
-      "companyDomain": "string (e.g. acmesoftware.com)",
-      "employees": "50-500",
-      "estimatedRevenue": "$10M-$50M",
-      "industry": "string",
-      "geography": "US" | "Canada" | "UK",
-      "primarySignal": "string (the #1 observable buying signal)",
-      "additionalSignals": ["string"],
-      "dataQualityScore": 5
-    }
-  ],
-  "playName": "${playName}",
-  "sourcedAt": "ISO 8601 date string",
-  "sourceNote": "Simulated prospect sourcing — connect Apollo.io in Settings → Integrations to run live sourcing"
-}
-
-Generate realistic but fictional companies and contacts. Vary industries, company sizes, and signal types.`;
-
-  const message = await client.messages.create({
-    model: MODELS.fast,
-    max_tokens: 8192,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
-  });
-
-  const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let simOutput: Record<string, unknown>;
-  try {
-    simOutput = jsonMatch ? JSON.parse(jsonMatch[0]) : { prospects: [] };
-  } catch {
-    simOutput = { prospects: [], parseError: rawText.slice(0, 200) };
-  }
-
-  const costUsd = estimateCostUsd(MODELS.fast, message.usage);
-
-  return { simOutput, costUsd };
-}
-
 /** The sourcing-time signal worth persisting onto OutboundProspect.sourceSignal, or undefined when
- * this prospect wasn't sourced on a discrete event. Only the SEC Form D path produces one today:
- * the Apollo ICP-search path's `primarySignal` is a restatement of the search that found them
+ * this prospect wasn't sourced on a discrete event. Only the SEC Form D path produces one: the
+ * Apollo ICP-search path's `primarySignal` is a restatement of the search that found them
  * ("Sourced via Apollo.io — VP Engineering at Acme"), not an independent, citable fact, and
  * storing that would dress a filter up as evidence in the Strategist's prompt. */
 function buildSourceSignal(prospect: Record<string, unknown>): Prisma.InputJsonValue | undefined {
@@ -157,12 +72,39 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   const playConfig = parsePlayConfig(play.config);
   const requestedMax = typeof config.maxProspects === "number" ? config.maxProspects : playConfig.dailySourcingCap;
   const maxProspects = Math.max(1, Math.min(requestedMax, playConfig.dailySourcingCap));
-  const includeSignals = config.includeSignals !== false;
 
-  // Check for Apollo integration
+  // Check for Apollo integration — the only prospect source this agent has. Checked before the
+  // existing-pipeline dedup query below (a DB round trip that would otherwise run for nothing) and
+  // well before anything that would spend an Anthropic token. A real outbound campaign running
+  // against a fabricated prospect list — invented names, invented emails, invented "buying
+  // signals" — used to be this agent's silent fallback when Apollo wasn't connected; it's a refusal
+  // now, same as every other integration-gated agent in this codebase (see e.g.
+  // email-marketing.ts's `esp_not_connected` check).
   const apolloIntegration = await prisma.integration.findUnique({
     where: { workspaceId_provider: { workspaceId, provider: "APOLLO" } },
   });
+
+  // Which population to source from: the play's ICP as an Apollo People Search (the original
+  // behaviour, still the default), or companies that just filed an SEC Form D and therefore have
+  // money they didn't have last month. See outbound-scout-capital-raise.ts.
+  const sourcingMode = parseSourcingMode(config.sourcingMode);
+
+  const apolloNotConnected = () =>
+    new AgentInputError(
+      `Apollo.io isn't connected for this workspace, so Outbound Scout has no real prospect source to search for play "${play.name}".`,
+      "Connect Apollo.io in Settings → Integrations → Apollo.io, then run Outbound Scout again.",
+      "apollo_not_connected",
+    );
+
+  // The refusal above is about having no REAL source, which is why it doesn't apply to the
+  // capital-raise mode: SEC EDGAR is a real, public, primary source in its own right, and that
+  // mode's accounts come from filings rather than from Apollo. What Apollo alone can supply there
+  // is the email address, so without it the mode returns real companies and real named officers
+  // with no contact details and persists nothing — a degraded result, never an invented one, and
+  // so not the fabricated-prospect-list failure this gate exists to prevent.
+  if (!apolloIntegration && sourcingMode !== "capital_raise") {
+    throw apolloNotConnected();
+  }
 
   // Load existing prospect emails to dedup
   const existingEmails = await prisma.outboundProspect.findMany({
@@ -172,22 +114,17 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   const existingEmailSet = new Set(existingEmails.map((p) => p.email));
   const existingCount = existingEmailSet.size;
 
-  let output: Record<string, unknown>;
-  let costUsd = 0;
-  // Only a path that produced real, reachable contacts gets persisted to OutboundProspect below.
-  // Simulated prospects (source: "simulation") and Form D accounts sourced without Apollo
-  // (source: "sec_form_d_accounts_only") are clearly labelled and never written as pipeline rows.
-  let isLive = Boolean(apolloIntegration);
+  const costUsd = 0; // Scout makes no Anthropic call of its own — every dollar here comes from Apollo credits, not tokens.
 
-  // Which population to source from: the play's ICP as an Apollo People Search (the original
-  // behaviour, still the default), or companies that just filed an SEC Form D and therefore have
-  // money they didn't have last month. See outbound-scout-capital-raise.ts.
-  const sourcingMode = parseSourcingMode(config.sourcingMode);
+  let output: Record<string, unknown>;
+  // Whether this run produced real, reachable contacts — i.e. whether anything may be written to
+  // OutboundProspect. False only for a capital-raise run with no Apollo connected.
+  let isLive: boolean;
 
   if (sourcingMode === "capital_raise") {
     // ── SEC Form D path ─────────────────────────────────────────────────────
-    // No Claude call here at all: EDGAR is structured data, so the signal is read rather than
-    // written, and this branch costs $0 in model spend whether or not Apollo is connected.
+    // EDGAR is structured public data, so the signal is read rather than written: this branch
+    // costs nothing in model spend whether or not Apollo is connected.
     const result = await sourceCapitalRaiseProspects({
       workspaceId,
       playName: play.name,
@@ -308,31 +245,22 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
       revealed: apolloProspects.length,
       revealSkippedOrFailed: toReveal.length - apolloProspects.length,
     };
+    isLive = true;
   } else {
-    // ── Claude simulation fallback ──────────────────────────────────────────
-    const { client } = await resolveAnthropic(workspaceId);
-    const { simOutput, costUsd: simCost } = await runClaudeSimulation(
-      client,
-      play.name,
-      playConfig,
-      maxProspects,
-      includeSignals
-    );
-    costUsd = simCost;
-    output = simOutput;
-    output.source = "simulation";
-    output.simulationNote =
-      "Simulated prospect sourcing — connect Apollo.io in Settings → Integrations to run live sourcing";
+    // Unreachable — the gate above already refused this combination. Present so the Apollo branch
+    // narrows `apolloIntegration` without a non-null assertion.
+    throw apolloNotConnected();
   }
 
   // Filter out any that match existing emails
   const prospects = Array.isArray(output.prospects) ? (output.prospects as Array<Record<string, unknown>>) : [];
   const newProspects = dedupeNewProspects(prospects, existingEmailSet);
 
-  // Persist — only for real, live-sourced prospects. Simulation never touches OutboundProspect;
-  // it exists purely so the Strategist/Email agents have something to run against while Apollo
-  // isn't connected. Upsert (not create) so a re-run that resources the same email — e.g. a retry
-  // after a partial failure — can't collide with OutboundProspect's workspaceId+email uniqueness.
+  // Upsert (not create) so a re-run that resources the same email — e.g. a retry after a partial
+  // failure — can't collide with OutboundProspect's workspaceId+email uniqueness.
+  // Only a run that produced real, reachable contacts writes pipeline rows. A capital-raise run
+  // with no Apollo connected returns real companies and officers but no email addresses, and
+  // OutboundProspect.email is required and unique — so there is nothing to persist and nothing is.
   let prospectIds: string[] = [];
   if (isLive && newProspects.length > 0) {
     const created = await Promise.all(
@@ -353,8 +281,7 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
             status: "PENDING",
             // The signal this prospect was sourced ON, so the Strategist can cite it as verified
             // source data rather than being handed a bare contact record and forbidden (rightly)
-            // from asserting a funding round it wasn't given. Null for ICP search, which sources
-            // on firmographic filters rather than on a discrete, datable event.
+            // from asserting a funding round it wasn't given.
             sourceSignal: buildSourceSignal(p),
           },
           // Sourcing never overwrites a prospect that's already further along the pipeline.

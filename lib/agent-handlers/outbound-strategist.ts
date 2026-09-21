@@ -10,7 +10,15 @@ import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { strictSchema } from "@/lib/content/article";
 import { apolloEnrichOrganization, apolloMatchPerson, apolloOrganizationJobPostings } from "@/lib/integrations/apollo";
-import { parsePlayConfig, firmographicBandFromIcp, routeByScore, type OutboundPlayConfig } from "./outbound-play-config";
+import {
+  parsePlayConfig,
+  firmographicBandFromIcp,
+  routeByScore,
+  resolveScoringWeights,
+  computeWeightedTotal,
+  type OutboundPlayConfig,
+  type ScoringDimension,
+} from "./outbound-play-config";
 
 // ---------------------------------------------------------------------------
 // Apollo enrichment — pure planning logic (freshness, dedupe, cap selection).
@@ -316,63 +324,79 @@ const SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME = "submit_prospect_intelligence";
 const CHANNELS = ["EMAIL_AND_LINKEDIN", "EMAIL_ONLY", "WATCHLIST", "DISCARDED"] as const;
 type Channel = (typeof CHANNELS)[number];
 
-export const SUBMIT_PROSPECT_INTELLIGENCE_TOOL = {
-  name: SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME,
-  strict: true,
-  description: "Submit this prospect's ICP score and Prospect Intelligence Object.",
-  input_schema: strictSchema({
-    type: "object",
-    required: ["scoring", "intelligence"],
-    properties: {
-      scoring: {
-        type: "object",
-        required: ["total", "signal", "serviceFit", "firmographic", "persona", "timing", "dataQuality", "routing", "scoringRationale"],
-        properties: {
-          total: { type: "integer", description: "0-100 composite score — the sum of the six dimensions below." },
-          signal: { type: "integer", description: "0-25: observable pain or trigger signal." },
-          serviceFit: { type: "integer", description: "0-20: fit with this play's service offer." },
-          firmographic: { type: "integer", description: "0-25: company size, industry, revenue, location vs. the play's ICP." },
-          persona: { type: "integer", description: "0-15: title/seniority/department fit." },
-          timing: { type: "integer", description: "0-10: funding recency, hiring signals, headcount growth." },
-          dataQuality: { type: "integer", description: "0-5: how much of this score rests on verified data vs. inference." },
-          routing: { type: "string", enum: [...CHANNELS], description: "80+: EMAIL_AND_LINKEDIN. 65-79: EMAIL_ONLY. 50-64: WATCHLIST. <50: DISCARDED." },
-          scoringRationale: { type: "string", description: "2-3 sentences explaining the score." },
-        },
-      },
-      intelligence: {
-        type: "object",
-        required: ["painHypothesis", "primarySignal", "bestOffer", "messagingAngle", "avoid", "proofPoints", "companyContext", "apolloFactsUsed", "inferredAssumptions"],
-        properties: {
-          painHypothesis: { type: "string", description: "1 sentence: the core pain this company likely has." },
-          primarySignal: { type: "string", description: "The single strongest signal that makes this prospect worth contacting." },
-          bestOffer: { type: "string", description: "The specific part of this play's service offer that maps to their situation." },
-          messagingAngle: { type: "string", description: "The angle that will resonate — NOT generic outsourcing." },
-          avoid: { type: "string", description: "What NOT to say in outreach to this prospect." },
-          proofPoints: {
-            type: "array",
-            minItems: 1,
-            items: { type: "string" },
-            description: "1-2 social proof points that would resonate with this type of buyer.",
-          },
-          companyContext: { type: "string", description: "Compact 1-sentence context about the company for agent memory." },
-          apolloFactsUsed: {
-            type: "array",
-            minItems: 0,
-            items: { type: "string" },
-            description:
-              "Specific facts pulled from the verified source blocks supplied above — Apollo data (e.g. 'Series B, per Apollo funding data', '340 employees per Apollo org enrichment', '4 open Senior Engineer postings per Apollo job postings') and, when an SEC filing block is present, facts from it prefixed 'per SEC Form D filing' (e.g. 'per SEC Form D filing, $25M offering with $1M sold as of 2026-09-18') — that grounded primarySignal, companyContext, or a proof point. Empty array if no verified source data was supplied — never invent an entry here.",
-          },
-          inferredAssumptions: {
-            type: "array",
-            minItems: 0,
-            items: { type: "string" },
-            description: "Anything asserted above that is inference, not a fact from Apollo or the prospect record.",
+/** Built per-request rather than a static const: the six dimension maxima below come from the
+ * play's own resolveScoringWeights() output (see the outbound-play-config module), which varies play to
+ * play, so the tool schema Claude is given has to vary with it too — a play that weights `timing`
+ * more heavily needs a tool schema that actually allows a bigger `timing` score, not just a prompt
+ * that says so while the schema still implies 0-10. Routing thresholds are read from the play too
+ * (thresholds.emailAndLinkedin/emailOnly/watchlist) so the `routing` field's description matches
+ * what routeByScore() will actually do with the total, rather than the old hardcoded 80/65/50. */
+function buildSubmitProspectIntelligenceTool(
+  weights: Record<ScoringDimension, number>,
+  thresholds: { emailAndLinkedin: number; emailOnly: number; watchlist: number },
+): Anthropic.Tool {
+  return {
+    name: SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME,
+    strict: true,
+    description: "Submit this prospect's ICP score and Prospect Intelligence Object.",
+    input_schema: strictSchema({
+      type: "object",
+      required: ["scoring", "intelligence"],
+      properties: {
+        scoring: {
+          type: "object",
+          required: ["total", "signal", "serviceFit", "firmographic", "persona", "timing", "dataQuality", "routing", "scoringRationale"],
+          properties: {
+            total: { type: "integer", description: "0-100 composite score — the sum of the six dimensions below (this play's weights already sum to 100)." },
+            signal: { type: "integer", description: `0-${weights.signal}: observable pain or trigger signal.` },
+            serviceFit: { type: "integer", description: `0-${weights.serviceFit}: fit with this play's service offer.` },
+            firmographic: { type: "integer", description: `0-${weights.firmographic}: company size, industry, revenue, location vs. the play's ICP.` },
+            persona: { type: "integer", description: `0-${weights.persona}: title/seniority/department fit.` },
+            timing: { type: "integer", description: `0-${weights.timing}: funding recency, hiring signals, headcount growth.` },
+            dataQuality: { type: "integer", description: `0-${weights.dataQuality}: how much of this score rests on verified data vs. inference.` },
+            routing: {
+              type: "string",
+              enum: [...CHANNELS],
+              description: `${thresholds.emailAndLinkedin}+: EMAIL_AND_LINKEDIN. ${thresholds.emailOnly}-${thresholds.emailAndLinkedin - 1}: EMAIL_ONLY. ${thresholds.watchlist}-${thresholds.emailOnly - 1}: WATCHLIST. <${thresholds.watchlist}: DISCARDED.`,
+            },
+            scoringRationale: { type: "string", description: "2-3 sentences explaining the score." },
           },
         },
+        intelligence: {
+          type: "object",
+          required: ["painHypothesis", "primarySignal", "bestOffer", "messagingAngle", "avoid", "proofPoints", "companyContext", "apolloFactsUsed", "inferredAssumptions"],
+          properties: {
+            painHypothesis: { type: "string", description: "1 sentence: the core pain this company likely has." },
+            primarySignal: { type: "string", description: "The single strongest signal that makes this prospect worth contacting." },
+            bestOffer: { type: "string", description: "The specific part of this play's service offer that maps to their situation." },
+            messagingAngle: { type: "string", description: "The angle that will resonate — NOT generic outsourcing." },
+            avoid: { type: "string", description: "What NOT to say in outreach to this prospect." },
+            proofPoints: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string" },
+              description: "1-2 social proof points that would resonate with this type of buyer.",
+            },
+            companyContext: { type: "string", description: "Compact 1-sentence context about the company for agent memory." },
+            apolloFactsUsed: {
+              type: "array",
+              minItems: 0,
+              items: { type: "string" },
+              description:
+                "Specific facts pulled from the verified source blocks supplied above — Apollo data (e.g. 'Series B, per Apollo funding data', '340 employees per Apollo org enrichment', '4 open Senior Engineer postings per Apollo job postings') and, when an SEC filing block is present, facts from it prefixed 'per SEC Form D filing' (e.g. 'per SEC Form D filing, $25M offering with $1M sold as of 2026-09-18') — that grounded primarySignal, companyContext, or a proof point. Empty array if no verified source data was supplied — never invent an entry here.",
+            },
+            inferredAssumptions: {
+              type: "array",
+              minItems: 0,
+              items: { type: "string" },
+              description: "Anything asserted above that is inference, not a fact from Apollo or the prospect record.",
+            },
+          },
+        },
       },
-    },
-  }),
-} as Anthropic.Tool;
+    }),
+  };
+}
 
 interface ScoredProspect {
   scoring: {
@@ -404,6 +428,11 @@ async function scoreProspect(
   prospect: Record<string, unknown>,
   play: { name: string; config: OutboundPlayConfig },
   apollo: { org: ApolloOrgEnrichment | null; person: ApolloPersonEnrichment | null; jobPostings: ApolloJobPostingsEnrichment | null },
+  // Resolved once per run by outboundStrategistHandler (resolveScoringWeights(playConfig.scoringWeights))
+  // and threaded through rather than re-resolved here, so every prospect in the same run scores
+  // against the identical six maxima and the handler's post-scoring total recompute
+  // (computeWeightedTotal) can't drift from what the prompt/tool schema actually told Claude.
+  weights: Record<ScoringDimension, number>,
 ): Promise<{ scored: ScoredProspect; costUsd: number }> {
   // Destructured once, rather than reading each field off play.config inline below — not just
   // style: test/content.test.ts's fleet-wide handler/metadata key-parity guard regexes this file's
@@ -442,13 +471,13 @@ ${proofPoints.length ? `\nProof points available to reference: ${proofPoints.joi
 
 Your job is to score a single prospect against this play's ICP criteria and generate a Prospect Intelligence Object used by the email and LinkedIn outreach agents.
 
-Score the prospect across exactly these six dimensions (max points shown):
-1. Observable pain / trigger signal: 0-25 points
-2. Service fit: 0-20 points
-3. Firmographic fit: 0-25 points
-4. Persona fit: 0-15 points
-5. Timing indicators: 0-10 points
-6. Data quality: 0-5 points
+Score the prospect across exactly these six dimensions (max points shown — this play's own configured weights, normalised to sum to 100; a play that hasn't customised them sees the default 25/20/25/15/10/5 split):
+1. Observable pain / trigger signal: 0-${weights.signal} points
+2. Service fit: 0-${weights.serviceFit} points
+3. Firmographic fit: 0-${weights.firmographic} points
+4. Persona fit: 0-${weights.persona} points
+5. Timing indicators: 0-${weights.timing} points
+6. Data quality: 0-${weights.dataQuality} points
 
 Channel routing rules for this play (the total below decides the actual routing — these are so your rationale is consistent with it):
 - ${thresholds.emailAndLinkedin}+: EMAIL_AND_LINKEDIN
@@ -469,7 +498,7 @@ ${apolloBlock}${sourceSignalBlock ? `\n\n${sourceSignalBlock}` : ""}`;
     model: MODELS.standard,
     max_tokens: 2048,
     system: systemPrompt,
-    tools: [SUBMIT_PROSPECT_INTELLIGENCE_TOOL],
+    tools: [buildSubmitProspectIntelligenceTool(weights, thresholds)],
     tool_choice: { type: "tool", name: SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME },
     messages: [{ role: "user", content: userPrompt }],
   });
@@ -477,6 +506,14 @@ ${apolloBlock}${sourceSignalBlock ? `\n\n${sourceSignalBlock}` : ""}`;
   const costUsd = estimateCostUsd(MODELS.standard, message.usage);
   const scored = toolInputFrom<ScoredProspect>(message, SUBMIT_PROSPECT_INTELLIGENCE_TOOL_NAME);
   if (!scored) throw new Error("The Strategist did not submit a score for this prospect.");
+
+  // Claude's own `scoring.total` is a self-sum with nothing enforcing it — this codebase's tool
+  // schemas describe bounds in text rather than JSON Schema `maximum` keywords (see
+  // buildSubmitProspectIntelligenceTool's doc comment), so a per-dimension score above its max, or
+  // an arithmetic slip in the self-reported total, is possible. computeWeightedTotal recomputes the
+  // total server-side from the six raw dimension scores, clamped to this play's resolved weights —
+  // that recomputed value, not Claude's, is what routeByScore and every downstream agent sees.
+  scored.scoring.total = computeWeightedTotal(scored.scoring, weights);
 
   return { scored, costUsd };
 }
@@ -516,7 +553,19 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
       costUsd: 0,
     };
   }
+  // Same gate as Outbound Scout's (outbound-scout.ts, ~128-133) — a disabled play shouldn't get
+  // scored either. Without this, a play disabled after Scout already sourced (but before Strategist
+  // ran — e.g. autoAdvance queued this run, then an admin paused the play) would still score and
+  // route those prospects, silently ignoring "disabled" for the very half of the pipeline that
+  // decides which live campaign they end up in.
+  if (!play.enabled) {
+    return {
+      output: { error: `The "${play.name}" play is disabled.`, hint: "Enable it on the Outbound Engine page to score prospects against it." },
+      costUsd: 0,
+    };
+  }
   const playConfig = parsePlayConfig(play.config);
+  const scoringWeights = resolveScoringWeights(playConfig.scoringWeights);
 
   // "prospects" (batch, from Outbound Scout's own output array) and "prospect" (single) are read
   // straight off the raw run input — only "prospect" is a declared, saved-config-backed form field
@@ -679,9 +728,12 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
       ...(jobPostings ? { jobPostings } : stored?.jobPostings ? { jobPostings: stored.jobPostings } : {}),
     };
 
-    const { scored, costUsd: scoreCost } = await scoreProspect(client, prospect, { name: play.name, config: playConfig }, { org, person, jobPostings });
+    const { scored, costUsd: scoreCost } = await scoreProspect(client, prospect, { name: play.name, config: playConfig }, { org, person, jobPostings }, scoringWeights);
     costUsd += scoreCost;
 
+    // scored.scoring.total is already the server-recomputed value (see scoreProspect's
+    // computeWeightedTotal call) — out of 100 regardless of how this play's scoringWeights are
+    // split, which is what makes it safe to compare against routingThresholds below.
     const total = scored.scoring.total;
     // Routing is recomputed from the total against this play's own configured thresholds rather
     // than trusting Claude's own `scoring.routing` pick verbatim (still requested — CHANNELS is in
@@ -737,6 +789,7 @@ export const outboundStrategistHandler: AgentHandler = async (run, updateStatus)
     // also surface its fields at the top level.
     ...(results.length === 1 ? results[0] : {}),
     playSlug,
+    scoringWeights, // the resolved (normalised, sum-to-100) weights this run actually scored against
     apolloConnected: !!apolloApiKey,
     apolloLookupsUsed: apolloBudgetSpent,
     apolloLookupsSkippedForCap: plan.skipped.filter((s) => s.reason === "cap_reached").length,

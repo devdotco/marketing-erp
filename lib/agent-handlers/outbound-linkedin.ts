@@ -59,9 +59,12 @@ async function listCampaignsCached(apiKey: string): Promise<Array<{ id: string; 
 /** Same convention as outbound-email.ts's resolveInstantlyCampaign: a campaign chosen through the
  * play editor's dropdown already carries a live id (playConfig.aimfoxCampaignId), so the common
  * case needs no lookup. Only a campaign typed as plain text while Aimfox wasn't connected yet
- * falls back to a by-name search. */
+ * falls back to a by-name search.
+ *
+ * `apiKey` is always a real, connected key here — outboundLinkedinHandler refuses the whole run
+ * before this is ever called if Aimfox isn't connected (see its own doc comment). */
 async function resolveAimfoxCampaign(
-  apiKey: string | null,
+  apiKey: string,
   playConfig: OutboundPlayConfig,
   playName: string,
 ): Promise<{ campaignId: string; campaignName: string }> {
@@ -78,10 +81,6 @@ async function resolveAimfoxCampaign(
   }
 
   const targetName = plan.targetName;
-  if (!apiKey) {
-    return { campaignId: targetName, campaignName: targetName };
-  }
-
   const campaigns = await listCampaignsCached(apiKey);
   const match = campaigns.find((c) => c.name === targetName) ?? campaigns.find((c) => c.name.toLowerCase().includes(targetName.toLowerCase()));
   if (!match) {
@@ -184,18 +183,30 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
     return { output: { error: "No prospectId(s) in run.input.prospectId / run.input.prospectIds" }, costUsd: 0 };
   }
 
+  // Aimfox is this agent's only send channel — checked before the prospect lookup below (a DB
+  // query that would otherwise run for nothing) and, more importantly, before generateMessages()
+  // starts spending Anthropic tokens writing a connection note and follow-ups for prospects that
+  // would just sit staged forever with nowhere real to send. This used to stage anyway and let
+  // approval silently fabricate `aimfox_...` lead ids instead (see outbound-linkedin-delivery.ts)
+  // — refusing here, up front, is the legible version: names the integration, says where to
+  // connect it, and spends nothing on a run that can't complete for real.
+  const aimfoxIntegration = await prisma.integration.findUnique({
+    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AIMFOX" } },
+  });
+  if (!aimfoxIntegration) {
+    throw new AgentInputError(
+      "Aimfox isn't connected for this workspace, so Outbound LinkedIn has no live campaign to add these profiles to.",
+      "Connect Aimfox in Settings → Integrations → Aimfox, then run Outbound LinkedIn again.",
+      "aimfox_not_connected",
+    );
+  }
+  const connected = true;
+  const apiKey = (await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials)).apiKey;
+
   const prospects = await prisma.outboundProspect.findMany({
     where: { id: { in: allIds }, workspaceId: run.agentConfig.workspaceId },
     include: { play: true },
   });
-
-  const aimfoxIntegration = await prisma.integration.findUnique({
-    where: { workspaceId_provider: { workspaceId: run.agentConfig.workspaceId, provider: "AIMFOX" } },
-  });
-  const connected = Boolean(aimfoxIntegration);
-  const apiKey = aimfoxIntegration
-    ? (await decryptCredentials<{ apiKey: string }>(aimfoxIntegration.encryptedCredentials)).apiKey
-    : null;
 
   const playConfigCache = new Map<string, OutboundPlayConfig>();
   const campaignCache = new Map<string, { campaignId: string; campaignName: string }>();
@@ -263,9 +274,10 @@ export const outboundLinkedinHandler: AgentHandler = async (run, updateStatus) =
     generatedAt: new Date().toISOString(),
     workspaceId: run.agentConfig.workspaceId,
     approvalRequired: true,
-    approvalNote: connected
-      ? `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Aimfox campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Aimfox yet.`
-      : `No Aimfox integration is connected — approving this run will record simulated adds instead of live ones.`,
+    // Aimfox being connected is no longer conditional here — the handler refuses the whole run
+    // above if it isn't (see that check's doc comment) — so this note only ever describes the real,
+    // live-send path.
+    approvalNote: `Adding ${deliveries.length} prospect${deliveries.length === 1 ? "" : "s"} to their live Aimfox campaign${deliveries.length === 1 ? "" : "s"} requires workspace admin approval. Nothing has been sent to Aimfox yet.`,
   };
 
   await updateStatus("AWAITING_APPROVAL", output);
