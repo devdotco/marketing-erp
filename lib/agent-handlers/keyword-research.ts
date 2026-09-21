@@ -17,7 +17,9 @@ type GscQueryRow = { keys: string[]; clicks: number; impressions: number; ctr: n
  * GSC but no Ahrefs/Semrush still gets research anchored in actual demand.
  * Returns null when GSC isn't connected or has no property chosen.
  */
-async function fetchGscQueries(workspaceId: string): Promise<{ property: string; rows: GscQueryRow[] } | null> {
+async function fetchGscQueries(
+  workspaceId: string,
+): Promise<{ property: string; rows: GscQueryRow[]; totals: { clicks: number; impressions: number; ctr: number; position: number; days: number } } | null> {
   const integration = await prisma.integration.findUnique({
     where: { workspaceId_provider: { workspaceId, provider: "GOOGLE_SEARCH_CONSOLE" } },
   });
@@ -26,26 +28,39 @@ async function fetchGscQueries(workspaceId: string): Promise<{ property: string;
   const property = await resolvePropertyOverride("GOOGLE_SEARCH_CONSOLE", creds, "");
   if (!property) return null;
 
+  const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(property)}/searchAnalytics/query`;
+  const headers = { Authorization: `Bearer ${creds.access_token}`, "Content-Type": "application/json" };
   const end = new Date();
   end.setDate(end.getDate() - 2); // GSC data lags ~2 days
-  const start = new Date(end);
-  start.setDate(end.getDate() - 89);
-  const res = await fetch(
-    `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(property)}/searchAnalytics/query`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${creds.access_token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startDate: start.toISOString().slice(0, 10),
-        endDate: end.toISOString().slice(0, 10),
-        dimensions: ["query"],
-        rowLimit: 1000,
-      }),
+  const daysBack = (n: number) => {
+    const d = new Date(end);
+    d.setDate(end.getDate() - (n - 1));
+    return d.toISOString().slice(0, 10);
+  };
+  const endDate = end.toISOString().slice(0, 10);
+
+  // 90 days of queries for the research itself; the site's 28-day totals are
+  // saved with the scan so the history page can show change between scans.
+  const [queriesRes, totalsRes] = await Promise.all([
+    fetch(url, { method: "POST", headers, body: JSON.stringify({ startDate: daysBack(90), endDate, dimensions: ["query"], rowLimit: 1000 }) }),
+    fetch(url, { method: "POST", headers, body: JSON.stringify({ startDate: daysBack(28), endDate }) }),
+  ]);
+  for (const res of [queriesRes, totalsRes]) {
+    if (!res.ok) throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+  const queries = (await queriesRes.json()) as { rows?: GscQueryRow[] };
+  const totalsRow = ((await totalsRes.json()) as { rows?: GscQueryRow[] }).rows?.[0];
+  return {
+    property,
+    rows: queries.rows ?? [],
+    totals: {
+      clicks: totalsRow?.clicks ?? 0,
+      impressions: totalsRow?.impressions ?? 0,
+      ctr: totalsRow?.ctr ?? 0,
+      position: totalsRow?.position ?? 0,
+      days: 28,
     },
-  );
-  if (!res.ok) throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const data = (await res.json()) as { rows?: GscQueryRow[] };
-  return { property, rows: data.rows ?? [] };
+  };
 }
 
 export const keywordResearchHandler: AgentHandler = async (run, updateStatus) => {
@@ -108,8 +123,20 @@ export const keywordResearchHandler: AgentHandler = async (run, updateStatus) =>
   // failure is reported in the output rather than failing research that can
   // still be done without it.
   let gscNote: string | undefined;
+  let gscSnapshot: { gscProperty: string; gscTotals: unknown; gscQueries: unknown[] } | undefined;
   try {
     const gsc = await fetchGscQueries(run.agentConfig.workspaceId);
+    if (gsc) {
+      // Saved with every scan, even an empty one: it is the baseline the next scan is compared against.
+      gscSnapshot = {
+        gscProperty: gsc.property,
+        gscTotals: gsc.totals,
+        gscQueries: [...gsc.rows]
+          .sort((a, b) => b.impressions - a.impressions)
+          .slice(0, 300)
+          .map((r) => ({ query: r.keys[0], impressions: r.impressions, clicks: r.clicks, position: Math.round(r.position * 10) / 10 })),
+      };
+    }
     if (gsc && gsc.rows.length > 0) {
       const seedTerms = seedKeywords.toLowerCase().split(/[\s,]+/).filter((t) => t.length > 2);
       const byImpressions = [...gsc.rows].sort((a, b) => b.impressions - a.impressions);
@@ -174,6 +201,21 @@ Return ONLY valid JSON with no markdown fencing or explanation. The JSON must fo
       }
     }
   ],
+  "opportunities": [
+    {
+      "keyword": "keyword phrase",
+      "type": "striking distance|content gap|quick win|competitor gap|cannibalization",
+      "why": "one sentence: the evidence that this is worth doing (position, impressions, volume, difficulty)",
+      "action": "one sentence: the concrete change to make (which page to update, or what new page to publish)"
+    }
+  ],
+  "actions": [
+    {
+      "priority": "high|medium|low",
+      "title": "short imperative, e.g. Rewrite the /services/seo title and H1 around 'law firm seo'",
+      "detail": "one or two sentences: what exactly to do and the expected effect"
+    }
+  ],
   "summary": {
     "totalKeywords": 85,
     "highPriority": 12,
@@ -195,6 +237,7 @@ Hard filters — exclude any keyword that fails them: monthly volume below ${min
 ${intentFilter === "all" ? "Cover all search intents." : `Only include ${intentFilter}-intent keywords and clusters; exclude every other intent.`}
 ${includeQuestions ? "Include question-format queries (People Also Ask style: how, what, why, which...) alongside head and long-tail terms." : "Exclude question-format queries; keep to head and long-tail non-question terms."}
 Prioritize commercially valuable, winnable keywords within those limits.
+List 6-12 opportunities — the specific gaps worth acting on — and 5-8 prioritized actions ordered by impact for effort. When Search Console data is present, lead with its striking-distance queries (real positions beat estimates).
 Aim for at least 4 distinct clusters${intentFilter === "all" ? " covering different buyer journey stages" : ""}.`;
 
   // Sonnet 5 thinks before answering, and thinking spends the same max_tokens.
@@ -232,6 +275,7 @@ Aim for at least 4 distinct clusters${intentFilter === "all" ? " covering differ
   output.workspaceId = run.agentConfig.workspaceId;
   output.source = source;
   if (gscNote) output.gscNote = gscNote;
+  if (gscSnapshot) Object.assign(output, gscSnapshot);
   if (source === "live" || source === "live+gsc") {
     delete output.simulationNote;
   } else if (source === "gsc") {

@@ -7,6 +7,10 @@ import { getAgent } from "@/lib/agents";
 import Link from "next/link";
 import { RunActions } from "./RunActions";
 import { ArticleStats } from "@/components/runs/ArticleStats";
+import { KeywordResearchReport } from "@/components/runs/KeywordResearchReport";
+import { buildKeywordReport, compareScans, isKeywordResearchOutput } from "@/lib/reports/keyword-research";
+import { previousKeywordScan } from "@/lib/reports/keyword-scans";
+import { withBase } from "@/lib/base-path";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
@@ -53,6 +57,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         ? { message: "The agent failed while running.", detail: rawError }
         : null;
   const hasReadableOutput = Boolean(output) && !runError;
+
+  // Keyword Research gets a dashboard, compared against the scan before it.
+  const keywordReport =
+    hasReadableOutput && run.agentConfig.agentSlug === "keyword-research" && isKeywordResearchOutput(output)
+      ? buildKeywordReport(output)
+      : null;
+  const previousScan = keywordReport ? await previousKeywordScan(workspaceId, run.createdAt) : null;
+  const keywordComparison = keywordReport && previousScan ? compareScans(keywordReport, previousScan.report) : null;
 
   // Stage-by-stage progress, written by the handler as it goes. Without it a
   // multi-minute pipeline is a spinner, and the QA note that "nothing in the UI
@@ -257,7 +269,23 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             </div>
           )}
 
-          {hasReadableOutput && output && (
+          {keywordReport && (
+            <>
+              <KeywordResearchReport
+                report={keywordReport}
+                comparison={keywordComparison}
+                downloadHref={withBase(`/api/runs/${runId}/report`)}
+              />
+              <details className="card">
+                <summary style={{ fontSize: 12, color: "var(--text-dim)", cursor: "pointer" }}>Raw output (JSON)</summary>
+                <pre style={{ fontSize: 11, fontFamily: "monospace", overflow: "auto", maxHeight: 400, background: "var(--surface-2)", padding: 14, borderRadius: "var(--radius)", color: "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 10 }}>
+                  {JSON.stringify(output, null, 2)}
+                </pre>
+              </details>
+            </>
+          )}
+
+          {hasReadableOutput && output && !keywordReport && (
             <div className="card">
               <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Output</h2>
 
