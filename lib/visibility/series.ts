@@ -104,20 +104,36 @@ export async function citationAuthority(
   const since = new Date();
   since.setUTCDate(since.getUTCDate() - (opts.days ?? 30));
 
+  // Grouped by domain AND isOwned, not by domain with _max(isOwned).
+  //
+  // Prisma's types accept `_max` on a Bool column and Postgres has no
+  // max(boolean), so that form typechecks and then throws 42883 at runtime —
+  // it took this panel and every capture run's final step down with it, after
+  // the run had already spent its money. Grouping on the flag instead needs no
+  // aggregate over it, and merging in code also survives the case where one
+  // domain somehow carries both values.
   const grouped = await prisma.citation.groupBy({
-    by: ["domain"],
+    by: ["domain", "isOwned"],
     where: { workspaceId, capturedAt: { gte: since } },
     _count: { _all: true },
-    _max: { isOwned: true },
-    orderBy: { _count: { domain: "desc" } },
-    take: opts.limit ?? 20,
   });
 
-  return grouped.map((g) => ({
-    domain: g.domain,
-    citations: g._count._all,
-    isOwned: Boolean(g._max.isOwned),
-  }));
+  const byDomain = new Map<string, { domain: string; citations: number; isOwned: boolean }>();
+  for (const row of grouped) {
+    const existing = byDomain.get(row.domain);
+    if (existing) {
+      existing.citations += row._count._all;
+      existing.isOwned = existing.isOwned || row.isOwned;
+    } else {
+      byDomain.set(row.domain, { domain: row.domain, citations: row._count._all, isOwned: row.isOwned });
+    }
+  }
+
+  // Sorting and limiting move into code for the same reason: the ordering has
+  // to apply to the merged totals, not to the per-flag groups.
+  return [...byDomain.values()]
+    .sort((a, b) => b.citations - a.citations || a.domain.localeCompare(b.domain))
+    .slice(0, opts.limit ?? 20);
 }
 
 /** Per-engine visibility on the latest day that has figures. */

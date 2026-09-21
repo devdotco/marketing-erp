@@ -96,7 +96,7 @@ export async function captureVisibility(
   if (prompts.length === 0) {
     throw new AgentInputError(
       "No prompts are being tracked, so there is nothing to ask.",
-      "Add the questions your customers ask an assistant under AI Visibility → Prompts, then run this again.",
+      "Open AI Visibility → Prompts and add the questions your customers ask an assistant, or press \"Propose prompts for me\" to start from your own search demand. A scheduled run will not pick prompts for you — choosing what to measure is also choosing what to spend.",
       "no_tracked_prompts",
     );
   }

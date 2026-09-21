@@ -52,7 +52,17 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
   // its first run a dead end is a poor trade when we can propose a list from
   // its own Search Console demand. Seeding is one-time: it only fires when
   // there are no prompts at all, never on top of a list someone curated.
-  if (autoSuggest) {
+  //
+  // And only when a PERSON started the run. This agent used to be a single
+  // cheap model call; it is now twenty prompts against every connected engine.
+  // Any workspace that already had it enabled on a schedule would otherwise
+  // wake up to a recurring daily spend on its own key that nobody chose —
+  // seeded, scheduled and invisible until the provider invoice. A scheduled
+  // run against an empty prompt list refuses instead, which is legible and
+  // costs nothing.
+  const startedByAPerson = run.triggeredBy !== "schedule";
+
+  if (autoSuggest && startedByAPerson) {
     const existing = await prisma.trackedPrompt.count({ where: { workspaceId, active: true } });
     if (existing === 0) {
       const suggested = await suggestPrompts(workspaceId, { count: 20 });

@@ -8,18 +8,24 @@
  * then throw — or worse, quietly return the wrong rows — only when a database
  * is on the other end.
  *
- * deriveDay is called with an explicit brand rather than letting it resolve one.
- * That is a harness accommodation, not a shortcut: resolveBrand issues two
- * queries through Promise.all, and the PGlite socket server used for local runs
- * serves one at a time. Every query this file is actually testing still runs.
+ * Two notes on running this against PGlite locally, both of which cost an hour
+ * to find and neither of which is a product defect:
+ *
+ *  - Use the app's own prisma singleton, never a second `new PrismaClient()`.
+ *    Two clients are two pools are two connections, and PGlite's socket server
+ *    serves one at a time — the second client's first query fails as "can't
+ *    reach database server", which reads like the server died.
+ *  - deriveDay is given an explicit brand rather than resolving one, because
+ *    resolveBrand issues two queries through Promise.all. Every query this
+ *    file actually tests still runs.
+ *
+ * Against a real Postgres neither matters.
  */
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { deriveDay } from "@/lib/visibility/capture";
 import type { BrandIdentity } from "@/lib/visibility/brand";
 import { recordObservations } from "@/lib/visibility/observations";
 import { citationAuthority, readSeries, shareOfVoice, visibilityByEngine } from "@/lib/visibility/series";
-
-const prisma = new PrismaClient();
 
 let failures = 0;
 const check = (name: string, cond: boolean, got?: unknown) => {
@@ -147,15 +153,6 @@ async function main() {
   check("an overwrite replaces the day's value", overwritten.points.at(-1)?.value === 99, overwritten.points);
   check("an overwrite does not add a second point for the day", overwritten.points.length === 1, overwritten.points);
 
-  // Per-day capture uniqueness: the constraint a retry depends on.
-  let duplicateRejected = false;
-  try {
-    await mk(a.id, p1.id, "CLAUDE", DAY, { mentioned: true });
-  } catch {
-    duplicateRejected = true;
-  }
-  check("a second capture for the same prompt/engine/day is rejected", duplicateRejected);
-
   // ── Two days, so the delta has something to measure ──────────────────────
   await mk(a.id, p1.id, "CLAUDE", DAY2, { mentioned: true, rank: 1, sentiment: "POSITIVE" });
   await mk(a.id, p2.id, "CLAUDE", DAY2, { mentioned: true, rank: 1, sentiment: "POSITIVE" });
@@ -168,6 +165,22 @@ async function main() {
   await prisma.workspace.deleteMany({ where: { id: { in: [a.id, b.id] } } });
   const orphans = await prisma.observation.count({ where: { workspaceId: a.id } });
   check("deleting a workspace cascades its observations away", orphans === 0, orphans);
+
+  // LAST, deliberately: per-day capture uniqueness — the constraint every
+  // retry depends on. It is last because provoking it leaves PGlite's socket
+  // bridge with a closed connection (real Postgres recovers and carries on),
+  // so anything after it would fail for a reason that has nothing to do with
+  // the code under test.
+  const c = await prisma.workspace.create({ data: { name: "Dup QA", slug: `dup-${Date.now()}` } });
+  const dp = await prisma.trackedPrompt.create({ data: { workspaceId: c.id, text: "dup?" } });
+  await mk(c.id, dp.id, "CLAUDE", DAY, { mentioned: true });
+  let duplicateRejected = false;
+  try {
+    await mk(c.id, dp.id, "CLAUDE", DAY, { mentioned: true });
+  } catch {
+    duplicateRejected = true;
+  }
+  check("a second capture for the same prompt/engine/day is rejected", duplicateRejected);
 }
 
 main()
