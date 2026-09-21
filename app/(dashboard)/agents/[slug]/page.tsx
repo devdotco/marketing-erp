@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";
 import { AgentToggle } from "@/components/ui/AgentToggle";
+import { GroundingBadge } from "@/components/ui/GroundingBadge";
 import { RunModal } from "@/components/ui/RunModal";
 import { ScheduleEditor } from "@/components/ui/ScheduleEditor";
 import { checkModelsAvailable } from "@/lib/ai/models";
@@ -107,6 +108,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
               {isActive ? "Live" : "Coming soon"}
             </span>
             {isEnabled && <span className="badge badge-completed">Enabled</span>}
+            <GroundingBadge agentSlug={slug} />
           </div>
           <p style={{ fontSize: 14, color: "var(--text-muted)", maxWidth: 600, lineHeight: 1.65 }}>
             {agent.description}
