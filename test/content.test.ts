@@ -54,6 +54,7 @@ import { buildApolloSequencePayload } from "@/lib/integrations/apollo";
 import {
   isApolloDataStale,
   planApolloLookups,
+  buildSourceSignalBlock,
   firmographicFitNotes,
   type ApolloLookupCandidate,
 } from "@/lib/agent-handlers/outbound-strategist";
@@ -68,6 +69,23 @@ import {
   dedupeNewProspects,
 } from "@/lib/agent-handlers/outbound-play-config";
 import { planScoutChaining, planStrategistChaining } from "@/lib/agent-handlers/outbound-chain-plan";
+import {
+  parseSourcingMode,
+  planFormDDailyTick,
+  FORM_D_INDUSTRY_GROUPS,
+  type FormDTickPlay,
+} from "@/lib/agent-handlers/outbound-play-config";
+import {
+  looksLikeEntityName,
+  filterFormDIssuers,
+  formDDateWindow,
+  formDSignal,
+  parseFormDSearchResults,
+  parseFormDXml,
+  selectFormDContacts,
+  type FormDFilingRef,
+  type FormDIssuer,
+} from "@/lib/integrations/sec-edgar";
 import {
   buildOutboundEmailLeadBody,
   activateOutboundEmailDelivery,
@@ -3139,6 +3157,314 @@ check(
     }
     check("ads search: an unrecognised failure stays a plain error for liveCallFailed to wrap", err instanceof GoogleAdsApiError && !(err instanceof AgentInputError) && /Google Ads API 502/.test((err as Error).message), err);
   }
+}
+// ---------------------------------------------------------------------------
+// SEC Form D capital-raise sourcing (lib/integrations/sec-edgar.ts and the play-config half in
+// outbound-play-config.ts) — parsing, filtering, signatory selection and the daily tick's skip
+// rules. Pure: the fixtures below are trimmed copies of a real EDGAR full-text search response
+// and a real Form D primary document (accession 0001213900-26-101361, filed 2026-09-18), so the
+// parser is checked against the shapes EDGAR actually serves rather than an invented one.
+// ---------------------------------------------------------------------------
+{
+  const searchBody = {
+    hits: {
+      total: { value: 2, relation: "eq" },
+      hits: [
+        {
+          _source: {
+            ciks: ["0002074867"],
+            display_names: ["1st American Nuclear Co.  (CIK 0002074867)"],
+            root_forms: ["D"],
+            file_date: "2026-09-18",
+            biz_states: ["IN"],
+            form: "D",
+            adsh: "0001213900-26-101361",
+          },
+        },
+        {
+          _source: {
+            ciks: ["0002156274"],
+            display_names: ["Anchored Capital Investment Group LLC  (CIK 0002156274)"],
+            root_forms: ["D"],
+            file_date: "2026-09-18",
+            biz_states: ["WY"],
+            form: "D/A",
+            adsh: "0002156274-26-000001",
+          },
+        },
+        { _source: { ciks: [], display_names: ["Broken row"], form: "D", adsh: "" } },
+      ],
+    },
+  };
+
+  const refs = parseFormDSearchResults(searchBody, false);
+  check("parseFormDSearchResults: amendments are excluded by default", refs.length === 1 && refs[0].form === "D", refs);
+  check(
+    "parseFormDSearchResults: the CIK is unpadded for the Archives path, which 404s on the zero-padded form",
+    refs[0].cik === "2074867",
+    refs[0],
+  );
+  check("parseFormDSearchResults: the '(CIK ...)' suffix is stripped from the company name", refs[0].companyName === "1st American Nuclear Co.", refs[0]);
+  check("parseFormDSearchResults: the filed date and business state survive", refs[0].filedAt === "2026-09-18" && refs[0].businessState === "IN", refs[0]);
+
+  const withAmendments = parseFormDSearchResults(searchBody, true);
+  check("parseFormDSearchResults: D/A is included when the play asks for amendments", withAmendments.length === 2, withAmendments);
+  check("parseFormDSearchResults: a row with no CIK or accession is skipped, not thrown on", withAmendments.every((r) => r.cik && r.accession), withAmendments);
+  check("parseFormDSearchResults: a malformed body yields an empty list", parseFormDSearchResults({ nope: true }, false).length === 0, null);
+
+  // Trimmed from the real filing — same tags, same nesting, same order.
+  const formDXml = `<?xml version="1.0"?>
+<edgarSubmission>
+  <submissionType>D</submissionType>
+  <primaryIssuer>
+    <cik>0002074867</cik>
+    <entityName>1st American Nuclear Co.</entityName>
+    <issuerAddress>
+      <street1>310 E. 96TH STREET, SUITE 100</street1>
+      <city>INDIANAPOLIS</city>
+      <stateOrCountry>IN</stateOrCountry>
+      <zipCode>46240</zipCode>
+    </issuerAddress>
+    <issuerPhoneNumber>844 813 2626</issuerPhoneNumber>
+    <jurisdictionOfInc>DELAWARE</jurisdictionOfInc>
+    <entityType>Corporation</entityType>
+    <yearOfInc><withinFiveYears>true</withinFiveYears><value>2025</value></yearOfInc>
+  </primaryIssuer>
+  <relatedPersonsList>
+    <relatedPersonInfo>
+      <relatedPersonName><firstName>Michael</firstName><lastName>Reinboth</lastName></relatedPersonName>
+      <relatedPersonAddress><city>Indianapolis</city><stateOrCountry>IN</stateOrCountry></relatedPersonAddress>
+      <relatedPersonRelationshipList><relationship>Executive Officer</relationship></relatedPersonRelationshipList>
+      <relationshipClarification>Chief Executive Officer</relationshipClarification>
+    </relatedPersonInfo>
+    <relatedPersonInfo>
+      <relatedPersonName><firstName>Nicholas</firstName><lastName>Burnett</lastName></relatedPersonName>
+      <relatedPersonAddress><city>Indianapolis</city><stateOrCountry>IN</stateOrCountry></relatedPersonAddress>
+      <relatedPersonRelationshipList><relationship>Director</relationship></relatedPersonRelationshipList>
+      <relationshipClarification>Chief Operating Officer</relationshipClarification>
+    </relatedPersonInfo>
+  </relatedPersonsList>
+  <offeringData>
+    <industryGroup><industryGroupType>Other Energy</industryGroupType></industryGroup>
+    <issuerSize><revenueRange>Decline to Disclose</revenueRange></issuerSize>
+    <typeOfFiling>
+      <newOrAmendment><isAmendment>false</isAmendment></newOrAmendment>
+      <dateOfFirstSale><value>2026-09-03</value></dateOfFirstSale>
+    </typeOfFiling>
+    <minimumInvestmentAccepted>1000000</minimumInvestmentAccepted>
+    <offeringSalesAmounts>
+      <totalOfferingAmount>25000000</totalOfferingAmount>
+      <totalAmountSold>1000000</totalAmountSold>
+      <totalRemaining>24000000</totalRemaining>
+    </offeringSalesAmounts>
+  </offeringData>
+</edgarSubmission>`;
+
+  const ref: FormDFilingRef = {
+    cik: "2074867",
+    accession: "0001213900-26-101361",
+    companyName: "1st American Nuclear Co.",
+    filedAt: "2026-09-18",
+    businessState: "IN",
+    form: "D",
+  };
+  const issuer = parseFormDXml(formDXml, ref);
+
+  check("parseFormDXml: issuer identity and address", issuer.entityName === "1st American Nuclear Co." && issuer.state === "IN" && issuer.city === "INDIANAPOLIS", issuer);
+  check("parseFormDXml: offering amounts are numbers", issuer.totalOfferingAmount === 25_000_000 && issuer.totalAmountSold === 1_000_000 && issuer.totalRemaining === 24_000_000, issuer);
+  check("parseFormDXml: industry group comes from the offering block", issuer.industryGroup === "Other Energy", issuer);
+  check("parseFormDXml: a non-fund filing has no investmentFundType", issuer.investmentFundType === null, issuer);
+  check("parseFormDXml: withinFiveYears is read as a boolean, and the year kept", issuer.incorporatedWithinFiveYears === true && issuer.yearOfInc === "2025", issuer);
+  check(
+    "parseFormDXml: minimumInvestmentAccepted is not confused with the offering total (both are bare numbers in sibling blocks)",
+    issuer.minimumInvestmentAccepted === 1_000_000 && issuer.totalOfferingAmount === 25_000_000,
+    issuer,
+  );
+  check("parseFormDXml: each related person keeps their own name, role and clarification", issuer.relatedPersons.length === 2
+    && issuer.relatedPersons[0].firstName === "Michael"
+    && issuer.relatedPersons[0].relationships.join() === "Executive Officer"
+    && issuer.relatedPersons[0].titleClarification === "Chief Executive Officer"
+    && issuer.relatedPersons[1].lastName === "Burnett"
+    && issuer.relatedPersons[1].relationships.join() === "Director", issuer.relatedPersons);
+
+  // "Indefinite" is a legal answer to the offering-amount question; Number() would make it 0 and
+  // every minimum-size filter would then reject the filing as if nothing was being raised.
+  const indefinite = parseFormDXml(
+    formDXml.replace("<totalOfferingAmount>25000000</totalOfferingAmount>", "<totalOfferingAmount>Indefinite</totalOfferingAmount>"),
+    ref,
+  );
+  check("parseFormDXml: an 'Indefinite' offering amount parses to null, not 0", indefinite.totalOfferingAmount === null && indefinite.rawOfferingAmount === "Indefinite", indefinite);
+
+  const baseRules = parsePlayConfig({}).capitalRaise;
+  const noExclusions = { exclusions: [] as string[] };
+
+  const fund: FormDIssuer = { ...issuer, entityName: "Anchored Capital Fund II LP", industryGroup: "Pooled Investment Fund", investmentFundType: "Venture Capital Fund" };
+  const funds = filterFormDIssuers([issuer, fund], { ...baseRules, enabled: true }, noExclusions);
+  check("filterFormDIssuers: pooled investment funds are excluded by default", funds.kept.length === 1 && funds.kept[0].entityName === issuer.entityName, funds);
+  check("filterFormDIssuers: the rejection is attributed to the fund rule, so an empty run can explain itself", funds.rejected.pooled_investment_fund === 1, funds.rejected);
+
+  const fundsAllowed = filterFormDIssuers([issuer, fund], { ...baseRules, excludePooledInvestmentFunds: false }, noExclusions);
+  check("filterFormDIssuers: a play that sells to funds can turn the exclusion off", fundsAllowed.kept.length === 2, fundsAllowed);
+
+  const tooSmall = filterFormDIssuers([issuer], { ...baseRules, minOfferingUsd: 50_000_000 }, noExclusions);
+  check("filterFormDIssuers: an offering under the minimum is rejected", tooSmall.kept.length === 0 && tooSmall.rejected.offering_too_small === 1, tooSmall);
+
+  const tooBig = filterFormDIssuers([issuer], { ...baseRules, maxOfferingUsd: 5_000_000 }, noExclusions);
+  check("filterFormDIssuers: an offering over the maximum is rejected", tooBig.kept.length === 0 && tooBig.rejected.offering_too_large === 1, tooBig);
+
+  const indefinitePasses = filterFormDIssuers([indefinite], { ...baseRules, minOfferingUsd: 50_000_000 }, noExclusions);
+  check("filterFormDIssuers: an 'Indefinite' amount passes the size gates rather than being silently dropped", indefinitePasses.kept.length === 1, indefinitePasses);
+
+  const wrongState = filterFormDIssuers([issuer], { ...baseRules, states: ["ca", "NY"] }, noExclusions);
+  check("filterFormDIssuers: a state filter rejects an issuer outside it", wrongState.kept.length === 0 && wrongState.rejected.state === 1, wrongState);
+  const rightState = filterFormDIssuers([issuer], { ...baseRules, states: ["in"] }, noExclusions);
+  check("filterFormDIssuers: state matching is case-insensitive", rightState.kept.length === 1, rightState);
+
+  const byIndustry = filterFormDIssuers([issuer], { ...baseRules, industryGroups: ["Other Energy"] }, noExclusions);
+  check("filterFormDIssuers: an industry group filter keeps a match", byIndustry.kept.length === 1, byIndustry);
+  const ampersand = filterFormDIssuers(
+    [{ ...issuer, industryGroup: "Other Banking and Financial Services" }],
+    { ...baseRules, industryGroups: ["Other Banking & Financial Services"] },
+    noExclusions,
+  );
+  check("filterFormDIssuers: '&' typed in config still matches the taxonomy's 'and'", ampersand.kept.length === 1, ampersand);
+
+  const nothingSold = filterFormDIssuers([{ ...issuer, totalAmountSold: 0 }], { ...baseRules, requireAmountSold: true }, noExclusions);
+  check("filterFormDIssuers: requireAmountSold rejects an offering with nothing taken in yet", nothingSold.kept.length === 0 && nothingSold.rejected.nothing_sold_yet === 1, nothingSold);
+
+  const old = filterFormDIssuers([{ ...issuer, incorporatedWithinFiveYears: false }], { ...baseRules, onlyRecentlyIncorporated: true }, noExclusions);
+  check("filterFormDIssuers: onlyRecentlyIncorporated rejects an older company", old.kept.length === 0 && old.rejected.not_recently_incorporated === 1, old);
+
+  const excluded = filterFormDIssuers([issuer], baseRules, { exclusions: ["1st american"] });
+  check("filterFormDIssuers: the play's own exclusion list applies to issuer names, case-insensitively", excluded.kept.length === 0 && excluded.rejected.excluded_by_play === 1, excluded);
+
+  const nameless = filterFormDIssuers([{ ...issuer, relatedPersons: [] }], baseRules, noExclusions);
+  check("filterFormDIssuers: an issuer with no named signatories is dropped — there is no one to contact", nameless.kept.length === 0 && nameless.rejected.no_named_contacts === 1, nameless);
+
+  check("FORM_D_INDUSTRY_GROUPS: the taxonomy is spelled the way filings spell it — 'and', never '&'", FORM_D_INDUSTRY_GROUPS.every((g) => !g.includes("&")) && FORM_D_INDUSTRY_GROUPS.includes("Oil and Gas"), null);
+
+  // Signatory selection — which names are worth an Apollo credit, best first.
+  const officersOnly = selectFormDContacts([issuer], { titles: [], relationships: ["Executive Officer"], perIssuer: 5, cap: 10 });
+  check("selectFormDContacts: only the configured relationships are returned", officersOnly.length === 1 && officersOnly[0].lastName === "Reinboth", officersOnly);
+
+  const bothRoles = selectFormDContacts([issuer], { titles: [], relationships: ["Executive Officer", "Director"], perIssuer: 5, cap: 10 });
+  check("selectFormDContacts: executive officers rank above directors", bothRoles.length === 2 && bothRoles[0].lastName === "Reinboth", bothRoles);
+
+  const titleRanked = selectFormDContacts([issuer], { titles: ["Chief Operating Officer"], relationships: ["Executive Officer", "Director"], perIssuer: 5, cap: 10 });
+  check("selectFormDContacts: a signatory whose Form D title matches the play's ICP titles outranks a plain officer", titleRanked[0].lastName === "Burnett", titleRanked);
+
+  const perIssuerCapped = selectFormDContacts([issuer], { titles: [], relationships: [], perIssuer: 1, cap: 10 });
+  check("selectFormDContacts: perIssuer bounds how many people one company costs", perIssuerCapped.length === 1, perIssuerCapped);
+
+  const capped = selectFormDContacts([issuer, { ...issuer, entityName: "Second Co" }], { titles: [], relationships: [], perIssuer: 2, cap: 3 });
+  check("selectFormDContacts: the overall cap bounds the run's Apollo spend", capped.length === 3, capped);
+  check("selectFormDContacts: each candidate carries its own issuer, so the signal can't be attributed to the wrong company", capped[0].organizationName === "1st American Nuclear Co." && capped[2].organizationName === "Second Co", capped);
+
+  const nameless2 = selectFormDContacts([{ ...issuer, relatedPersons: [{ firstName: "", lastName: "Doe", relationships: ["Executive Officer"], titleClarification: "" }] }], { titles: [], relationships: [], perIssuer: 2, cap: 5 });
+  check("selectFormDContacts: a person with no first or last name is skipped — Apollo can't match on a half name", nameless2.length === 0, nameless2);
+
+  // Entity signatories — all three encodings seen in live filings on 2026-09-21. Each would cost
+  // an Apollo credit to discover it isn't a person.
+  check("looksLikeEntityName: an entity duplicated into both name fields", looksLikeEntityName("WM 96 MM LLC", "WM 96 MM LLC"), null);
+  check("looksLikeEntityName: a placeholder first name with the entity in the last", looksLikeEntityName("-", "Rose's Restaurant Group, LLC"), null);
+  check("looksLikeEntityName: a company name split across both fields", looksLikeEntityName("Marble", "Partners"), null);
+  check("looksLikeEntityName: other legal suffixes are caught", looksLikeEntityName("Acme", "Holdings") && looksLikeEntityName("VTX", "Ltd") && looksLikeEntityName("Summit", "Ventures"), null);
+  check("looksLikeEntityName: an empty name field is treated as unusable", looksLikeEntityName("", "Doe") && looksLikeEntityName("Jane", "  "), null);
+  check(
+    "looksLikeEntityName: real people are not discarded, including surnames that merely contain an entity token",
+    !looksLikeEntityName("Michael", "Reinboth")
+      && !looksLikeEntityName("Aaron", "Silverman")
+      && !looksLikeEntityName("Robert", "Brumley")
+      && !looksLikeEntityName("Ltitia", "Corporan")
+      && !looksLikeEntityName("Jean-Luc", "Lapointe"),
+    null,
+  );
+
+  const withEntity = selectFormDContacts(
+    [
+      {
+        ...issuer,
+        relatedPersons: [
+          { firstName: "WM 96 MM LLC", lastName: "WM 96 MM LLC", relationships: ["Executive Officer"], titleClarification: "Managing Member" },
+          { firstName: "Scott", lastName: "Whitworth", relationships: ["Executive Officer"], titleClarification: "" },
+        ],
+      },
+    ],
+    { titles: [], relationships: ["Executive Officer"], perIssuer: 5, cap: 10 },
+  );
+  check("selectFormDContacts: an entity filed as a related person never reaches Apollo", withEntity.length === 1 && withEntity[0].lastName === "Whitworth", withEntity);
+
+  // The signal string is what the Strategist scores timing on.
+  const signal = formDSignal(issuer);
+  check("formDSignal: names the filing, the date and the size", signal.primarySignal.includes("Form D") && signal.primarySignal.includes("2026-09-18") && signal.primarySignal.includes("$25M"), signal);
+  check("formDSignal: reports how much has actually been sold", signal.primarySignal.includes("$1M sold to date"), signal);
+  check("formDSignal: carries the accession so the claim is checkable", signal.additionalSignals.some((s) => s.includes("0001213900-26-101361")), signal);
+  check("formDSignal: 'Decline to Disclose' is not reported as a revenue figure", !signal.additionalSignals.some((s) => s.includes("Decline to Disclose")), signal);
+  const indefiniteSignal = formDSignal(indefinite);
+  check("formDSignal: an indefinite raise is described, not printed as $NaN", !indefiniteSignal.primarySignal.includes("NaN") && indefiniteSignal.primarySignal.includes("indefinite"), indefiniteSignal);
+
+  const window = formDDateWindow(30, new Date("2026-09-21T12:00:00Z"));
+  check("formDDateWindow: spans the lookback and ends today", window.startDate === "2026-08-22" && window.endDate === "2026-09-21", window);
+
+  // Sourcing mode — the Run modal posts a label, the cron posts the key, saved config may hold either.
+  check("parseSourcingMode: the Run modal's label resolves to capital raise", parseSourcingMode("Capital raise — companies that just filed an SEC Form D") === "capital_raise", null);
+  check("parseSourcingMode: the cron's internal key resolves to the same mode", parseSourcingMode("capital_raise") === "capital_raise", null);
+  check("parseSourcingMode: the default mode is unchanged ICP search", parseSourcingMode("ICP search (Apollo)") === "icp_search", null);
+  check("parseSourcingMode: an absent or unrecognised value falls back to ICP search, never to the billable new path", parseSourcingMode(undefined) === "icp_search" && parseSourcingMode("nonsense") === "icp_search", null);
+
+  // Daily tick — which plays app/api/cron/outbound-form-d enqueues.
+  const armedConfig = parsePlayConfig({ capitalRaise: { enabled: true, dailyTick: true }, dailySourcingCap: 25 });
+  const tickPlays: FormDTickPlay[] = [
+    { slug: "armed", name: "Armed", enabled: true, config: armedConfig },
+    { slug: "paused-play", name: "Paused", enabled: false, config: armedConfig },
+    { slug: "tick-off", name: "Tick off", enabled: true, config: parsePlayConfig({ capitalRaise: { enabled: true, dailyTick: false } }) },
+    { slug: "cr-off", name: "Capital raise off", enabled: true, config: parsePlayConfig({}) },
+  ];
+
+  const plan = planFormDDailyTick(tickPlays, new Set());
+  check("planFormDDailyTick: only an enabled play with both switches on is due", plan.due.length === 1 && plan.due[0].playSlug === "armed", plan);
+  check("planFormDDailyTick: the run is sized by the play's own daily sourcing cap", plan.due[0].maxProspects === 25, plan.due);
+  check("planFormDDailyTick: every skip says which rule skipped it", plan.skipped.length === 3
+    && plan.skipped.some((s) => s.playSlug === "paused-play" && s.reason === "play_disabled")
+    && plan.skipped.some((s) => s.playSlug === "tick-off" && s.reason === "daily_tick_disabled")
+    && plan.skipped.some((s) => s.playSlug === "cr-off" && s.reason === "capital_raise_disabled"), plan.skipped);
+
+  const deduped = planFormDDailyTick(tickPlays, new Set(["armed"]));
+  check("planFormDDailyTick: a play that already ran inside the window is not sourced (and billed) twice", deduped.due.length === 0 && deduped.skipped.some((s) => s.reason === "already_ran_today"), deduped);
+
+  check("parsePlayConfig: a play saved before capital-raise sourcing existed gets the full defaults, not an empty object", armedConfig.capitalRaise.lookbackDays === 30 && armedConfig.capitalRaise.excludePooledInvestmentFunds === true && armedConfig.capitalRaise.contactRelationships.join() === "Executive Officer", armedConfig.capitalRaise);
+  check("parsePlayConfig: capital-raise sourcing is off unless a play opts in", parsePlayConfig({}).capitalRaise.enabled === false && parsePlayConfig({}).capitalRaise.dailyTick === false, null);
+
+  // The Scout -> Strategist hand-off. Without this block the Form D filing is dropped at the
+  // boundary (OutboundProspect stores only the contact columns) and the scoring prompt — which
+  // forbids asserting a funding round it wasn't given — would score timing on nothing.
+  const sourceSignal = {
+    source: "sec_form_d",
+    primarySignal: "Filed SEC Form D on 2026-09-18 — raising $25M under Regulation D, $1M sold to date",
+    additionalSignals: ["$24M of the offering still open", "SEC accession 0001213900-26-101361"],
+    secFormD: {
+      cik: "2074867",
+      accession: "0001213900-26-101361",
+      filedAt: "2026-09-18",
+      offeringAmount: 25_000_000,
+      amountSold: 1_000_000,
+      industryGroup: "Other Energy",
+      url: "https://www.sec.gov/Archives/edgar/data/2074867/000121390026101361/primary_doc.xml",
+    },
+  };
+  const block = buildSourceSignalBlock(sourceSignal);
+  check("buildSourceSignalBlock: the filing reaches the scoring prompt as verified, citable data", !!block && block.includes("Verified SEC EDGAR data") && block.includes("$25M") && block.includes("2026-09-18"), block);
+  check("buildSourceSignalBlock: the amounts are given as numbers the model can reason about", !!block && block.includes("25000000") && block.includes("1000000"), block);
+  check("buildSourceSignalBlock: the filing is linked so any cited fact is checkable", !!block && block.includes("primary_doc.xml"), block);
+  check("buildSourceSignalBlock: the model is told where the public record stops", !!block && block.includes("valuation") && block.includes("inferredAssumptions"), block);
+  check("buildSourceSignalBlock: it is tied to the timing and signal scores, which is the point of sourcing this way", !!block && block.includes("timing"), block);
+  check(
+    "buildSourceSignalBlock: an ICP-search prospect adds nothing to the prompt, leaving it byte-identical to before this feature",
+    buildSourceSignalBlock(null) === null && buildSourceSignalBlock(undefined) === null && buildSourceSignalBlock({ source: "something_else" }) === null,
+    null,
+  );
+  const sparse = buildSourceSignalBlock({ source: "sec_form_d", secFormD: {} });
+  check("buildSourceSignalBlock: a filing with no parsed amounts still produces a usable block rather than 'undefined' text", !!sparse && !sparse.includes("undefined") && !sparse.includes("null"), sparse);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

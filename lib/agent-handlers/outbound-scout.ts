@@ -2,13 +2,15 @@ import { decryptCredentials } from "@/lib/crypto";
 import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { apolloPeopleSearch, apolloMatchPerson } from "@/lib/integrations/apollo";
-import { parsePlayConfig, buildApolloPeopleSearchFilters, selectPeopleToReveal, dedupeNewProspects, type OutboundPlayConfig } from "./outbound-play-config";
+import { parsePlayConfig, buildApolloPeopleSearchFilters, selectPeopleToReveal, dedupeNewProspects, parseSourcingMode, type OutboundPlayConfig } from "./outbound-play-config";
+import { sourceCapitalRaiseProspects } from "./outbound-scout-capital-raise";
 
 /** People that api_search matched, capped before we spend a credit revealing
  * each one's email. api_search itself has no per-record cost, but the reveal
@@ -98,6 +100,26 @@ Generate realistic but fictional companies and contacts. Vary industries, compan
   return { simOutput, costUsd };
 }
 
+/** The sourcing-time signal worth persisting onto OutboundProspect.sourceSignal, or undefined when
+ * this prospect wasn't sourced on a discrete event. Only the SEC Form D path produces one today:
+ * the Apollo ICP-search path's `primarySignal` is a restatement of the search that found them
+ * ("Sourced via Apollo.io — VP Engineering at Acme"), not an independent, citable fact, and
+ * storing that would dress a filter up as evidence in the Strategist's prompt. */
+function buildSourceSignal(prospect: Record<string, unknown>): Prisma.InputJsonValue | undefined {
+  const secFormD = prospect.secFormD;
+  if (!secFormD || typeof secFormD !== "object") return undefined;
+  // Round-tripped through JSON for the same reason the Strategist does it with `intelligence`:
+  // Prisma's Json input type won't accept a bare Record<string, unknown>.
+  return JSON.parse(
+    JSON.stringify({
+      source: "sec_form_d",
+      primarySignal: String(prospect.primarySignal ?? ""),
+      additionalSignals: Array.isArray(prospect.additionalSignals) ? prospect.additionalSignals : [],
+      secFormD,
+    }),
+  ) as Prisma.InputJsonValue;
+}
+
 export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
 
@@ -152,11 +174,30 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
 
   let output: Record<string, unknown>;
   let costUsd = 0;
-  // Only the live Apollo path ever gets persisted to OutboundProspect below — simulated prospects
-  // are clearly labelled (source: "simulation") and never written as real pipeline rows.
-  const isLive = Boolean(apolloIntegration);
+  // Only a path that produced real, reachable contacts gets persisted to OutboundProspect below.
+  // Simulated prospects (source: "simulation") and Form D accounts sourced without Apollo
+  // (source: "sec_form_d_accounts_only") are clearly labelled and never written as pipeline rows.
+  let isLive = Boolean(apolloIntegration);
 
-  if (apolloIntegration) {
+  // Which population to source from: the play's ICP as an Apollo People Search (the original
+  // behaviour, still the default), or companies that just filed an SEC Form D and therefore have
+  // money they didn't have last month. See outbound-scout-capital-raise.ts.
+  const sourcingMode = parseSourcingMode(config.sourcingMode);
+
+  if (sourcingMode === "capital_raise") {
+    // ── SEC Form D path ─────────────────────────────────────────────────────
+    // No Claude call here at all: EDGAR is structured data, so the signal is read rather than
+    // written, and this branch costs $0 in model spend whether or not Apollo is connected.
+    const result = await sourceCapitalRaiseProspects({
+      workspaceId,
+      playName: play.name,
+      playConfig,
+      maxProspects,
+      apolloApiKeyCiphertext: apolloIntegration?.encryptedCredentials ?? null,
+    });
+    output = result.output;
+    isLive = result.isLive;
+  } else if (apolloIntegration) {
     // ── Real Apollo API path ────────────────────────────────────────────────
     // Auth is an `x-api-key` header, not an `api_key` body field — Apollo
     // rejects the latter. See lib/integrations/catalog.ts (field key "apiKey")
@@ -310,6 +351,11 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
             company: String(p.company ?? ""),
             companyDomain: (p.companyDomain as string | undefined) || undefined,
             status: "PENDING",
+            // The signal this prospect was sourced ON, so the Strategist can cite it as verified
+            // source data rather than being handed a bare contact record and forbidden (rightly)
+            // from asserting a funding round it wasn't given. Null for ICP search, which sources
+            // on firmographic filters rather than on a discrete, datable event.
+            sourceSignal: buildSourceSignal(p),
           },
           // Sourcing never overwrites a prospect that's already further along the pipeline.
           update: {},
@@ -328,6 +374,7 @@ export const outboundScoutHandler: AgentHandler = async (run, updateStatus) => {
   output.workspaceId = workspaceId;
   output.playSlug = playSlug;
   output.playName = play.name;
+  output.sourcingMode = sourcingMode;
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {

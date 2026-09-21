@@ -552,8 +552,12 @@ export const AGENTS: Agent[] = [
     suite: "outbound",
     suiteName: "Outbound Engine",
     status: "ACTIVE",
-    description: "Queries Apollo.io People Search with each play's own ICP filters and buying signal weights. Returns new, deduplicated accounts per play per day, ready for scoring.",
-    integrations: ["Apollo.io"],
+    description: "Queries Apollo.io People Search with each play's own ICP filters and buying signal weights — or sources from SEC EDGAR instead, finding companies that just filed a Form D and are actively raising capital. Returns new, deduplicated accounts per play per day, ready for scoring.",
+    // "no key required" is part of the label because both places that render this list (the agent
+    // detail card and the configure page's "Required integrations:" line) link straight to
+    // /integrations, where there is no SEC connector to find — EDGAR is public and keyless, it
+    // just needs SEC_EDGAR_USER_AGENT set on the deployment.
+    integrations: ["Apollo.io", "SEC EDGAR (public — no key required)"],
     companions: ["outbound-strategist"],
     cadence: "Daily",
   },
