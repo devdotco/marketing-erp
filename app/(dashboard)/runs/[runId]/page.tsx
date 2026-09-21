@@ -54,7 +54,16 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const rawError = output?.["error"];
   const runError =
     rawError && typeof rawError === "object"
-      ? (rawError as { code?: string; message?: string; hint?: string; retryable?: boolean; attempts?: number; detail?: string })
+      ? (rawError as {
+          code?: string;
+          message?: string;
+          hint?: string;
+          retryable?: boolean;
+          attempts?: number;
+          detail?: string;
+          /** Optional: runs stored before fault attribution existed have none. */
+          cause?: "input" | "account" | "system";
+        })
       : typeof rawError === "string"
         ? { message: "The agent failed while running.", detail: rawError }
         : null;
@@ -179,8 +188,20 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                   {runError.hint}
                 </p>
               )}
+              {/* What follows the hint depends on whose fault it was. The old
+                  copy told everyone "nothing you entered caused this" — which
+                  for a field the person chose themselves is untrue, and is the
+                  reason one workspace repeated the same broken run six times
+                  believing it was our fault. See RunError.cause. */}
               <p style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 14 }}>
-                Nothing you entered caused this, and no work was lost — the agent stopped before producing a draft.
+                {runError.cause === undefined
+                  ? "Nothing you entered caused this."
+                  : runError.cause === "input"
+                  ? "This is a setting on the run rather than a fault — change it above and run again."
+                  : runError.cause === "account"
+                    ? "This is about your own provider account rather than anything in the run."
+                    : "Nothing you entered caused this."}{" "}
+                No work was lost — the agent stopped before producing a draft.
                 {Number(run.costUsd) === 0 ? " You were not charged for it." : ""}
               </p>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>

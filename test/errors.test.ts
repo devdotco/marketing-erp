@@ -37,6 +37,7 @@ const CREDIT_MESSAGE =
   check("and the message says credit", /credit/i.test(d.message), d.message);
   check("and it is not retryable — a retry cannot add money", d.retryable === false, d.retryable);
   check("and the hint points at billing, not at the agent config", /Plans & Billing/i.test(d.hint), d.hint);
+  check("and it is attributed to the account, not to what they typed", d.cause === "account", d.cause);
 }
 
 // Run cmubr0exa… (Blog Writer) — a streamed call, which surfaced as a bare
@@ -59,6 +60,7 @@ const CREDIT_MESSAGE =
     new Headers(),
   );
   check("a real bad request is still a bad request", describeRunError(err).code === "bad_request", describeRunError(err).code);
+  check("and is attributed to the system", describeRunError(err).cause === "system", describeRunError(err).cause);
 }
 
 {
@@ -76,6 +78,9 @@ const CREDIT_MESSAGE =
   const err = new AgentInputError("Payload is selected as the CMS Target, but it isn't connected.", "Connect it.", "cms_not_connected");
   const d = describeRunError(err);
   check("an agent's own refusal keeps its code", d.code === "cms_not_connected", d.code);
+  // The run page keys its copy off this. Getting it wrong is what told a
+  // customer their own field choice was not their doing, six times.
+  check("and is attributed to the input, not excused as our fault", d.cause === "input", d.cause);
   check("and is never retried", d.retryable === false, d.retryable);
 }
 
