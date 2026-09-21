@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentInput } from "@/lib/agent-metadata";
 import { ByokPrompt } from "@/components/ui/ByokPrompt";
 import { ResourceSelect } from "@/components/ui/ResourceSelect";
-import { apiFetch } from "@/lib/base-path";
+import { apiFetch, withBase } from "@/lib/base-path";
 
 interface RunModalProps {
   workspaceId: string;
@@ -78,6 +78,31 @@ export function RunModal({
     buildInitialValues(inputs, savedConfig),
   );
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Which integrations this workspace has connected, for fields that declare
+   * `optionProviders`. Null until loaded — and while it is null nothing is
+   * marked, because guessing "not connected" before the answer arrives would
+   * flash a warning at people whose setup is fine.
+   */
+  const [connected, setConnected] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    if (!open || connected !== null) return;
+    let cancelled = false;
+    apiFetch("/api/integrations/connected")
+      .then((res) => (res.ok ? res.json() : { providers: [] }))
+      .then((body) => {
+        if (!cancelled) setConnected(Array.isArray(body.providers) ? body.providers : []);
+      })
+      .catch(() => {
+        // A failed lookup must not block the form. Nothing is marked, and the
+        // handler's own check still refuses the run legibly.
+        if (!cancelled) setConnected([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, connected]);
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
@@ -338,9 +363,15 @@ export function RunModal({
                       disabled={pending}
                       style={inputFieldStyle}
                     >
-                      {input.options?.map((opt) => (
-                        <option key={opt} value={opt}>{opt}</option>
-                      ))}
+                      {input.options?.map((opt) => {
+                        const needs = input.optionProviders?.[opt];
+                        const missing = needs !== undefined && connected !== null && !connected.includes(needs);
+                        return (
+                          <option key={opt} value={opt}>
+                            {missing ? `${opt} — not connected` : opt}
+                          </option>
+                        );
+                      })}
                     </select>
                   ) : input.type === "integration_resource" ? (
                     <ResourceSelect
@@ -400,6 +431,39 @@ export function RunModal({
                       style={inputFieldStyle}
                     />
                   )}
+
+                  {/* The selected option needs an integration this workspace
+                      has not connected. Said here, before the button, because
+                      saying it after the run is what wasted six runs. */}
+                  {(() => {
+                    const selected = values[input.key];
+                    const needs = selected ? input.optionProviders?.[selected] : undefined;
+                    if (!needs || connected === null || connected.includes(needs)) return null;
+                    return (
+                      <p
+                        style={{
+                          fontSize: 11,
+                          color: "var(--warning)",
+                          margin: 0,
+                          display: "flex",
+                          gap: 6,
+                          flexWrap: "wrap",
+                          alignItems: "baseline",
+                        }}
+                      >
+                        <span>
+                          {selected} isn&apos;t connected for this workspace, so this run will stop before it
+                          produces anything.
+                        </span>
+                        <a
+                          href={withBase(`/integrations/connect/${needs}`)}
+                          style={{ color: "var(--warning)", fontWeight: 600 }}
+                        >
+                          Connect {selected} →
+                        </a>
+                      </p>
+                    );
+                  })()}
 
                   {input.hint && (
                     <p style={{ fontSize: 11, color: "var(--text-dim)", margin: 0 }}>{input.hint}</p>

@@ -32,6 +32,17 @@ export interface AgentInput {
   group?: string;
   /** type: "integration_resource" only — which connected account backs the dropdown. */
   provider?: IntegrationResourceProvider;
+  /**
+   * type: "select" only — which integration each option needs, by option label.
+   *
+   * The Run modal marks an option whose integration is not connected, and warns
+   * when one is currently selected. A field offering a choice that cannot
+   * possibly work is how one tenant failed the same run six times in five days:
+   * the error afterwards was accurate and arrived far too late to help.
+   *
+   * Options absent from this map need nothing and are always offered.
+   */
+  optionProviders?: Record<string, string>;
   /** type: "agent_run" only — the agents whose approved output this dropdown offers. */
   sourceAgents?: string[];
   /** type: "agent_run" only — shown in place of an empty dropdown. */
@@ -115,7 +126,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "schemaType", label: "Structured Data Type", type: "select", group: "Output and delivery", options: ["Article", "BlogPosting", "NewsArticle", "HowTo", "TechArticle"], defaultValue: "Article", hint: "The JSON-LD emitted with the draft. Built from the piece that was actually written, never from this form alone." },
       { key: "geographicScope", label: "Geographic Scope", type: "text", group: "Output and delivery", defaultValue: "Universal (no place-specific framing)", hint: "Leave as-is for content that works anywhere. Replace with a place to deliberately write a local piece." },
       { key: "maxRepairRounds", label: "Maximum Repair Rounds", type: "number", group: "Output and delivery", defaultValue: "2", hint: "How many times a defective draft is sent back. Each round costs another pass. 0 delivers the first draft with its defects listed." },
-      { key: "cmsTarget", label: "CMS Target", type: "select", group: "Output and delivery", options: ["None (draft only)", "WordPress", "Storyblok", "Webflow", "Payload"], defaultValue: "None (draft only)", hint: "Where the piece is pushed as a draft when approval is not required. The integration must be connected in Settings." },
+      { key: "cmsTarget", label: "CMS Target", type: "select", group: "Output and delivery", options: ["None (draft only)", "WordPress", "Storyblok", "Webflow", "Payload"], defaultValue: "None (draft only)", optionProviders: { WordPress: "WORDPRESS", Storyblok: "STORYBLOK", Webflow: "WEBFLOW", Payload: "PAYLOAD" }, hint: "Where the piece is pushed as a draft when approval is not required. The integration must be connected in Settings." },
       { key: "requireApproval", label: "Hold for Approval Before Publishing", type: "boolean", group: "Output and delivery", defaultValue: "true", hint: "On, the run waits for you to approve. Off, the draft goes straight to the CMS as a draft post." },
     ],
     outputs: ["Publication-ready body (CMS-safe HTML, no inline styles, accessible inline SVG charts)", "The same piece as markdown, for review or pasting into a doc", "Metadata: title, slug, meta description, focus keyword", "JSON-LD structured data, including FAQPage when an FAQ was written", "Citation manifest: each claim, its source, and whether the piece actually used it", "Quality report: defects, warnings, word count, link counts, repair rounds, chart/table/callout/image counts", "FAQ entries and image briefs with alt text, when requested", "Generated image files (when an image provider is connected and AI images were requested), or image briefs only when it isn't \u2014 the run says which", "Verified source list from the research pass", "Per-stage cost and timing, including image generation cost, and which API keys the run was billed to"],
@@ -132,7 +143,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "draftId", label: "Draft", type: "agent_run", sourceAgents: ["blog-writer", "content-refresh"], emptyLabel: "No approved drafts yet — approve a Blog Writer or Content Refresh run first", required: true, hint: "An approved draft from Blog Writer or Content Refresh. Drafts still awaiting approval don't appear here." },
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS where the draft will be published; the integration must be authenticated in Settings." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, optionProviders: { WordPress: "WORDPRESS", Storyblok: "STORYBLOK", Webflow: "WEBFLOW", Payload: "PAYLOAD" }, hint: "The CMS where the draft will be published; the integration must be authenticated in Settings." },
       { key: "publishStatus", label: "Publish Status", type: "select", options: ["Draft", "Scheduled", "Published"], defaultValue: "Draft", hint: "Set to Published to go live immediately, Scheduled to use the datetime below, or Draft to stage without publishing." },
       { key: "scheduledAt", label: "Scheduled Publish Time", type: "text", placeholder: "2026-09-15T09:00:00Z", hint: "ISO 8601 datetime, only used when Publish Status is Scheduled. The post is still created as a draft: WordPress drafts carry this as their publish date, and for other CMSes it's recorded in the run output to set when you schedule it." },
       { key: "primaryCategory", label: "Primary Category or Collection", type: "text", placeholder: "e.g. content-marketing", hint: "The CMS category slug or collection name to assign this post to on publish." },
@@ -179,7 +190,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { key: "decayThresholdPercent", label: "Decay Threshold (%)", type: "number", defaultValue: "20", hint: "Minimum percentage click decline over the analysis window required to flag a post as a refresh candidate." },
       { key: "maxPostsPerRun", label: "Max Posts Per Run", type: "number", defaultValue: "5", hint: "Caps the number of posts refreshed in a single agent run to manage CMS write volume and review load." },
       { key: "refreshDepth", label: "Refresh Depth", type: "select", options: ["Light", "Medium", "Full"], defaultValue: "Medium", hint: "Light updates metadata and statistics only; Medium adds section rewrites and a new FAQ; Full is a complete structural rewrite." },
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS where refreshed posts will be updated; integration must be authenticated with read/write permissions." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, optionProviders: { WordPress: "WORDPRESS", Storyblok: "STORYBLOK", Webflow: "WEBFLOW", Payload: "PAYLOAD" }, hint: "The CMS where refreshed posts will be updated; integration must be authenticated with read/write permissions." },
       { key: "preservePublishDate", label: "Preserve Original Publish Date", type: "boolean", defaultValue: "false", hint: "Keep the original publication date on republish; disable to surface the post as recently updated in feeds and sitemaps." },
     ],
     outputs: ["Refreshed article HTML per post", "Section-level decay report with scores (JSON)", "Post refresh log: original URL, sections rewritten, and publish timestamp", "GSC reindex submission confirmation", "Before/after word count and section diff summary (JSON)"],
@@ -195,7 +206,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
       { title: "Inject and Audit", detail: "Apply link injections directly to CMS posts, enforce the per-post cap, skip excluded URLs, and write a complete change log with before/after HTML diffs for editorial review." },
     ],
     inputs: [
-      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, hint: "The CMS whose pages the plan is built from. Only Payload is read today; for the others the page inventory is inferred. Nothing is written to the CMS \u2014 the output is a plan for review." },
+      { key: "cmsTarget", label: "Target CMS", type: "select", options: ["WordPress", "Storyblok", "Webflow", "Payload"], required: true, optionProviders: { WordPress: "WORDPRESS", Storyblok: "STORYBLOK", Webflow: "WEBFLOW", Payload: "PAYLOAD" }, hint: "The CMS whose pages the plan is built from. Only Payload is read today; for the others the page inventory is inferred. Nothing is written to the CMS \u2014 the output is a plan for review." },
       { key: "siteUrl", label: "Site URL", type: "url", placeholder: "https://example.com", hint: "The site being linked. Leave blank to use the connected Payload site's URL." },
       { key: "priorityPages", label: "Priority Pages", type: "textarea", placeholder: "https://example.com/pricing\nhttps://example.com/services", hint: "Money pages that must receive strong internal link support, one per line. Leave blank to let the agent infer them." },
       { key: "maxPagesToAnalyze", label: "Max Pages to Analyse", type: "number", defaultValue: "200", hint: "Upper bound on pages covered by the link plan." },
@@ -666,7 +677,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
     ],
     inputs: [
       { key: "siteUrl", label: "Site URL", type: "url", placeholder: "https://example.com", required: true, hint: "Root domain to crawl for existing schema and eligible pages; the agent scans all indexable URLs found in the sitemap." },
-      { key: "cmsTarget", label: "CMS Target", type: "select", options: ["wordpress", "storyblok", "webflow", "payload"], required: true, hint: "The CMS the implementation notes are written for. The agent doesn't write markup to the CMS — add the generated JSON-LD yourself." },
+      { key: "cmsTarget", label: "CMS Target", type: "select", options: ["wordpress", "storyblok", "webflow", "payload"], required: true, optionProviders: { wordpress: "WORDPRESS", storyblok: "STORYBLOK", webflow: "WEBFLOW", payload: "PAYLOAD" }, hint: "The CMS the implementation notes are written for. The agent doesn't write markup to the CMS — add the generated JSON-LD yourself." },
       { key: "schemaTypes", label: "Schema Types to Generate", type: "textarea", defaultValue: "Article, BreadcrumbList, FAQ", hint: "Comma-separated schema types to generate; supported values: Article, FAQ, HowTo, BreadcrumbList, Product, LocalBusiness." },
       { key: "organisationName", label: "Organisation Name", type: "text", placeholder: "Acme Corp", required: true, hint: "Used to populate Organisation and Publisher entities within all generated schema blocks across the site." },
       { key: "organisationUrl", label: "Organisation URL", type: "url", placeholder: "https://example.com", hint: "Canonical URL of your organisation, used in structured data publisher and sameAs entity relationship fields." },

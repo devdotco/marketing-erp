@@ -53,6 +53,30 @@ export function describeRunError(err: unknown): RunError {
 
   const detail = err instanceof Error ? err.message : String(err);
 
+  // Checked before any SDK error class, because this one arrives as several of
+  // them. A workspace whose Anthropic balance runs out gets a 400
+  // invalid_request_error from a normal call — which fell through to
+  // "bad_request" and told the customer to check the agent's configuration —
+  // and an unclassified APIError from a streamed call, which became
+  // "api_error_unknown" and told them nothing at all. Both happened in
+  // production on the same tenant within twenty minutes, and neither message
+  // contained the word "credit".
+  //
+  // Matching on the message text is unpleasant but it is the only signal:
+  // there is no distinct status or error type for a spent balance.
+  if (/credit balance is too low|insufficient[ _-]?credit|billing|purchase credits/i.test(detail)) {
+    return {
+      code: "insufficient_credit",
+      message: "Your Anthropic account has run out of credit, so the agent could not run.",
+      hint:
+        "Add credit at console.anthropic.com under Plans & Billing, then run this again. " +
+        "Agents are billed to your own Anthropic key, so this is your account's balance rather than anything owed to us. " +
+        "Nothing was spent and no work was lost.",
+      retryable: false,
+      detail,
+    };
+  }
+
   if (err instanceof Anthropic.NotFoundError) {
     return {
       code: "model_not_found",
