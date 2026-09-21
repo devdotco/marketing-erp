@@ -19,6 +19,20 @@ export type RunError = {
   hint: string;
   /** Whose problem it is — decides whether a retry could ever help. */
   retryable: boolean;
+  /**
+   * Where the fault lies, which decides what the run page says next to it.
+   *
+   * The page used to tell everyone "nothing you entered caused this" for every
+   * failure, including the ones their own field choice caused. A customer who
+   * had selected an unconnected CMS six times was being told, each time, that
+   * it was not their doing — reassuring, untrue, and the reason they kept
+   * doing it.
+   *
+   *   input   — a field or setting on this run. Fixable from the form.
+   *   account — the workspace's own provider account: no credit, bad key.
+   *   system  — the agent, the provider, or the network. Not theirs.
+   */
+  cause: "input" | "account" | "system";
   /** Raw provider text, for engineers. */
   detail?: string;
 };
@@ -48,6 +62,7 @@ export function describeRunError(err: unknown): RunError {
       message: err.message,
       hint: err.hint,
       retryable: false,
+      cause: "input",
     };
   }
 
@@ -74,6 +89,7 @@ export function describeRunError(err: unknown): RunError {
         "Nothing was spent and no work was lost.",
       retryable: false,
       detail,
+      cause: "account",
     };
   }
 
@@ -84,6 +100,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "The model id in the agent handler is stale. Model ids live in lib/ai/models.ts — run `npm run check:models` to see which one is wrong. No tokens were spent.",
       retryable: false,
       detail,
+      cause: "system",
     };
   }
 
@@ -94,6 +111,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "ANTHROPIC_API_KEY is missing, expired, or revoked. An administrator needs to update it.",
       retryable: false,
       detail,
+      cause: "account",
     };
   }
 
@@ -104,6 +122,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "Check the key's workspace permissions in the Anthropic Console.",
       retryable: false,
       detail,
+      cause: "account",
     };
   }
 
@@ -114,6 +133,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "The run will be retried automatically. If it keeps happening, reduce how many agents run at once.",
       retryable: true,
       detail,
+      cause: "system",
     };
   }
 
@@ -124,6 +144,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "Usually an input that is too long, or a configuration value the agent cannot use. Check the agent's configuration, then the detail below.",
       retryable: false,
       detail,
+      cause: "system",
     };
   }
 
@@ -134,6 +155,7 @@ export function describeRunError(err: unknown): RunError {
       hint: "A network or upstream problem. The run will be retried automatically.",
       retryable: true,
       detail,
+      cause: "system",
     };
   }
 
@@ -147,6 +169,7 @@ export function describeRunError(err: unknown): RunError {
         : "Check the detail below, then the agent's configuration.",
       retryable: status >= 500 || status === 408 || status === 409,
       detail,
+      cause: "system",
     };
   }
 
@@ -156,5 +179,6 @@ export function describeRunError(err: unknown): RunError {
     hint: "This is a fault in the agent itself, not in anything you entered. The detail below has the specifics.",
     retryable: false,
     detail,
+    cause: "system",
   };
 }
