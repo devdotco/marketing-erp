@@ -4,6 +4,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { assertNotTruncated, jsonFrom, textFrom } from "@/lib/ai/extract";
 import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { AgentInputError } from "@/lib/ai/errors";
 import { googleCredentials } from "@/lib/integrations/google";
 import { resolvePropertyOverride } from "@/lib/integrations/google-resources";
 import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushPhraseThis, resolveSeoLiveData } from "./seo-data-providers";
@@ -214,8 +215,16 @@ Aim for at least 4 distinct clusters${intentFilter === "all" ? " covering differ
   assertNotTruncated(message, "The keyword research");
   const parsed = jsonFrom<Record<string, unknown>>(textFrom(message));
   if (!parsed || !Array.isArray(parsed.clusters) || parsed.clusters.length === 0) {
-    // Never hand a person an empty result to approve.
-    throw new Error("The keyword research came back without any keyword clusters. Run it again.");
+    // Never hand a person an empty result to approve. AgentInputError (not a bare Error) so the
+    // run page says what happened and what to do: describeRunError's fallback for an untyped
+    // throw reads "a fault in the agent itself, not in anything you entered", which is exactly
+    // wrong here — an empty answer is a transient model outcome, and re-running usually fixes it.
+    // Both are equally non-retryable, so this changes the wording, never the billing.
+    throw new AgentInputError(
+      "The keyword research came back without any keyword clusters.",
+      "Nothing was saved and the run can simply be started again. If it keeps coming back empty, narrow the seed keywords or lower \"Max Keywords\" — a very broad brief is the usual cause.",
+      "keyword_research_empty",
+    );
   }
   const output: Record<string, unknown> = parsed;
 
