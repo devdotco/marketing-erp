@@ -1,6 +1,11 @@
 #!/bin/sh
 
-echo "[start] DATABASE_URL prefix: $(echo $DATABASE_URL | cut -c1-40)..."
+# Where we are pointed, never what we authenticate with. The first 40 characters of a
+# DATABASE_URL are "postgres://<user>:<password...", so the old prefix-echo wrote the Postgres
+# password into the container log on every boot, where `docker logs` hands it to anyone who can
+# reach the host. The userinfo is stripped here and the query string dropped (it can carry
+# sslmode/passfile), leaving the host, port and database — which is all the line was ever for.
+echo "[start] DATABASE_URL target: $(printf '%s' "$DATABASE_URL" | sed -E 's#^([a-zA-Z+]+)://[^@]*@#\1://#; s#\?.*$##')"
 echo "[start] Running database migrations..."
 
 # Fail, loudly, rather than serve against a schema that does not match.
