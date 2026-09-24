@@ -13,6 +13,7 @@
  */
 export { AppShell } from './AppShell'
 export { AgentDock } from './AgentDock'
+export { StaleBuildReloader } from './StaleBuildReloader'
 export { startersFor, STARTER_QUESTIONS } from './starter-questions'
 export { useErpChromeClose } from './chrome-context'
 export { AppRail, buildRailItems, type ErpRailItem } from './AppRail'

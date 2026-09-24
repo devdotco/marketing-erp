@@ -3,6 +3,7 @@ import "./globals.css";
 // Shared suite chrome. Relative rather than the @erp-ui alias: tsconfig paths
 // are resolved for module imports, not guaranteed for the CSS pipeline.
 import "../vendor/erp-ui/erp-ui.css";
+import { StaleBuildReloader } from "@erp-ui";
 import { SessionProvider } from "next-auth/react";
 
 export const metadata: Metadata = {
@@ -33,6 +34,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
+        {/* Above the route groups so a tab left open across a deploy
+            recovers on every page, sign-in and error pages included. */}
+        <StaleBuildReloader />
         <SessionProvider>
           {children}
         </SessionProvider>

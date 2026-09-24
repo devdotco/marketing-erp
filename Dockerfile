@@ -16,7 +16,13 @@ ENV NEXT_PUBLIC_DASHBOARD_URL=$NEXT_PUBLIC_DASHBOARD_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN npx prisma generate
-RUN npm run build
+# BUILD_ID becomes `deploymentId` in next.config.ts, which stamps every asset URL
+# so a tab running an older build is recognisable as skew. Coolify exposes
+# SOURCE_COMMIT to the RUNNING container but does NOT pass it as a build arg, so
+# it is used when present and falls back to a timestamp. `:-` not `-`, because an
+# empty arg would otherwise be taken as a real value and stamp nothing.
+ARG SOURCE_COMMIT
+RUN BUILD_ID="${SOURCE_COMMIT:-$(date +%s)}" npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
