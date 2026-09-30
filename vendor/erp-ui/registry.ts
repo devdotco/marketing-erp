@@ -26,6 +26,7 @@
 export type ErpModuleKey =
   | 'finance' | 'crm' | 'pm' | 'marketing' | 'sdr' | 'messaging' | 'portal'
   | 'plm' | 'sign' | 'cfo' | 'canvas' | 'pey' | 'legal' | 'ats' | 'courses'
+  | 'service'
 
 export type ErpModule = {
   key: ErpModuleKey
@@ -54,6 +55,7 @@ export const ERP_MODULES: readonly ErpModule[] = [
   { key: 'legal',     label: 'Legal',         url: 'https://app.erp.io/legal',      live: true  },
   { key: 'ats',       label: 'ATS',           url: 'https://app.erp.io/ats',        live: true  },
   { key: 'courses',   label: 'Courses',       url: 'https://app.erp.io/courses',    live: true  },
+  { key: 'service',   label: 'Service',       url: 'https://app.erp.io/service',    live: true  },
 ]
 
 export const ERP_MODULE_KEYS: readonly ErpModuleKey[] = ERP_MODULES.map(m => m.key)
