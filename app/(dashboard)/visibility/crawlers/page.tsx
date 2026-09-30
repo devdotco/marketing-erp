@@ -17,7 +17,10 @@ import { TrendChart } from "@/components/charts/TrendChart";
 import { BarList } from "@/components/charts/BarList";
 import { StatTile } from "@/components/charts/StatTile";
 
-export const metadata = { title: "AI crawlers — marketing.erp.io" };
+export const metadata = {
+  title: "AI crawlers",
+  description: "Which AI crawlers reach your site, and what they take.",
+};
 export const dynamic = "force-dynamic";
 
 const DAYS = 30;

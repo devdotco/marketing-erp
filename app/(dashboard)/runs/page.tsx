@@ -6,7 +6,10 @@ import { AGENTS } from "@/lib/agents";
 import Link from "next/link";
 import { formatDistanceToNow } from "@/lib/utils";
 
-export const metadata = { title: "Runs — marketing.erp.io" };
+export const metadata = {
+  title: "Runs",
+  description: "Every agent run, what it cost and what it produced.",
+};
 
 const STATUS_BADGE: Record<string, string> = {
   PENDING: "badge-pending", RUNNING: "badge-running",

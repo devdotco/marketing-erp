@@ -6,7 +6,10 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { formatDistanceToNow } from "@/lib/utils";
 
-export const metadata = { title: "Dashboard — marketing.erp.io" };
+export const metadata = {
+  title: "Dashboard",
+  description: "Active agents, runs today and anything waiting on your review.",
+};
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Pending",

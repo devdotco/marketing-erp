@@ -21,7 +21,9 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   const { slug } = await params;
   const agent = getAgent(slug);
   if (!agent) return { title: "Not found" };
-  return { title: `${agent.name} — marketing.erp.io` };
+  // First sentence only: a description is a summary, and these run to a paragraph.
+  const summary = agent.description.split(". ")[0];
+  return { title: agent.name, description: summary.endsWith(".") ? summary : `${summary}.` };
 }
 
 export default async function AgentDetailPage({ params }: { params: Promise<{ slug: string }> }) {

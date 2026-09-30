@@ -14,6 +14,11 @@ import { buildKeywordReport, compareScans, isKeywordResearchOutput } from "@/lib
 import { previousKeywordScan } from "@/lib/reports/keyword-scans";
 import { withBase } from "@/lib/base-path";
 
+export const metadata = {
+  title: "Run",
+  description: "What this run was given, what it produced, and what it cost.",
+};
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
 

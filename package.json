@@ -18,6 +18,7 @@
     "test:crawlers": "esbuild test/crawlers.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/crawlers.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/crawlers.test.mjs",
     "test:crawlers:db": "esbuild test/crawlers-db.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/crawlers-db.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/crawlers-db.test.mjs",
     "check:crawler-ranges": "node scripts/check-crawler-ranges.mjs",
+    "test:readiness": "esbuild test/readiness.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/readiness.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/readiness.test.mjs",
     "test:errors": "esbuild test/errors.test.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/errors.test.mjs --tsconfig=tsconfig.json --external:@prisma/client && node dist/errors.test.mjs"
   },
   "dependencies": {

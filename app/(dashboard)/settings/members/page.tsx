@@ -5,7 +5,10 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { InviteForm } from "./InviteForm";
 
-export const metadata = { title: "Members — marketing.erp.io" };
+export const metadata = {
+  title: "Members",
+  description: "Who can see and run the agents in this workspace.",
+};
 
 const ROLE_LABELS: Record<string, string> = {
   SUPER_ADMIN: "Super Admin",

@@ -7,7 +7,10 @@ import { PromptManager } from "./PromptManager";
 import { connectedEngines } from "@/lib/answer-engines";
 import { estimateCapture, MAX_PROMPTS_PER_CAPTURE } from "@/lib/visibility/budget";
 
-export const metadata = { title: "Tracked prompts — marketing.erp.io" };
+export const metadata = {
+  title: "Tracked prompts",
+  description: "The buyer questions tracked across answer engines.",
+};
 export const dynamic = "force-dynamic";
 
 export default async function PromptsPage() {

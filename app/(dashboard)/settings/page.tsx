@@ -5,7 +5,10 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { WorkspaceSettingsForm } from "./WorkspaceSettingsForm";
 
-export const metadata = { title: "Settings — marketing.erp.io" };
+export const metadata = {
+  title: "Settings",
+  description: "Workspace, business profile and model key.",
+};
 
 export default async function SettingsPage() {
   const session = await getServerSession();

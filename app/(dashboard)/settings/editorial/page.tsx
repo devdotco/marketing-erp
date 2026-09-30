@@ -6,7 +6,10 @@ import { NEUTRAL_PROFILE } from "@/lib/content/editorial";
 import { EditorialForm } from "./EditorialForm";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Editorial profile — marketing.erp.io" };
+export const metadata = {
+  title: "Editorial profile",
+  description: "House voice, banned phrasing and link rules every agent writes to.",
+};
 
 export default async function EditorialSettingsPage() {
   const session = await getServerSession();

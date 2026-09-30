@@ -6,7 +6,10 @@ import { getServerSession } from "@/lib/session";
 import { MagicLinkForm } from "./MagicLinkForm";
 import { ensureBase } from "@/lib/base-path";
 
-export const metadata = { title: "Sign in — marketing.erp.io" };
+export const metadata = {
+  title: "Sign in",
+  description: "Sign in to your Marketing ERP workspace.",
+};
 
 export default async function LoginPage({
   searchParams,

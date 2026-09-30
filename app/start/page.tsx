@@ -11,7 +11,10 @@ import { redirect } from "next/navigation";
 import { AGENTS } from "@/lib/agents";
 import { withBase } from "@/lib/base-path";
 
-export const metadata = { title: "Start free — marketing.erp.io" };
+export const metadata = {
+  title: "Start free",
+  description: "Start using the marketing agents on your own site.",
+};
 
 const ACTIVE_AGENTS = AGENTS.filter((a) => a.status === "ACTIVE");
 const TOTAL_AGENTS = AGENTS.length;

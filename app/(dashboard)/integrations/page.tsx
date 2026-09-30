@@ -9,7 +9,10 @@ import { SETUP_GUIDES } from "@/lib/integrations/guides";
 import { SetupGuideExpander } from "@/components/integrations/SetupGuide";
 import { crmLinkStatus } from "@/lib/integrations/crm-connection";
 
-export const metadata = { title: "Integrations — marketing.erp.io" };
+export const metadata = {
+  title: "Integrations",
+  description: "Connect the CMS, search and email accounts your agents work through.",
+};
 
 const INTEGRATIONS = [
   {

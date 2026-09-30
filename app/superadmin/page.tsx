@@ -5,7 +5,10 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { platformKeyEligibility } from "@/lib/ai/client";
 
-export const metadata = { title: "Super Admin — marketing.erp.io" };
+export const metadata = {
+  title: "Super Admin",
+  description: "Workspace administration across every tenant.",
+};
 
 export default async function SuperAdminPage() {
   const session = await getServerSession();

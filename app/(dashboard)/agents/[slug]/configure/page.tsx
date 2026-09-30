@@ -2,6 +2,13 @@ import { notFound, redirect } from "next/navigation";
 import { getServerSession } from "@/lib/session";
 import { getAgent } from "@/lib/agents";
 import { AGENT_META } from "@/lib/agent-metadata";
+
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const agent = getAgent(slug);
+  if (!agent) return { title: "Not found" };
+  return { title: `Configure ${agent.name}`, description: `Set the inputs and schedule ${agent.name} runs on.` };
+}
 import { prisma } from "@/lib/prisma";
 import { resolveWorkspaceId, requireWorkspaceAccess } from "@/lib/actions/workspace";
 import Link from "next/link";

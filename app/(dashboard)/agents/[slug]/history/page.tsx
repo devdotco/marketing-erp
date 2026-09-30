@@ -6,7 +6,10 @@ import { loadKeywordScans } from "@/lib/reports/keyword-scans";
 import { compareScans, formatDelta } from "@/lib/reports/keyword-research";
 import { withBase } from "@/lib/base-path";
 
-export const metadata = { title: "Keyword Research history — marketing.erp.io" };
+export const metadata = {
+  title: "Keyword Research history",
+  description: "Every Keyword Research scan, and what moved between them.",
+};
 
 const TONE: Record<string, string> = { up: "var(--success)", down: "var(--danger)", flat: "var(--text-dim)" };
 const fmt = (n: number) => n.toLocaleString("en-US");

@@ -7,11 +7,18 @@ import { StaleBuildReloader } from "@erp-ui";
 import { SessionProvider } from "next-auth/react";
 
 export const metadata: Metadata = {
+  /*
+   * The suffix lives here and ONLY here. Every page under this layout used to
+   * restate "— marketing.erp.io" in its own title string, which the template
+   * then appended a second time, so every tab in the app read
+   * "Agents — marketing.erp.io — marketing.erp.io". Page titles are now the
+   * page's name alone; this is what turns it into the full one.
+   */
   title: {
-    default: "marketing.erp.io",
-    template: "%s — marketing.erp.io",
+    default: "Marketing ERP | ERP.io",
+    template: "%s | Marketing ERP | ERP.io",
   },
-  description: "48 AI marketing agents. One operator. You.",
+  description: "AI marketing agents that plan, write, publish and report — run from one workspace.",
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "https://app.erp.io/marketing"),
 };
 

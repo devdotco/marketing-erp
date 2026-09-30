@@ -16,7 +16,10 @@ import { TrendChart } from "@/components/charts/TrendChart";
 import { BarList } from "@/components/charts/BarList";
 import { StatTile } from "@/components/charts/StatTile";
 
-export const metadata = { title: "AI Visibility — marketing.erp.io" };
+export const metadata = {
+  title: "AI Visibility",
+  description: "Where the answer engines cite you, and where they cite someone else.",
+};
 export const dynamic = "force-dynamic";
 
 const WINDOW_DAYS = 30;

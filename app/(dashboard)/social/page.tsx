@@ -6,7 +6,10 @@ import { formatDistanceToNow } from "@/lib/utils";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Social — marketing.erp.io" };
+export const metadata = {
+  title: "Social",
+  description: "Drafting, scheduling and publishing across your social accounts.",
+};
 
 function platformBadgeStyle(platform: string): React.CSSProperties {
   const base: React.CSSProperties = {

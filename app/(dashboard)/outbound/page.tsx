@@ -7,7 +7,10 @@ import Link from "next/link";
 import { PlaysManager } from "./PlaysManager";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Outbound Engine — marketing.erp.io" };
+export const metadata = {
+  title: "Outbound Engine",
+  description: "Scout, score and reach prospects across email and LinkedIn.",
+};
 
 type StatusCountRow = {
   status: string;

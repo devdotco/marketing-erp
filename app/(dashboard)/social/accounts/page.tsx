@@ -6,7 +6,10 @@ import Link from "next/link";
 import { DeleteButton } from "@/components/social/DeleteButton";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Connected Accounts — Social — marketing.erp.io" };
+export const metadata = {
+  title: "Connected Accounts — Social",
+  description: "The social accounts this workspace can publish to.",
+};
 
 function platformLabel(platform: string): string {
   return platform === "LINKEDIN" ? "LI" : "X";

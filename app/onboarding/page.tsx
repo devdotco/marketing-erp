@@ -3,7 +3,10 @@ import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import OnboardingForm from "./OnboardingForm";
 
-export const metadata = { title: "Get started — marketing.erp.io" };
+export const metadata = {
+  title: "Get started",
+  description: "Tell the agents about your business so they can match your voice.",
+};
 
 export default async function OnboardingPage() {
   const session = await getServerSession();

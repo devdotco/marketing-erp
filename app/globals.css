@@ -12,18 +12,34 @@
   --text: #09090C;
   --text-muted: #5C6070;
   --text-dim: #9EA1B4;
-  --accent: #09090C;
-  --accent-fg: #FAFAFA;
-  --success: #10B981;
-  --success-bg: rgba(16, 185, 129, 0.1);
-  --warning: #F59E0B;
-  --warning-bg: rgba(245, 158, 11, 0.1);
-  --danger: #EF4444;
-  --danger-bg: rgba(239, 68, 68, 0.1);
-  --info: #0EA5E9;
-  --info-bg: rgba(14, 165, 233, 0.1);
+  /* The suite chrome (vendor/erp-ui/erp-ui.css) owns the brand colour, and a
+     white-label customer repaints it by overriding --erp-accent. Referencing it
+     rather than restating #2f5cff means their branding reaches the content too;
+     the literal is only a fallback for pages rendered without the chrome, such
+     as /login. */
+  --accent: var(--erp-accent, #2f5cff);
+  --accent-fg: #FFFFFF;
+  /* One family with that accent: same vividness, different hue, so the four
+     states read as one set rather than three borrowed palettes. */
+  --success: #30A46C;
+  --success-bg: rgba(48, 164, 108, 0.1);
+  --warning: #FFB224;
+  --warning-bg: rgba(255, 178, 36, 0.14);
+  --danger: #E5484D;
+  --danger-bg: rgba(229, 72, 77, 0.1);
+  --info: var(--erp-accent, #2f5cff);
+  /* Stated literally because a colour cannot be given an alpha through var(). */
+  --info-bg: rgba(47, 92, 255, 0.1);
   --violet: #7C3AED;
   --violet-bg: rgba(124, 58, 237, 0.1);
+  /* Text that sits ON a tint. The tint colours themselves are chosen to read as
+     dots and borders against the page; at 12px on their own 10%-alpha wash they
+     are barely legible, which is why the note inside a card uses these instead. */
+  --success-fg: #218358;
+  --warning-fg: #AB6400;
+  --danger-fg: #CE2C31;
+  --info-fg: #3A5CCC;
+  --violet-fg: #5B21B6;
   --radius-sm: 4px;
   --radius: 6px;
   --radius-lg: 8px;
@@ -41,8 +57,13 @@
     --text: #F0EFF9;
     --text-muted: #7A7D96;
     --text-dim: #45485A;
-    --accent: #F0EFF9;
-    --accent-fg: #09090C;
+    --accent: var(--erp-accent, #2f5cff);
+    --accent-fg: #FFFFFF;
+    --success-fg: #3DD68C;
+    --warning-fg: #FFCA16;
+    --danger-fg: #FF9592;
+    --info-fg: #9EB1FF;
+    --violet-fg: #A78BFA;
   }
 }
 
@@ -56,8 +77,13 @@
   --text: #F0EFF9;
   --text-muted: #7A7D96;
   --text-dim: #45485A;
-  --accent: #F0EFF9;
-  --accent-fg: #09090C;
+  --accent: var(--erp-accent, #2f5cff);
+  --accent-fg: #FFFFFF;
+  --success-fg: #3DD68C;
+  --warning-fg: #FFCA16;
+  --danger-fg: #FF9592;
+  --info-fg: #9EB1FF;
+  --violet-fg: #A78BFA;
 }
 
 :root[data-theme="light"] {
@@ -70,8 +96,12 @@
   --text: #09090C;
   --text-muted: #5C6070;
   --text-dim: #9EA1B4;
-  --accent: #09090C;
-  --accent-fg: #FAFAFA;
+  --accent: var(--erp-accent, #2f5cff);
+  --accent-fg: #FFFFFF;
+  --success-fg: #218358;
+  --warning-fg: #AB6400;
+  --danger-fg: #CE2C31;
+  --info-fg: #3A5CCC;
 }
 
 /* ─── Reset + base ──────────────────────────────────────────────────────── */
@@ -316,36 +346,282 @@ code, pre, .mono {
 .table tr:hover td { background: var(--surface-2); }
 
 /* ─── Agent card ────────────────────────────────────────────────────────── */
+/* The card answers one question — can this agent run for me right now, and if
+   not, what do I press? Hence the order: name, what it does, what is true about
+   it today, then the one thing to do about that. */
 .agent-card {
+  position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
+  border-radius: var(--radius-lg);
+  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  transition: border-color 0.15s;
-  text-decoration: none;
+  gap: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
   color: inherit;
 }
-.agent-card:hover { border-color: var(--border-strong); }
-.agent-card.active-agent { border-left: 3px solid var(--success); }
-.agent-card.disabled { opacity: 0.6; }
-.agent-name {
-  font-size: 13px;
-  font-weight: 600;
-  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+.agent-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.04);
 }
-.agent-description {
-  font-size: 12px;
+
+.agent-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.agent-card__name {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.agent-card__name a {
+  color: var(--text);
+  text-decoration: none;
+}
+/* Makes the whole card clickable without nesting the call to action inside a
+   link — the button stays a button, and keyboard focus still lands on the name. */
+.agent-card__name a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.agent-card__description {
+  font-size: 12.5px;
+  line-height: 1.55;
   color: var(--text-muted);
-  line-height: 1.5;
+  margin: 0;
+  /* Descriptions in lib/agents.ts run to a paragraph; the card wants the gist
+     and the detail page has the rest. Clamped rather than truncated in JS so
+     the cut lands on a rendered line, not a character count. */
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.agent-card__note {
+  margin: auto 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.agent-card__note--info    { background: var(--info-bg);    color: var(--info-fg); }
+.agent-card__note--warning { background: var(--warning-bg); color: var(--warning-fg); }
+.agent-card__note--danger  { background: var(--danger-bg);  color: var(--danger-fg); }
+.agent-card__note--success { background: var(--success-bg); color: var(--success-fg); }
 
+.agent-card__foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+}
+.agent-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+}
+.agent-card__none {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  align-self: center;
+}
+.agent-card__cta {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+/* Status pill — a dot carries the state, the words name it. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.status-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.status-pill--info    { background: var(--info-bg);    color: var(--info-fg); }
+.status-pill--warning { background: var(--warning-bg); color: var(--warning-fg); }
+.status-pill--danger  { background: var(--danger-bg);  color: var(--danger-fg); }
+.status-pill--success { background: var(--success-bg); color: var(--success-fg); }
+.status-pill--muted   { background: var(--surface-2);  color: var(--text-muted); }
+
+/* Integration chip — the dot says connected, so the card never claims an agent
+   is ready while something it needs is missing. */
+.int-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.int-chip--more { border-color: transparent; color: var(--text-dim); }
+.int-chip__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.int-chip__dot.is-on  { background: var(--success); }
+.int-chip__dot.is-off { background: transparent; box-shadow: inset 0 0 0 1px var(--border-strong); }
+.int-chip__dot.is-na  { background: var(--text-dim); opacity: 0.5; }
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+@media (max-width: 1100px) { .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 720px)  { .agent-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ─── Agents browser: suite tabs, status filters, pipeline ──────────────── */
+.agents-tabs {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+}
+.agents-tabs__scroll { display: flex; flex: 1; overflow: auto; }
+.agents-tab {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.agents-tab:hover { color: var(--text); }
+.agents-tab.is-active { font-weight: 600; color: var(--text); border-bottom-color: var(--text); }
+.agents-search { position: relative; flex-shrink: 0; margin-left: 12px; }
+.agents-search .input { padding-left: 28px; width: 180px; font-size: 13px; height: 32px; }
+.agents-search__icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.agent-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.agent-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+.agent-filter:hover { border-color: var(--border-strong); color: var(--text); }
+.agent-filter.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.agent-filter__count { font-weight: 600; opacity: 0.65; }
+.agent-filter__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+.agent-filter--needs-you .agent-filter__dot         { background: var(--info); }
+.agent-filter--needs-integration .agent-filter__dot { background: var(--warning); }
+.agent-filter--ready .agent-filter__dot             { background: var(--success); }
+
+.pipeline {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+}
+.pipeline__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.pipeline__title { font-size: 12px; font-weight: 600; color: var(--text); }
+.pipeline__hint { font-size: 11px; color: var(--text-dim); }
+.pipeline__steps { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+.pipeline__step-wrap { display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 0; }
+.pipeline__arrow { color: var(--text-dim); font-size: 13px; flex-shrink: 0; }
+.pipeline__step {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  text-decoration: none;
+}
+.pipeline__step:hover { border-color: var(--border-strong); }
+.pipeline__step-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipeline__step-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: none !important;
+  padding: 0;
+}
 /* ─── Onboarding ────────────────────────────────────────────────────────── */
 .onboarding-step {
   display: flex;
