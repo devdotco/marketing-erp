@@ -1,6 +1,9 @@
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  // The runner image has OpenSSL 3 but the builder has none, so "native" is
+  // detected as openssl-1.1.x and the arm64 host (erp-platform-02) finds no
+  // engine: every query fails. Name both architectures explicitly.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x"]
 }
 
 datasource db {
