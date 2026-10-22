@@ -14,6 +14,7 @@ import {
   fetchSemrushDomainOrganic,
   resolveSeoLiveData,
 } from "./seo-data-providers";
+import { completeMessage } from "@/lib/ai/messages";
 
 function formatDate(d: Date): string {
   return d.toISOString().split("T")[0];
@@ -345,7 +346,7 @@ ${competitorSource === "live"
       ? "6. Competitor data is not live (no Ahrefs/Semrush/SearchAtlas connected) — generate a plausible competitorSnapshot and say so in competitorDataNote."
       : "6. Set competitorSnapshot to an empty array (no competitor domains configured)."}`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

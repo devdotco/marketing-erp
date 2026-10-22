@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const operatorHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -176,7 +177,7 @@ Set scheduledFor to realistic ISO datetime strings within the next ${planningHor
 Include meaningful rationale for each agent that references the business goals and current situation.
 Ensure totalEstimatedCost, requiresApprovalCount, and autoApprovedCount are accurate tallies.`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

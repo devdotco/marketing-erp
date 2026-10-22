@@ -7,6 +7,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 function formatDate(d: Date): string {
   return d.toISOString().split("T")[0];
@@ -374,7 +375,7 @@ ${reportFormat === "Executive" ? "Keep the narrative to 3 bullet points maximum.
 ${reportFormat === "Narrative" ? "Write a flowing 3-paragraph narrative with specific examples." : ""}
 ${reportFormat === "Bullet" ? "Use concise bullet points throughout. No long paragraphs." : ""}`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

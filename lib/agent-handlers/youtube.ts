@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const youtubeHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -69,7 +70,7 @@ Return exactly this JSON structure:
   "thumbnailTextSuggestions": ["Text option 1", "Text option 2", "Text option 3"]
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

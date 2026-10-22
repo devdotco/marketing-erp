@@ -8,6 +8,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { lines, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface GbpLocalPost {
   name?: string;
@@ -216,7 +217,7 @@ export const localSeoGbpHandler: AgentHandler = async (run, updateStatus) => {
     JSON.stringify(jsonExample),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

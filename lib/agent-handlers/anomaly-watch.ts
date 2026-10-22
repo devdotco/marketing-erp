@@ -8,6 +8,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface Ga4Row {
   dimensionValues: Array<{ value: string }>;
@@ -471,7 +472,7 @@ ${JSON.stringify({
 
 ${source === "live" ? "Base every anomaly/allClear entry that corresponds to a pre-computed metric on those exact values. Set alertsSent to an empty array — no notification channel is wired up yet regardless of alertRecipients." : `Make anomaly values realistic for a ${businessProfile?.industry ?? "general"} business. Include 1-3 genuine anomalies and 4-6 all-clear metrics. Populate correlatedEvents with realistic possibilities (e.g., "Weekend traffic pattern", "Recent blog publish", "Seasonal variation"). Set alertsSent to an empty array.`}`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

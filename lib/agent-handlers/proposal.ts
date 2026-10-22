@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const proposalHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -172,7 +173,7 @@ Write 4-6 deliverables, 4-6 inclusions, 3-4 exclusions.
 Write 4-5 next steps with specific owners (prospect vs agency) and timelines.
 Keep whyUs to 2-3 sentences — confident, not boastful.`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

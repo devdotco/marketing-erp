@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const placementHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -114,7 +115,7 @@ export const placementHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

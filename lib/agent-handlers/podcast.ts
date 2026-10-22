@@ -17,6 +17,7 @@ import {
 } from "@/lib/voice/google-tts";
 import { encodeMp3 } from "@/lib/voice/mp3";
 import { scriptForSpeech, selectVoiceProvider, voiceProviderChoice, VOICE_PROVIDER_NAMES } from "@/lib/voice/provider";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const podcastHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -124,7 +125,7 @@ export const podcastHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

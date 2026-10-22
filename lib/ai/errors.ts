@@ -1,4 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { OutputTruncatedError } from "./messages";
+import { OutputIncompleteError } from "@/lib/agents/integrity";
 
 /**
  * A failure a person can act on.
@@ -67,6 +69,33 @@ export function describeRunError(err: unknown): RunError {
   }
 
   const detail = err instanceof Error ? err.message : String(err);
+
+  // Both of these used to be saved as approvable successes: a cut-off answer
+  // fell back to { result: "<half a JSON string>" } and went to AWAITING_APPROVAL
+  // with nothing on the page to say it was broken (QA audit 2026-10-21).
+  if (err instanceof OutputTruncatedError) {
+    return {
+      code: "output_truncated",
+      message: "The agent's answer was cut off before it finished, so it was not offered for approval.",
+      hint:
+        "Nothing partial was saved as a draft. Run it again with a smaller scope — fewer weeks, items or formats. " +
+        "If a small run is also cut off, the agent's output budget needs raising; tell us which agent.",
+      retryable: false,
+      detail: err.partialText ? `Last characters received:\n…${err.partialText.slice(-600)}` : undefined,
+      cause: "system",
+    };
+  }
+  if (err instanceof OutputIncompleteError) {
+    return {
+      code: "output_incomplete",
+      message: "The agent finished, but what it produced is incomplete or unreadable, so it was not offered for approval.",
+      hint: err.issues.join(" ") + " Run it again; if it repeats, tell us which agent.",
+      retryable: false,
+      detail: err.preview,
+      cause: "system",
+    };
+  }
+
 
   // Checked before any SDK error class, because this one arrives as several of
   // them. A workspace whose Anthropic balance runs out gets a 400

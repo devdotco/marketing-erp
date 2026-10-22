@@ -9,6 +9,7 @@ import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { googleCredentials } from "@/lib/integrations/google";
 import { microsoftCredentials } from "@/lib/integrations/microsoft";
+import { completeMessage } from "@/lib/ai/messages";
 
 // Encode RFC 2822 email string as base64url for Gmail API
 function toBase64Url(str: string): string {
@@ -326,7 +327,7 @@ Return a JSON object with this exact structure:
 }`;
   }
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

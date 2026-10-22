@@ -2,10 +2,13 @@ import type { AgentHandler } from "./index";
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { textFrom } from "@/lib/ai/extract";
+import { jsonFrom, textFrom } from "@/lib/ai/extract";
+import { addReview } from "@/lib/agents/integrity";
+import { finalizeVariants, parseTestimonials, type Variant } from "@/lib/agents/claim-check";
 import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -23,6 +26,8 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
   const socialProofCount = num(config, "socialProofCount", 3, { min: 0, max: 6 });
   const pageGoal = str(config, "pageGoal", "Lead generation");
   const targetKeyword = str(config, "targetKeyword");
+  const proofPoints = str(config, "proofPoints");
+  const testimonials = parseTestimonials(str(config, "testimonials"));
   const competitorUrls = lines(config, "competitorUrls", 3);
   const ctaButtonText = str(config, "ctaButtonText");
   const wordCountTarget = num(config, "wordCountTarget", 600, { min: 150, max: 3000 });
@@ -61,7 +66,9 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
     "1. pain-led — Agitate the reader's problem until the offer feels like relief.",
     "2. outcome-led — Paint a vivid, desirable transformation the reader will experience.",
     "3. proof-led — Let results, testimonials, and data do the persuasion.",
-    "Each variant must be substantially different — different headlines, different emotional angles, different copy rhythm. Never recycle sentences across variants.",
+    "Each variant must be substantially different: it leads with a DIFFERENT primary benefit, uses a DIFFERENT hero structure (for example question, bold claim, scenario, or before/after), and never recycles sentences. The outcome-led variant must not open with the same deliverable or promise as the pain-led one.",
+    "You never invent facts. Every number, percentage, count, rating, duration, client or industry claim, award, or guarantee must appear in the offer description, proof points, audience, or Client context supplied. If it is not there, do not state it. Where proof would help but none was supplied, write [PROOF NEEDED: <what kind of proof>] inline so the gap is visible.",
+    "You never write testimonials, customer names, or quotes.",
     "You write copy that converts. Every word earns its place. CTAs are specific and action-oriented.",
     "Return ONLY valid JSON — no markdown fences, no preamble, no trailing commentary.",
     brandContext ? `\nClient context:\n${brandContext}` : "",
@@ -101,10 +108,20 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
     competitorUrls.length > 0
       ? `\nCompetitor landing pages to differentiate from (you have the URLs only, not the page content — do not claim to know what they say):\n${competitorUrls.join("\n")}`
       : "",
-    `\nInclude ${socialProofCount} social proof testimonials per variant (invent plausible ones if none are provided — mark invented ones with sourceUrl: null).`,
+    proofPoints ? `\nVerified proof points (the ONLY company statistics you may state, verbatim):\n${proofPoints}` : "\nNo proof points were supplied, so you may state NO company statistics, client counts, ratings, years in business, or industries served.",
+    "",
+    "Rules for every variant:",
+    "- The same fact is stated identically everywhere (headline, body, meta description). Timelines, deliverables, and what happens on a call must match the offer description exactly; do not add or compress steps.",
+    "- No absolutes (always, never, no exceptions, guaranteed, 100%, risk-free) unless the offer text makes that exact commitment.",
+    "- Each variant has a different primary benefit and hero structure. Do not let two variants make the same promise.",
+    "- proof-led with no proof points: lean on process, specificity, and [PROOF NEEDED: ...] markers, never on invented numbers.",
+    targetKeyword ? "- Use the keyword naturally, never forced into an awkward headline. The business name appears in at least the hero body; do not force it into the H1." : "- The business name appears in at least the hero body; do not force it into the H1.",
+    "- howItWorks: 3-4 steps drawn ONLY from the offer description. It is the target of the secondary CTA, so word the secondary CTA differently per variant (e.g. 'See the Process', 'Walk Through the Steps').",
+    "- Do NOT write testimonials. socialProofGuidance is one short sentence per slot (no numbers) describing what kind of real customer quote would suit this variant.",
+    "- reviewNotes: list anything you were unsure of or had to leave out; use [] if nothing.",
     "",
     "Variant names must be exactly: pain-led, outcome-led, proof-led.",
-    "Each variant needs all fields populated — no placeholders, no 'TBD'.",
+    "Each variant needs all fields populated. Use [PROOF NEEDED: ...] only for missing proof; never 'TBD'.",
     ctaButtonText
       ? `Preferred primary CTA button label: "${ctaButtonText}". Use it as the primary CTA in one variant and write two alternative labels for the other two, for A/B testing. Secondary CTA default: "${defaultCta.secondary}"`
       : `Default CTA if not naturally implied by the copy: primary="${defaultCta.primary}", secondary="${defaultCta.secondary}"`,
@@ -124,13 +141,8 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
               description: "One sentence description",
             },
           ],
-          socialProof: [
-            {
-              quote: "Testimonial quote",
-              author: "First Last",
-              company: "Company Name",
-            },
-          ],
+          howItWorks: [{ title: "Step title", description: "One sentence, from the offer description only" }],
+          socialProofGuidance: socialProofCount > 0 ? Array.from({ length: Math.max(0, socialProofCount - testimonials.length) }, () => "What kind of real customer quote fits here (no numbers)") : [],
           objectionHandlers: [
             {
               objection: "Common objection",
@@ -143,6 +155,7 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
           },
           closingStatement: "Final sentence before the CTA — creates urgency or reassurance",
           seo: { metaTitle: "Meta title under 60 characters", metaDescription: "Meta description under 155 characters" },
+          reviewNotes: ["Anything you were unsure of"],
         },
         {
           name: "outcome-led",
@@ -150,11 +163,13 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
           subheadline: "",
           heroBody: "",
           valueProps: [],
-          socialProof: [],
+          howItWorks: [],
+          socialProofGuidance: [],
           objectionHandlers: [],
           cta: { primary: "", secondary: "" },
           closingStatement: "",
           seo: { metaTitle: "", metaDescription: "" },
+          reviewNotes: [],
         },
         {
           name: "proof-led",
@@ -162,11 +177,13 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
           subheadline: "",
           heroBody: "",
           valueProps: [],
-          socialProof: [],
+          howItWorks: [],
+          socialProofGuidance: [],
           objectionHandlers: [],
           cta: { primary: "", secondary: "" },
           closingStatement: "",
           seo: { metaTitle: "", metaDescription: "" },
+          reviewNotes: [],
         },
       ],
     }),
@@ -174,7 +191,7 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
     .filter(Boolean)
     .join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
@@ -182,12 +199,26 @@ export const landingPageCopyHandler: AgentHandler = async (run, updateStatus) =>
   });
 
   const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
-  try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };
-  } catch {
-    output = { result: rawText };
+  const output: Record<string, unknown> = jsonFrom(rawText) ?? { result: rawText };
+
+  // Checked against everything the user told us, because that is the only
+  // evidence a claim can have. Testimonials are excluded: they are verified
+  // separately and a number inside a quote is not a company fact.
+  const variants = Array.isArray(output.variants) ? (output.variants as Variant[]).filter((v) => v && typeof v === "object") : [];
+  if (variants.length > 0) {
+    output.variants = variants;
+    const warnings = finalizeVariants(variants, {
+      inputText: [offerDescription, proofPoints, audienceDescription, mainObjections, targetKeyword, ctaButtonText, brandContext].join("\n"),
+      testimonials,
+      socialProofCount,
+      keyword: targetKeyword,
+      wordCountTarget,
+      defaultSecondaryCta: defaultCta.secondary,
+    });
+    if (socialProofCount > testimonials.length) {
+      warnings.unshift(`${socialProofCount - testimonials.length} testimonial slot(s) per variant are placeholders. Replace them with real customer quotes before publishing.`);
+    }
+    addReview(output, { warnings });
   }
 
   output.generatedAt = new Date().toISOString();

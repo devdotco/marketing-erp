@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs, num } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 // ---------------------------------------------------------------------------
 // Real breakdowns from what the Strategist actually recorded — pure, no Prisma, no Anthropic, so
@@ -375,7 +376,7 @@ Return exactly this JSON structure — one playAnalysis entry and one nextWeekAl
   "executiveSummary": "string (3-4 sentence narrative for weekly team update, naming 'insufficient data' explicitly wherever the analysis couldn't call a winner)"
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 4096,
     system: systemPrompt,

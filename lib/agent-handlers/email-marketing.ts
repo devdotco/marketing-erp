@@ -11,6 +11,7 @@ import { createKlaviyoDraft, createMailchimpDraft, resolveEspLiveData } from "./
 import { emailSequenceToSteps, parseAudienceEmails, stageInstantlyCampaign, stageApolloSequence, stageCrmSequence } from "./email-marketing-channels";
 import { resolveCrmConnection, type CrmConnection } from "@/lib/integrations/crm-connection";
 import type { CreateInstantlyCampaignInput } from "@/lib/integrations/instantly";
+import { completeMessage } from "@/lib/ai/messages";
 
 type InstantlySendDay = NonNullable<CreateInstantlyCampaignInput["sendDayOfWeek"]>;
 const INSTANTLY_SEND_DAYS: readonly InstantlySendDay[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -201,7 +202,7 @@ Produce a comprehensive campaign blueprint. Each email must have complete, copy-
   ${underperformerSection}
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

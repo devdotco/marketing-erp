@@ -4,7 +4,8 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch } from "@/lib/base-path";
 
-export function RunActions({ runId }: { runId: string }) {
+/** `approvable` is false when the output failed the integrity check — see lib/agents/integrity.ts. */
+export function RunActions({ runId, approvable = true }: { runId: string; approvable?: boolean }) {
   const [rejectReason, setRejectReason] = useState("");
   const [showReject, setShowReject] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +46,12 @@ export function RunActions({ runId }: { runId: string }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={handleApprove} disabled={pending} className="btn btn-primary btn-sm">
+        <button
+          onClick={handleApprove}
+          disabled={pending || !approvable}
+          title={approvable ? undefined : "This output is incomplete and can't be approved"}
+          className="btn btn-primary btn-sm"
+        >
           {pending ? "…" : "Approve"}
         </button>
         <button onClick={() => setShowReject(!showReject)} disabled={pending} className="btn btn-danger btn-sm">

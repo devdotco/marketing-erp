@@ -8,6 +8,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { lines, resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 function formatDate(d: Date): string {
   return d.toISOString().split("T")[0];
@@ -219,7 +220,7 @@ ${gscIndexabilityContext}`
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

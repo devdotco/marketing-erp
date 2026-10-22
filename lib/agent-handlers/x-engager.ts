@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const xEngagerHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -120,7 +121,7 @@ Return exactly this JSON shape:
   }
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

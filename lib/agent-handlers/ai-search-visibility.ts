@@ -16,6 +16,7 @@ import {
   shareOfVoice,
   visibilityByEngine,
 } from "@/lib/visibility/series";
+import { completeMessage } from "@/lib/ai/messages";
 
 /**
  * AI Search Visibility — what the engines actually say about this brand.
@@ -140,7 +141,7 @@ export const aiSearchVisibilityHandler: AgentHandler = async (run, updateStatus)
   // about the figures above. Kept separate in the output so the distinction
   // survives into the UI.
   const { client } = await resolveAnthropic(workspaceId);
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 2000,
     system: [

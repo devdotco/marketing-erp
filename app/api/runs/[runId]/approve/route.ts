@@ -5,6 +5,7 @@ import { requireWorkspaceAccess } from "@/lib/actions/workspace";
 import { getOnApprove } from "@/lib/agent-handlers/on-approve";
 import { runOutboundChaining } from "@/lib/agent-handlers/chaining";
 import { AgentInputError } from "@/lib/ai/errors";
+import { checkOutput } from "@/lib/agents/integrity";
 
 /** Agents that need pipeline chaining evaluated right after approval, not just on completion —
  * currently only Outbound Scout: it has no on-approve.ts hook of its own (approving it has no
@@ -48,6 +49,16 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ ru
 
   if (run.status !== "AWAITING_APPROVAL") {
     return NextResponse.json({ error: `Run is ${run.status}, not awaiting approval` }, { status: 400 });
+  }
+
+  // A cut-off or empty output is never approvable. The worker now fails such
+  // runs before they reach review; this catches the ones saved before it did.
+  const { blocking } = checkOutput(run.output);
+  if (blocking.length > 0) {
+    return NextResponse.json(
+      { error: `This output can't be approved: ${blocking.join(" ")} Reject it and run the agent again.` },
+      { status: 422 },
+    );
   }
 
   // The claim. Nothing below runs unless this request is the one that moved the run.

@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const linkedinAdsHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -91,7 +92,7 @@ Return a JSON object with this exact structure:
   "simulationNote": "Connect LinkedIn Ads in Settings to push these directly to Campaign Manager. Cost targets are benchmarks for your ICP."
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
