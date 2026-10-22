@@ -9,6 +9,7 @@ import { AgentInputError } from "@/lib/ai/errors";
 import { storyblokManagementBase } from "@/lib/integrations/catalog";
 import { assertPublicUrl } from "@/lib/integrations/public-url";
 import { payloadHeaders, type PayloadCredentials } from "@/lib/integrations/payload";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -433,7 +434,7 @@ export const onSitePublisherHandler: AgentHandler = async (run, updateStatus) =>
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 2048,
     system: systemPrompt,

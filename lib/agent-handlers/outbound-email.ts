@@ -18,6 +18,7 @@ import {
 } from "./outbound-strategist";
 import { parsePlayConfig, planCampaignResolution, type OutboundPlayConfig } from "./outbound-play-config";
 import type { OutboundEmailDelivery } from "./outbound-email-delivery";
+import { completeMessage } from "@/lib/ai/messages";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
 // implementation lives in outbound-email-delivery.ts, which imports neither Prisma nor
@@ -211,7 +212,7 @@ Return exactly this JSON structure:
   "qualityNotes": "string (any variables where you had to guess — flag them)"
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 1024,
     system: systemPrompt,

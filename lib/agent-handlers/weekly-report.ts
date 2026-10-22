@@ -9,6 +9,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface Ga4Row {
   dimensionValues: Array<{ value: string }>;
@@ -473,7 +474,7 @@ Respond with a JSON object matching this exact structure:
 
 Make all numbers realistic for a ${businessProfile?.industry ?? "general"} business. The 3 significant movements must each have compelling, specific narratives — not generic filler. Chart data arrays must have exactly 7 entries. Campaign and keyword data should be realistic for the business scale.`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

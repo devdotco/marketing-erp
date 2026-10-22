@@ -60,6 +60,20 @@ export async function createMailchimpDraft(
   return data.id ?? "";
 }
 
+/**
+ * Put the issue's HTML into a Mailchimp draft. Creating the campaign sends no
+ * content, so without this the "draft in Mailchimp" was an empty shell.
+ */
+export async function setMailchimpContent(apiKey: string, server: string, campaignId: string, html: string): Promise<void> {
+  const res = await fetch(`https://${server}.api.mailchimp.com/3.0/campaigns/${campaignId}/content`, {
+    method: "PUT",
+    headers: { Authorization: mailchimpAuthHeader(apiKey), "Content-Type": "application/json" },
+    body: JSON.stringify({ html }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`Mailchimp set content ${res.status}: ${(await res.text()).slice(0, 300)}`);
+}
+
 // Klaviyo's API is revision-dated, not versioned. Its Campaigns endpoints were
 // still in beta (GA planned) as of when this was written — pin and re-verify
 // this against Settings → API Keys → API versioning in the Klaviyo dashboard

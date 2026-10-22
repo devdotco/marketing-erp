@@ -9,6 +9,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 function formatDate(d: Date): string {
   return d.toISOString().split("T")[0];
@@ -326,7 +327,7 @@ Return this exact JSON structure (no markdown, no code fences):
   "globalRecommendations": []
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

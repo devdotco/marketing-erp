@@ -11,6 +11,7 @@ import { AgentInputError } from "@/lib/ai/errors";
 import { listAimfoxCampaigns } from "@/lib/integrations/aimfox";
 import { parsePlayConfig, planCampaignResolution, type OutboundPlayConfig } from "./outbound-play-config";
 import type { OutboundLinkedinDelivery } from "./outbound-linkedin-delivery";
+import { completeMessage } from "@/lib/ai/messages";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
 // implementation lives in outbound-linkedin-delivery.ts, which imports neither Prisma nor
@@ -137,7 +138,7 @@ Return exactly:
   "toneNotes": "string"
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 1024,
     system: systemPrompt,

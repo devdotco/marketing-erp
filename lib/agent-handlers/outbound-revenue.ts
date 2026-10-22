@@ -11,6 +11,7 @@ import { prospectUpdatesFor } from "@/lib/webhooks/outbound-events";
 import type { OutboundRevenueDelivery, RevenueEvent } from "./outbound-revenue-delivery";
 import { buildCrmEngagement, wantsDeal } from "./outbound-revenue-delivery";
 import { parsePlayConfig } from "./outbound-play-config";
+import { completeMessage } from "@/lib/ai/messages";
 
 // Re-exported for lib/agent-handlers/on-approve.ts and test/content.test.ts — the actual
 // implementation lives in outbound-revenue-delivery.ts, which imports neither Prisma nor
@@ -172,7 +173,7 @@ Return exactly this JSON:
   ${wantsReplyDraft ? `"replyDraft": "a reply for a salesperson to review and send${replyText ? ", answering what they actually wrote" : ""} — plain text, under 120 words, no subject line, no placeholders like [name], sign off as the ${brand} team, and if they asked to be removed say only that we'll stop and apologise"` : `"replyDraft": null`}
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     // Sonnet, not Haiku: a person sends the reply draft this writes, and a note in a shared CRM
     // timeline is read by people who were not in the conversation.
     model: MODELS.standard,

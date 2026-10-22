@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const adCreativeHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -123,7 +124,7 @@ Return a JSON object with this exact structure:
   ]
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     // The form defaults ask for 15 concepts (3 platforms × 5), up to 30; 8096 leaves too little room for that JSON.
     max_tokens: 16000,

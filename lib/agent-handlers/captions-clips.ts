@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 // The handler's old free-text platform names, mapped onto the form's Target Platforms options.
 const OLD_PLATFORM_NAMES: Record<string, string> = {
@@ -118,7 +119,7 @@ export const captionsClipsHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

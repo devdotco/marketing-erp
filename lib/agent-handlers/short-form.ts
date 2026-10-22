@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -106,7 +107,7 @@ export const shortFormHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     // One script per clip per platform — the form defaults (5 clips × 3 platforms) outgrow 8096.
     max_tokens: 16000,

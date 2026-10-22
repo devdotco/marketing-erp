@@ -8,6 +8,7 @@ import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { listPublishedPosts, type PayloadCredentials, type PayloadPost } from "@/lib/integrations/payload";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const internalLinkingHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -188,7 +189,7 @@ Return this exact JSON structure (no markdown, no code fences):
   "quickWinLinks": []
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { toolInputFrom } from "@/lib/ai/extract";
-import { createMessage } from "@/lib/ai/messages";
+import { completeMessage } from "@/lib/ai/messages";
 import { resolveInputs, num } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
@@ -494,7 +494,7 @@ ${JSON.stringify(prospect, null, 2)}
 
 ${apolloBlock}${sourceSignalBlock ? `\n\n${sourceSignalBlock}` : ""}`;
 
-  const message = await createMessage(client, {
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 2048,
     system: systemPrompt,

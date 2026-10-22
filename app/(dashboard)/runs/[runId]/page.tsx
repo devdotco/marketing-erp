@@ -13,6 +13,10 @@ import { KeywordResearchReport } from "@/components/runs/KeywordResearchReport";
 import { buildKeywordReport, compareScans, isKeywordResearchOutput } from "@/lib/reports/keyword-research";
 import { previousKeywordScan } from "@/lib/reports/keyword-scans";
 import { withBase } from "@/lib/base-path";
+import { checkOutput, normalizeOutput, REVIEW_KEY } from "@/lib/agents/integrity";
+import { RunReview } from "@/components/runs/RunReview";
+import { RunInputs } from "@/components/runs/RunInputs";
+import { LocalTime } from "@/components/ui/LocalTime";
 
 export const metadata = {
   title: "Run",
@@ -52,7 +56,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
   const isActive = ["PENDING", "RUNNING"].includes(run.status);
   const needsApproval = run.status === "AWAITING_APPROVAL";
-  const output = run.output as Record<string, unknown> | null;
+  // A handler whose own parse failed stored the model's text under `result`;
+  // when that text is valid JSON after all, show it as the object it is.
+  const output = run.output && typeof run.output === "object" && !Array.isArray(run.output)
+    ? normalizeOutput(run.output as Record<string, unknown>)
+    : (run.output as Record<string, unknown> | null);
 
   // A failed run stores a structured error (see lib/ai/errors.ts). Older runs
   // stored the provider's raw message as a bare string — render both.
@@ -73,6 +81,15 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         ? { message: "The agent failed while running.", detail: rawError }
         : null;
   const hasReadableOutput = Boolean(output) && !runError;
+  const findings = hasReadableOutput ? checkOutput(output) : { blocking: [], warnings: [] };
+  // What the raw-JSON panel shows: the agent's output without the reserved keys
+  // that are rendered elsewhere on the page.
+  const displayOutput = (o: Record<string, unknown> | null) => {
+    const clone = { ...withoutProvenance(o ?? {}) };
+    delete clone[REVIEW_KEY];
+    delete clone["nearRankCsv"]; // downloadable above; the same rows are in nearRankOpportunities
+    return clone;
+  };
 
   // Keyword Research gets a dashboard, compared against the scan before it.
   const keywordReport =
@@ -120,7 +137,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </div>
 
         {needsApproval && (
-          <RunActions runId={runId} />
+          <RunActions runId={runId} approvable={findings.blocking.length === 0} />
         )}
       </div>
 
@@ -161,7 +178,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             Review required before publishing
           </p>
           <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            This agent produced output and is waiting for your approval. Review below, then approve or reject.
+            {findings.blocking.length > 0
+              ? "This output is incomplete and can't be approved. Reject it and run the agent again."
+              : findings.warnings.length > 0
+                ? `This agent produced output and is waiting for your approval. ${findings.warnings.length} item${findings.warnings.length === 1 ? " needs" : "s need"} checking first — see below.`
+                : "This agent produced output and is waiting for your approval. Review below, then approve or reject."}
           </p>
         </div>
       )}
@@ -174,6 +195,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           {hasReadableOutput && (
             <ProvenanceBanner output={output} agentSlug={run.agentConfig.agentSlug} />
           )}
+
+          {hasReadableOutput && <RunReview findings={findings} />}
 
           {runError?.code === "no_api_key" && (
             <ByokPrompt />
@@ -206,7 +229,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                   : runError.cause === "account"
                     ? "This is about your own provider account rather than anything in the run."
                     : "Nothing you entered caused this."}{" "}
-                No work was lost — the agent stopped before producing a draft.
+                {runError.code === "output_truncated" || runError.code === "output_incomplete"
+                  ? "The incomplete answer was discarded rather than offered for approval."
+                  : "No work was lost — the agent stopped before producing a draft."}
                 {Number(run.costUsd) === 0 ? " You were not charged for it." : ""}
               </p>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -313,7 +338,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               <details className="card">
                 <summary style={{ fontSize: 12, color: "var(--text-dim)", cursor: "pointer" }}>Raw output (JSON)</summary>
                 <pre style={{ fontSize: 11, fontFamily: "monospace", overflow: "auto", maxHeight: 400, background: "var(--surface-2)", padding: 14, borderRadius: "var(--radius)", color: "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 10 }}>
-                  {JSON.stringify(withoutProvenance(output ?? {}), null, 2)}
+                  {JSON.stringify(displayOutput(output), null, 2)}
                 </pre>
               </details>
             </>
@@ -321,7 +346,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
           {hasReadableOutput && output && !keywordReport && (
             <div className="card">
-              <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Output</h2>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                <h2 style={{ fontSize: 14, fontWeight: 600 }}>Output</h2>
+                {typeof output["nearRankCsv"] === "string" && (
+                  <a href={withBase(`/api/runs/${runId}/report`)} className="btn btn-secondary btn-sm">
+                    Download near-rank opportunities (CSV)
+                  </a>
+                )}
+              </div>
 
               {/* Blog post content */}
               {Boolean(output["content"]) && (
@@ -364,7 +396,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                     wordBreak: "break-word",
                   }}
                 >
-                  {JSON.stringify(withoutProvenance(output ?? {}), null, 2)}
+                  {JSON.stringify(displayOutput(output), null, 2)}
                 </pre>
               )}
             </div>
@@ -408,13 +440,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               <div>
                 <p style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>Started</p>
                 <p style={{ fontSize: 12, color: "var(--text)", margin: 0 }}>
-                  {run.startedAt ? run.startedAt.toLocaleString() : "—"}
+                  {run.startedAt ? <LocalTime iso={run.startedAt.toISOString()} /> : "—"}
                 </p>
               </div>
               {run.completedAt && (
                 <div>
                   <p style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 2 }}>Completed</p>
-                  <p style={{ fontSize: 12, color: "var(--text)", margin: 0 }}>{run.completedAt.toLocaleString()}</p>
+                  <p style={{ fontSize: 12, color: "var(--text)", margin: 0 }}><LocalTime iso={run.completedAt.toISOString()} /></p>
                 </div>
               )}
               {dur !== null && (
@@ -431,6 +463,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               </div>
             </div>
           </div>
+          <RunInputs agentSlug={run.agentConfig.agentSlug} input={run.input as Record<string, unknown> | null} />
         </div>
       </div>
     </div>

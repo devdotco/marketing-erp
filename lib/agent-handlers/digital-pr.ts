@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { lines, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const digitalPrHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -100,7 +101,7 @@ export const digitalPrHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     // Up to 5 angles × 3 tiers of full press releases — 4096 can't hold that JSON.
     max_tokens: 16000,
