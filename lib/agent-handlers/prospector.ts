@@ -16,6 +16,7 @@ import {
   coerceSendDay,
   resolveSendWindow,
 } from "./prospector-outreach";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -163,7 +164,7 @@ export const prospectorHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

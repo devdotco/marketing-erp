@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { lines, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const onboarderHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -154,7 +155,7 @@ ${JSON.stringify({
 
 Populate agentRecommendations with 6-8 agents from this platform (use real slugs like blog-writer, keyword-research, technical-audit, weekly-report, competitor-watch, email-marketing, linkedin-poster, x-poster, on-site-publisher, rank-tracker). Assign priorities honestly. Include 5-6 next steps that are specific and sequenced.`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,

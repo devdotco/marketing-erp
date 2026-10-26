@@ -6,6 +6,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const communityHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -95,7 +96,7 @@ export const communityHandler: AgentHandler = async (run, updateStatus) => {
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

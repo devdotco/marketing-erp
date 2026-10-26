@@ -5,6 +5,7 @@ import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasKeywordGap, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const competitorWatchHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -177,7 +178,7 @@ export const competitorWatchHandler: AgentHandler = async (run, updateStatus) =>
     }),
   ].filter(Boolean).join("\n");
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

@@ -90,7 +90,7 @@ export const AGENT_GROUNDING: Record<string, AgentGrounding> = {
   "internal-linking":     { kind: "artifact", canRead: ["CMS"] },
   "repurposer":           { kind: "artifact", canRead: [] },
   "landing-page-copy":    { kind: "artifact", canRead: [] },
-  "newsletter":           { kind: "artifact", canRead: [] },
+  "newsletter":           { kind: "artifact", canRead: ["WEB_SEARCH", "ESP"] },
   "schema":               { kind: "artifact", canRead: [] },
   "ad-creative":          { kind: "artifact", canRead: [] },
   "cro-experiments":      { kind: "artifact", canRead: ["GA4"] },

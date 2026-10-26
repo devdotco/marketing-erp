@@ -8,6 +8,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { bool, lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface Ga4Row {
   dimensionValues: Array<{ value: string }>;
@@ -224,7 +225,7 @@ ${JSON.stringify({
 
 Generate 5-7 channels per model with realistic percentage distributions that sum to 100%. Include 2-3 blind spots and 3-5 strategic insights. ${darkSocialEstimate ? "Include a meaningful dark social estimate (20-40% for B2B, 10-20% for B2C)." : ""}`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

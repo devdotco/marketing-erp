@@ -8,6 +8,7 @@ import { bool, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
 import { apolloMatchPerson } from "@/lib/integrations/apollo";
+import { completeMessage } from "@/lib/ai/messages";
 
 export const leadEnrichmentHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -294,7 +295,7 @@ Return JSON matching this exact shape (no markdown, no code fences):
   "simulationNote": "Connect Apollo in Settings > Integrations to enable live person and company enrichment from Apollo.io's database of 275M+ contacts."
 }`;
 
-    const message = await client.messages.create({
+    const message = await completeMessage(client, {
       model: MODELS.fast,
       max_tokens: 4096,
       system: systemPrompt,

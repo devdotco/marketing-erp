@@ -7,7 +7,7 @@ import { previousKeywordScan } from "@/lib/reports/keyword-scans";
 
 export const dynamic = "force-dynamic";
 
-/** The run's report as a standalone HTML file. Keyword Research only, for now. */
+/** The run's downloadable report: Keyword Research as HTML, Topic Planner's near-rank CSV. */
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ runId: string }> }) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -20,6 +20,20 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ run
   if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await requireWorkspaceAccess(run.workspaceId);
+
+  // Topic Planner promises a near-rank opportunities CSV; the handler builds it
+  // from the Search Console rows it read (never from the model).
+  const csv = (run.output as Record<string, unknown> | null)?.["nearRankCsv"];
+  if (run.agentConfig.agentSlug === "topic-planner" && typeof csv === "string") {
+    const day = (run.completedAt ?? run.createdAt).toISOString().slice(0, 10);
+    const filename = `near-rank-opportunities-${run.workspace.slug}-${day}.csv`.replace(/[^a-zA-Z0-9._-]/g, "-");
+    return new NextResponse(csv, {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+    });
+  }
 
   if (run.agentConfig.agentSlug !== "keyword-research" || !isKeywordResearchOutput(run.output)) {
     return NextResponse.json({ error: "This run has no downloadable report" }, { status: 404 });

@@ -26,7 +26,7 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import { AgentInputError } from "@/lib/ai/errors";
-import { createMessage } from "@/lib/ai/messages";
+import { completeMessage } from "@/lib/ai/messages";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { strictSchema } from "@/lib/content/article";
 import type { EditorialProfile } from "@/lib/content/editorial";
@@ -230,7 +230,7 @@ export async function generateOutreachSequence(
     "Each step after the first should reference that this is a follow-up, vary its angle from the previous step, and stay short.",
   ].filter(Boolean).join("\n");
 
-  const message = await createMessage(client, {
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 4096,
     system,

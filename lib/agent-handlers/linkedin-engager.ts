@@ -3,7 +3,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { decryptCredentials } from "@/lib/crypto";
 import { estimateCostUsd, MODELS } from "@/lib/ai/models";
-import { createMessage } from "@/lib/ai/messages";
+import { completeMessage } from "@/lib/ai/messages";
 import { resolveInputs, str, num, lines } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { AgentInputError } from "@/lib/ai/errors";
@@ -267,7 +267,7 @@ export const linkedinEngagerHandler: AgentHandler = async (run, updateStatus) =>
     .filter(Boolean)
     .join("\n\n");
 
-  const message = await createMessage(client, {
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 4096,
     system,

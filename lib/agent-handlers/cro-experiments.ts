@@ -8,6 +8,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { lines, num, resolveInputs, str } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface Ga4Row {
   dimensionValues: Array<{ value: string }>;
@@ -210,7 +211,7 @@ Return a JSON object with this exact structure:
   "simulationNote": "Connect GA4 in Settings to pull real page performance data. These hypotheses are generated from your page description."
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

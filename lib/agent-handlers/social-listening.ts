@@ -5,6 +5,7 @@ import { estimateCostUsd, MODELS } from "@/lib/ai/models";
 import { textFrom } from "@/lib/ai/extract";
 import { resolveInputs } from "@/lib/agents/inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
+import { completeMessage } from "@/lib/ai/messages";
 
 interface RedditPost {
   title: string;
@@ -193,7 +194,7 @@ Return exactly this JSON structure:
   "simulationNote": ${isLive ? "null" : '"Connect X and Reddit integrations in Settings to monitor real mentions. Reddit data shown is live via public API."'}
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.fast,
     max_tokens: 4096,
     system: systemPrompt,

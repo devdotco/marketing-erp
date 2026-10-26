@@ -5,6 +5,7 @@ import { getHandler } from "@/lib/agent-handlers/index";
 import { runOutboundChaining } from "@/lib/agent-handlers/chaining";
 import { describeRunError } from "@/lib/ai/errors";
 import { checkModelsAvailable } from "@/lib/ai/models";
+import { checkOutput, normalizeOutput, OutputIncompleteError, outputPreview } from "@/lib/agents/integrity";
 import { startScheduler } from "@/lib/scheduler";
 
 const worker = new Worker(
@@ -30,7 +31,18 @@ const worker = new Worker(
       data: { status: "RUNNING", startedAt: new Date() },
     });
 
-    const updateStatus = async (status: string, output?: Record<string, unknown>) => {
+    // Nothing reaches a reviewer, or counts as COMPLETED, until it passes the
+    // integrity check. A cut-off or empty answer fails the run instead — see
+    // lib/agents/integrity.ts for what this used to let through.
+    const gate = (output: Record<string, unknown>): Record<string, unknown> => {
+      const normalized = normalizeOutput(output);
+      const { blocking } = checkOutput(normalized);
+      if (blocking.length > 0) throw new OutputIncompleteError(blocking, outputPreview(normalized));
+      return normalized;
+    };
+
+    const updateStatus = async (status: string, rawOutput?: Record<string, unknown>) => {
+      const output = rawOutput && (status === "AWAITING_APPROVAL" || status === "COMPLETED") ? gate(rawOutput) : rawOutput;
       await prisma.agentRun.update({
         where: { id: runId },
         data: { status: status as never, ...(output ? { output: output as object } : {}) },
@@ -40,7 +52,9 @@ const worker = new Worker(
     const handler = getHandler(run.agentConfig.agentSlug);
 
     try {
-      const { output, costUsd } = await handler(run as Parameters<typeof handler>[0], updateStatus);
+      const result = await handler(run as Parameters<typeof handler>[0], updateStatus);
+      const costUsd = result.costUsd;
+      const output = gate(result.output);
 
       // Only mark COMPLETED if not AWAITING_APPROVAL (handler may have set that)
       const freshRun = await prisma.agentRun.findUnique({ where: { id: runId } });
@@ -101,6 +115,9 @@ const worker = new Worker(
             },
           },
           completedAt: new Date(),
+          // A cut-off answer was still generated and billed to the workspace's
+          // key; record it rather than show the run as free.
+          ...(typeof (err as { costUsd?: unknown })?.costUsd === "number" ? { costUsd: (err as { costUsd: number }).costUsd } : {}),
         },
       });
 

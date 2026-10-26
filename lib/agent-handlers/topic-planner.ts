@@ -9,6 +9,11 @@ import { AgentInputError } from "@/lib/ai/errors";
 import { applyRenamedInputs } from "./renamed-inputs";
 import { resolveAnthropic } from "@/lib/ai/client";
 import { bareDomain, fetchAhrefsOrganicKeywords, fetchSearchAtlasTopicalMap, fetchSemrushDomainOrganic, resolveSeoLiveData } from "./seo-data-providers";
+import { completeMessage } from "@/lib/ai/messages";
+import { jsonFrom } from "@/lib/ai/extract";
+import { addReview } from "@/lib/agents/integrity";
+import { withProvenance, type EvidenceRecord } from "@/lib/agents/provenance";
+import { allowedFormats, checkTopicPlan, toCsv, weekStartDates, type NearRankRow } from "@/lib/agents/topic-plan";
 
 export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
   await updateStatus("RUNNING");
@@ -46,6 +51,12 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
     .filter(Boolean)
     .slice(0, 3);
 
+  // What was actually read — the output's dataSources and provenance are built from
+  // these, never from the model, so they can't claim a source that wasn't called.
+  let nearRankRows: NearRankRow[] | undefined;
+  let gscLabel: string | undefined;
+  let seoToolLabel: string | undefined;
+
   const liveResult = competitorDomains.length === 0 || seoTool === "None"
     ? ({ source: "simulation" } as const)
     : await resolveSeoLiveData(
@@ -72,7 +83,10 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
         },
       );
   let source = liveResult.source;
-  if (liveResult.source === "live") liveDataSection = liveResult.section;
+  if (liveResult.source === "live") {
+    liveDataSection = liveResult.section;
+    seoToolLabel = liveResult.provider === "AHREFS" ? "Ahrefs" : liveResult.provider === "SEMRUSH" ? "Semrush" : "SearchAtlas";
+  }
   // --- End live API ---
 
   // --- Live GSC: near-rank queries ---
@@ -110,7 +124,7 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
         );
         if (!res.ok) throw new Error(`Search Console API ${res.status}: ${(await res.text()).slice(0, 300)}`);
         const data = (await res.json()) as { rows?: Array<{ keys: string[]; clicks: number; impressions: number; position: number }> };
-        const nearRank = (data.rows ?? [])
+        const nearRank: NearRankRow[] = (data.rows ?? [])
           .filter((r) => r.position >= 4 && r.position <= 20 && r.impressions >= 10)
           .sort((a, b) => b.impressions - a.impressions)
           .slice(0, 60)
@@ -121,7 +135,9 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
             impressions: r.impressions,
             clicks: r.clicks,
           }));
-        liveDataSection += `\n\nLIVE GOOGLE SEARCH CONSOLE NEAR-RANK QUERIES for ${propertyUrl} (last 90 days, average position 4–20):\n${JSON.stringify(nearRank, null, 2)}\n\nThese queries already rank close to the top of page one or just off it. Prefer topics that would win them (a dedicated piece, or a refresh of the ranking page), and weight winnability accordingly.`;
+        nearRankRows = nearRank;
+        gscLabel = `Google Search Console (${propertyUrl}, 90 days)`;
+        liveDataSection += `\n\nLIVE GOOGLE SEARCH CONSOLE NEAR-RANK QUERIES for ${propertyUrl} (last 90 days, average position 4–20):\n${JSON.stringify(nearRank, null, 2)}\n\nThese queries already rank close to the top of page one or just off it. Prefer topics that would win them (a dedicated piece, or a refresh of the ranking page), and weight winnability accordingly. For a refresh or consolidate topic, existingUrl must be copied verbatim from the "page" field of a row above.`;
         source = "live";
       }
     } catch (err) {
@@ -151,8 +167,17 @@ export const topicPlannerHandler: AgentHandler = async (run, updateStatus) => {
   if (topicIdeasResult.source === "live") {
     liveDataSection += topicIdeasResult.section;
     source = "live";
+    const atlas = "SearchAtlas";
+    if (!seoToolLabel) seoToolLabel = atlas;
+    else if (seoToolLabel !== atlas) seoToolLabel += ` + ${atlas}`;
   }
   // --- End live API ---
+
+  const today = new Date();
+  const currentYear = today.getUTCFullYear();
+  const weekStarts = weekStartDates(today, planningHorizonWeeks);
+  const formats = allowedFormats(contentFormats);
+  const seoToolRead = Boolean(seoToolLabel);
 
   const systemPrompt = `You are a senior content strategist and SEO specialist who builds data-driven content calendars. You analyze competitor content gaps, near-ranking keyword opportunities, and audience search intent to surface the highest-impact topics. You score every topic by "winnability" — a composite of estimated search volume, keyword difficulty, business relevance, topical authority, and time-to-rank estimate. You think in clusters, not individual posts. Always return valid, minified JSON with no markdown fences.`;
 
@@ -174,13 +199,21 @@ ${competitorUrls || "Infer typical competitors from the industry"}
 ${liveDataSection}
 Calendar period: ${calendarPeriod} (${postsPerWeek} post${postsPerWeek === 1 ? "" : "s"} per week)
 
-Content formats allowed: ${contentFormats === "Blog posts only" ? "blog posts only — every topic's contentFormat must be a blog post type (pillar, cluster post, listicle, comparison, tutorial, case study)" : contentFormats === "Blog + landing pages" ? "blog posts and landing pages only" : "any format (blog posts, landing pages, guides, tools, video)"}
+Content formats allowed: every topic's contentFormat must be exactly one of: ${formats.join(", ")}. A case study is about one named customer engagement; a benchmark report needs original data; pick the format the title actually describes.
+Weeks start on: ${weekStarts.map((d, i) => `week ${i + 1} = ${d}`).join(", ")}.
 ${excludedTopics.length > 0 ? `\nExcluded topics and keywords — never include a topic built on any of these, regardless of score:\n${excludedTopics.join("\n")}\n` : ""}
 Instructions:
 - Group topics by week with a weekly theme tying each week together, ${postsPerWeek} topic${postsPerWeek === 1 ? "" : "s"} per week
-- For each topic include: primary keyword, 3-5 LSI keywords, search intent, monthly search volume bracket, competition level, winnability score (1-100), content format, recommended word count, publish week, and a 1-2 sentence strategic rationale
+- For each topic include: primary keyword, up to 4 LSI keywords, search intent, monthly search volume bracket, competition level, winnability score (1-100), content format, recommended word count, publish week, and a strategic rationale
 - Identify quick wins (winnability >= 75) and long-game topics (high volume, higher competition)
 - Provide competitor gap insights based on the competitor URLs
+- Titles: never put a year in a title unless it is ${currentYear} or later
+- Every topic has an action: "new", "refresh" or "consolidate". existingUrl is null for new; for refresh or consolidate it must be a page URL copied verbatim from the Search Console rows above. Consolidate also needs mergeUrls (the pages to merge and 301). Never fold several city or location pages into one post whose primary keyword names only one of them.
+- projectedMonthlyClicks is a whole number per topic. projectionBasis is "GSC: <n> impressions at position <p>" when the topic targets a near-rank Search Console query (use that row's numbers), otherwise "estimate".
+${seoToolRead ? "- keywordDifficulty and estimatedMonthlyTraffic must come from the live SEO data above; use null where it has no figure" : "- No live SEO-tool data was read: set keywordDifficulty and every estimatedMonthlyTraffic to null. Never estimate them."}
+- requires lists assets or data that must be built or sourced before publishing (a calculator, a dataset, customer permission); empty if none. A benchmark report needs data the business may not have, so list it. callToAction may only point at the business's normal conversion (contact or consultation) unless the asset is in requires, and must read as the business pitching itself, not a directory ("find an expert near you").
+- Winnability: weight business relevance to the Business Profile (description and industry) explicitly; a topic off the business's offer scores low however big its volume. Keep volumeBracket consistent with GSC impressions when a row exists. Zero clicks at position ~8 points to a title/snippet or intent mismatch, not untapped traffic: say which in the rationale.
+- Output size: minified JSON, at most 4 lsiKeywords, rationale at most 2 sentences. quickWins, longGameTopics, prioritizationMatrix and the cluster ids are topic ids only, not copies of topics.
 
 Return this exact JSON structure (no markdown, no code fences):
 {
@@ -197,13 +230,12 @@ Return this exact JSON structure (no markdown, no code fences):
       "tutorials": 0,
       "caseStudies": 0
     },
-    "estimatedOrganicLiftPercent": 0,
     "topKeywordThemes": []
   },
   "competitorGapInsights": [
     {
       "competitorUrl": "",
-      "estimatedMonthlyTraffic": "",
+      "estimatedMonthlyTraffic": null,
       "topicsTheyDominateWeAreWeak": [],
       "topicsTheyMissedThatWeCanWin": [],
       "overallGapScore": 0
@@ -212,6 +244,7 @@ Return this exact JSON structure (no markdown, no code fences):
   "weeklyCalendar": [
     {
       "week": 1,
+      "weekStarting": "",
       "weekLabel": "",
       "weekTheme": "",
       "strategicFocus": "",
@@ -224,7 +257,10 @@ Return this exact JSON structure (no markdown, no code fences):
           "intent": "",
           "volumeBracket": "",
           "competition": "",
-          "keywordDifficulty": 0,
+          "action": "new",
+          "existingUrl": null,
+          "mergeUrls": [],
+          "keywordDifficulty": null,
           "winnabilityScore": 0,
           "contentFormat": "",
           "recommendedWordCount": 0,
@@ -232,6 +268,9 @@ Return this exact JSON structure (no markdown, no code fences):
           "publishWeek": 0,
           "estimatedTimeToRankDays": 0,
           "rationale": "",
+          "projectedMonthlyClicks": 0,
+          "projectionBasis": "",
+          "requires": [],
           "callToAction": ""
         }
       ]
@@ -255,7 +294,7 @@ Return this exact JSON structure (no markdown, no code fences):
   }
 }`;
 
-  const message = await client.messages.create({
+  const message = await completeMessage(client, {
     model: MODELS.standard,
     max_tokens: 8096,
     system: systemPrompt,
@@ -263,12 +302,25 @@ Return this exact JSON structure (no markdown, no code fences):
   });
 
   const rawText = textFrom(message);
-  const jsonMatch = rawText.match(/\{[\s\S]+\}/);
-  let output: Record<string, unknown>;
-  try {
-    output = jsonMatch ? JSON.parse(jsonMatch[0]) : { result: rawText };
-  } catch {
-    output = { result: rawText };
+  const parsed = jsonFrom(rawText);
+  const output: Record<string, unknown> = parsed ?? { result: rawText };
+
+  // Only a parsed plan is checked; the platform gate catches the raw-text fallback.
+  if (parsed) {
+    const warnings = checkTopicPlan(output, {
+      gscPages: (nearRankRows ?? []).map((r) => r.page),
+      seoToolRead,
+      formats,
+      currentYear,
+      weekStarts,
+    });
+    if (warnings.length) addReview(output, { warnings });
+    // Built here, not by the model, so it can't list a source that wasn't read.
+    output.dataSources = [gscLabel, seoToolLabel].filter(Boolean);
+  }
+  if (nearRankRows) {
+    output.nearRankOpportunities = nearRankRows;
+    output.nearRankCsv = toCsv(nearRankRows);
   }
 
   output.generatedAt = new Date().toISOString();
@@ -281,6 +333,11 @@ Return this exact JSON structure (no markdown, no code fences):
     output.simulationNote =
       "Connect Google Search Console in Settings to pull real near-ranking queries, impressions, and CTR data. Connect Ahrefs or Semrush to get live keyword difficulty and volume instead of estimates, or SearchAtlas for real AI-generated topic ideas and clustered keywords instead of invented ones.";
   }
+
+  const evidence: EvidenceRecord[] = [];
+  if (gscLabel) evidence.push({ source: "GSC", detail: gscLabel, rows: nearRankRows?.length });
+  if (seoToolLabel) evidence.push({ source: "SEO_API", detail: seoToolLabel });
+  withProvenance(output, "topic-planner", evidence);
 
   const requireApproval = config.requireApproval !== false;
   if (requireApproval) {
