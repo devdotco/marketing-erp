@@ -17,9 +17,16 @@ export function LocalTime({ iso }: { iso: string }) {
   const local = useSyncExternalStore(
     noopSubscribe,
     () =>
+      // Explicit fields, not dateStyle/timeStyle: those two cannot be combined
+      // with timeZoneName, and the browser throws "Invalid option" during
+      // render — which took down every run page (2026-10-26).
       date.toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "medium",
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
         timeZoneName: "short",
       }),
     () => `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`,
