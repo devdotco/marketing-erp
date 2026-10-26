@@ -44,7 +44,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Above the route groups so a tab left open across a deploy
             recovers on every page, sign-in and error pages included. */}
         <StaleBuildReloader />
-        <SessionProvider>
+        {/* Auth.js lives under the /marketing mount (lib/auth.ts). Without this
+            the client polls app.erp.io/api/auth/session, which 404s. */}
+        <SessionProvider basePath="/marketing/api/auth">
           {children}
         </SessionProvider>
       </body>
