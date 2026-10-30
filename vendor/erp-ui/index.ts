@@ -28,6 +28,7 @@ export {
   type ErpModule, type ErpModuleKey,
 } from './registry'
 export { ERP_MODULE_ICONS } from './icons'
+export { speculatableHrefs, speculationRulesFor, type SpeculationRules } from './speculation'
 export {
   fetchModuleLinks,
   fetchModuleLinkResponse,

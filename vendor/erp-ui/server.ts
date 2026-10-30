@@ -28,6 +28,8 @@ export type ErpShellNav = {
   brand: ErpBrand | null
   /** Module keys this organisation may open. Empty means "show every live one". */
   modules: string[]
+  /** Enabled but beyond the plan's slots: the mint refuses these, so should a fast-path module. */
+  parked: string[]
 }
 
 /**
@@ -42,26 +44,29 @@ export type ErpShellNav = {
  * the suite looked before either existed. Nobody is locked out of their work
  * because a chrome lookup timed out.
  */
-export async function loadShellNav(): Promise<ErpShellNav> {
+export async function loadShellNav(opts: { module?: string } = {}): Promise<ErpShellNav> {
   const token = (await cookies()).get(SHELL_COOKIE)?.value
-  if (!token) return { brand: null, modules: [] }
+  if (!token) return { brand: null, modules: [], parked: [] }
 
   try {
-    const res = await fetch(`${erpShellUrl()}/api/shell/nav`, {
+    // `module` names the caller so the shell can record use (see the route).
+    const query = opts.module ? `?module=${encodeURIComponent(opts.module)}` : ''
+    const res = await fetch(`${erpShellUrl()}/api/shell/nav${query}`, {
       headers: { cookie: `${SHELL_COOKIE}=${token}` },
       signal: AbortSignal.timeout(3000),
       cache: 'no-store',
     })
-    if (!res.ok) return { brand: null, modules: [] }
+    if (!res.ok) return { brand: null, modules: [], parked: [] }
 
-    const body = (await res.json()) as { brand?: ErpBrand | null; modules?: { key?: string }[] }
+    const body = (await res.json()) as { brand?: ErpBrand | null; modules?: { key?: string }[]; parked?: unknown }
     return {
       brand: body.brand ?? null,
       modules: Array.isArray(body.modules)
         ? body.modules.flatMap(m => (m?.key ? [m.key] : []))
         : [],
+      parked: Array.isArray(body.parked) ? body.parked.filter((k): k is string => typeof k === 'string') : [],
     }
   } catch {
-    return { brand: null, modules: [] }
+    return { brand: null, modules: [], parked: [] }
   }
 }

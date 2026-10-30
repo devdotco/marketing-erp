@@ -79,7 +79,14 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   // Best-effort: brandVars(null) draws the erp.io defaults.
 
-  const { brand, modules } = await loadShellNav();
+  const { brand, modules, parked } = await loadShellNav({ module: "marketing" });
+
+  // Beyond what the org's plan covers: billing explains and offers Make live.
+  // A shell outage reports nothing parked, so it never locks anyone out.
+  if (parked.includes("marketing")) {
+    const shell = (process.env.SHELL_URL ?? "https://app.erp.io").replace(/\/$/, "");
+    redirect(`${shell}/settings/org/billing?over=marketing`);
+  }
 
   // Whether this workspace can run anything at all. Best-effort: a lookup
   // failure must never take the whole dashboard down with it.

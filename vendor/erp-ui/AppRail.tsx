@@ -5,12 +5,14 @@
  */
 'use client'
 
+import { useEffect } from 'react'
 import { Home, Bell, LogOut } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { ERP_MODULES, SHELL_URL, type ErpModuleKey } from './registry'
 import { ERP_MODULE_ICONS } from './icons'
 import { brandMark, type ErpBrand } from './brand'
 import { useErpChromeClose } from './chrome-context'
+import { speculatableHrefs, speculationRulesFor } from './speculation'
 
 export type ErpRailItem = {
   key: string
@@ -129,6 +131,27 @@ export function AppRail({
   // From context, so a server-component layout never has to pass a function.
   const closeDrawer = useErpChromeClose()
   const onNavigate = onNavigateProp ?? closeDrawer
+
+  // Warm the other modules in the background. Feature-detected, so Safari and
+  // Firefox (no speculation rules) do nothing at all. Only direct module URLs
+  // are ever offered — see speculation.ts for why the hand-off is excluded.
+  const hrefKey = items.map(i => i.href).join('\n')
+  useEffect(() => {
+    if (typeof HTMLScriptElement === 'undefined' || !HTMLScriptElement.supports?.('speculationrules')) return
+    const active = items.find(i => i.key === activeKey)
+    const activePath = active ? new URL(active.href, location.origin).pathname.replace(/\/+$/, '') : undefined
+    const rules = speculationRulesFor(
+      speculatableHrefs(items.map(i => i.href), location.origin, activePath),
+    )
+    if (!rules) return
+    const el = document.createElement('script')
+    el.type = 'speculationrules'
+    el.textContent = JSON.stringify(rules)
+    document.head.appendChild(el)
+    return () => el.remove()
+    // `items` is a fresh array each render; its hrefs are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hrefKey, activeKey])
 
   return (
     <nav className="erp-rail" aria-label="Applications">

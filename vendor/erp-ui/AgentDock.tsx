@@ -6,7 +6,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { MessageSquare, X, CornerDownLeft, Loader2 } from 'lucide-react'
+import { MessageSquare, X, CornerDownLeft, Loader2, Plus } from 'lucide-react'
 import { SHELL_URL } from './registry'
 import { startersFor } from './starter-questions'
 
@@ -31,9 +31,23 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Brigham when the org has it (the shell then answers through Brigham), otherwise the suite assistant.
+  const [name, setName] = useState('Assistant')
+  // Brigham keeps the thread: follow-ups continue the same Brigham conversation.
+  const [conversationId, setConversationId] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const starters = startersFor(moduleKey)
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    fetch(`${SHELL_URL}/api/shell/agent/ask`, { credentials: 'include', cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { assistant?: string } | null) => { if (live && d?.assistant) setName(d.assistant) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [open])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -53,9 +67,11 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
         headers: { 'Content-Type': 'application/json' },
         // The shell needs the caller's cookies to answer as them.
         credentials: 'include',
-        body: JSON.stringify({ question: q, module: moduleKey }),
+        body: JSON.stringify({ question: q, module: moduleKey, conversationId }),
       })
-      const data = (await res.json()) as { answer?: string; sources?: Source[]; error?: string }
+      const data = (await res.json()) as { answer?: string; sources?: Source[]; error?: string; assistant?: string; conversationId?: string }
+      if (data.assistant) setName(data.assistant)
+      if (data.conversationId) setConversationId(data.conversationId)
 
       if (!res.ok || !data.answer) {
         // A budget refusal is the one error worth reading in full — it tells
@@ -73,17 +89,22 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
 
   if (!open) {
     return (
-      <button className="erp-dock-fab" onClick={() => setOpen(true)} aria-label="Ask the assistant">
+      <button className="erp-dock-fab" onClick={() => setOpen(true)} aria-label={`Ask ${name}`}>
         <MessageSquare size={18} />
       </button>
     )
   }
 
   return (
-    <div className="erp-dock" role="dialog" aria-label="Assistant">
+    <div className="erp-dock" role="dialog" aria-label={name}>
       <div className="erp-dock-head">
-        <span className="erp-dock-title">Assistant</span>
-        <button className="erp-dock-close" onClick={() => setOpen(false)} aria-label="Close assistant">
+        <span className="erp-dock-title">{name}</span>
+        {turns.length > 0 && (
+          <button className="erp-dock-close" onClick={() => { setTurns([]); setConversationId(null); setError(null) }} aria-label="New conversation" title="New conversation" style={{ marginLeft: 'auto' }}>
+            <Plus size={15} />
+          </button>
+        )}
+        <button className="erp-dock-close" onClick={() => setOpen(false)} aria-label={`Close ${name}`}>
           <X size={15} />
         </button>
       </div>
@@ -92,8 +113,9 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
         {turns.length === 0 && (
           <>
             <p className="erp-dock-hint">
-              Ask about what you can see across the suite. Answers come from your own
-              records — nothing you do not already have access to.
+              {name === 'Brigham'
+                ? 'Ask Brigham anything, or tell him what to do: your pipeline, email, calendar, tasks, standing orders. He sees only what you can see.'
+                : 'Ask about what you can see across the suite. Answers come from your own records — nothing you do not already have access to.'}
             </p>
             {starters.map(s => (
               <button key={s} className="erp-dock-starter" onClick={() => ask(s)}>
@@ -105,7 +127,7 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
 
         {turns.map((t, i) => (
           <div key={i} className={`erp-dock-turn is-${t.role}`}>
-            <div className="erp-dock-text">{t.text}</div>
+            <div className="erp-dock-text">{t.role === 'assistant' ? <Rich text={t.text} /> : t.text}</div>
             {t.sources && t.sources.length > 0 && (
               <div className="erp-dock-sources">
                 {/* Shown so an answer can be checked rather than trusted. */}
@@ -138,7 +160,7 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
           className="erp-dock-input"
           value={draft}
           onChange={e => setDraft(e.target.value)}
-          placeholder="Ask about your records…"
+          placeholder={name === 'Brigham' ? 'Ask Brigham…' : 'Ask about your records…'}
           disabled={busy}
           aria-label="Your question"
         />
@@ -147,5 +169,26 @@ export function AgentDock({ moduleKey }: { moduleKey?: string }) {
         </button>
       </form>
     </div>
+  )
+}
+
+/**
+ * Just enough Markdown for chat answers: **bold**, `code`, and line breaks
+ * (lists and tables stay as their plain-text lines). Built from React
+ * elements, never innerHTML, so answer text cannot inject markup.
+ */
+function Rich({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('\n').map((line, i) => (
+        <span key={i} style={{ display: 'block', minHeight: line ? undefined : '0.6em' }}>
+          {line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, j) =>
+            part.startsWith('**') && part.endsWith('**') && part.length > 4 ? <strong key={j}>{part.slice(2, -2)}</strong>
+              : part.startsWith('`') && part.endsWith('`') && part.length > 2 ? <code key={j}>{part.slice(1, -1)}</code>
+                : part,
+          )}
+        </span>
+      ))}
+    </>
   )
 }
