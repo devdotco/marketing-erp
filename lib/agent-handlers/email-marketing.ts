@@ -12,6 +12,7 @@ import { emailSequenceToSteps, parseAudienceEmails, stageInstantlyCampaign, stag
 import { resolveCrmConnection, type CrmConnection } from "@/lib/integrations/crm-connection";
 import type { CreateInstantlyCampaignInput } from "@/lib/integrations/instantly";
 import { completeMessage } from "@/lib/ai/messages";
+import { emailCampaignHandler } from "./email-campaign";
 
 type InstantlySendDay = NonNullable<CreateInstantlyCampaignInput["sendDayOfWeek"]>;
 const INSTANTLY_SEND_DAYS: readonly InstantlySendDay[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -20,6 +21,11 @@ function coerceInstantlySendDay(value: unknown): InstantlySendDay | undefined {
 }
 
 export const emailMarketingHandler: AgentHandler = async (run, updateStatus) => {
+  // A saved campaign type (Press Release, Dashboard…) runs its own locked-template path.
+  if (run.input && typeof run.input === "object" && "campaignId" in run.input) {
+    return emailCampaignHandler(run, updateStatus);
+  }
+
   await updateStatus("RUNNING");
 
   // Runs on the workspace's own Anthropic key (see lib/ai/client.ts).

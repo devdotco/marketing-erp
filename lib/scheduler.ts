@@ -37,6 +37,7 @@ import { prisma } from "@/lib/prisma";
 import { getRedisConnection } from "@/lib/queue";
 import { createAgentRun } from "@/lib/agents/create-run";
 import { parseCron, matchesCron, slotKeyFor } from "@/lib/cron";
+import { campaignSchedule, draftDueAt } from "@/lib/email-campaigns/schedule";
 
 const LOCK_TTL_SECONDS = 120; // comfortably longer than the 60s tick, so a slow tick can't race its own lock
 const POLL_INTERVAL_MS = 60_000;
@@ -60,6 +61,64 @@ export async function runDueSchedules(now: Date = new Date()): Promise<void> {
     await evaluateOne(config, slot).catch((err) => {
       console.error(`[scheduler] config ${config.id} (${config.agentSlug}) failed:`, err);
     });
+  }
+
+  await runDueCampaignDrafts(slot).catch((err) => console.error("[scheduler] email campaigns failed:", err));
+}
+
+/**
+ * Email Marketing campaign types keep their own monthly Nth-weekday calendar
+ * (lib/email-campaigns/schedule.ts) rather than a cron string: the draft runs
+ * on the Monday before each send, and the run carries that send's date so
+ * approval schedules exactly it. Needs both the campaign and the Email
+ * Marketing agent switched on. One draft per (campaign, send date): the
+ * handler also dedupes, but checking here keeps a duplicate from ever queuing.
+ */
+export async function runDueCampaignDrafts(slot: Date): Promise<void> {
+  const campaigns = await prisma.emailCampaign.findMany({ where: { enabled: true } });
+  for (const campaign of campaigns) {
+    const due = (() => {
+      try {
+        return draftDueAt(campaignSchedule(campaign), slot);
+      } catch (err) {
+        console.error(`[scheduler] campaign ${campaign.id} has an invalid calendar, skipping:`, err instanceof Error ? err.message : err);
+        return null;
+      }
+    })();
+    if (!due) continue;
+
+    const config = await prisma.agentConfig.findUnique({
+      where: { workspaceId_agentSlug: { workspaceId: campaign.workspaceId, agentSlug: "email-marketing" } },
+    });
+    if (!config?.enabled) {
+      console.log(`[scheduler] campaign ${campaign.id} (${campaign.name}) due for ${due.sendDate} — skipped, Email Marketing is off`);
+      continue;
+    }
+
+    const acquired = await getRedisConnection().set(`sched-lock:campaign:${campaign.id}:${slotKeyFor(slot)}`, "1", "EX", LOCK_TTL_SECONDS, "NX");
+    if (acquired !== "OK") continue;
+
+    const existing = await prisma.agentRun.findFirst({
+      where: {
+        agentConfigId: config.id,
+        status: { notIn: ["FAILED", "REJECTED"] },
+        AND: [{ input: { path: ["campaignId"], equals: campaign.id } }, { input: { path: ["sendDate"], equals: due.sendDate } }],
+        NOT: { input: { path: ["test"], equals: true } },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      console.log(`[scheduler] campaign ${campaign.id} (${campaign.name}) for ${due.sendDate} — already prepared as ${existing.id}`);
+      continue;
+    }
+
+    const run = await createAgentRun({
+      workspaceId: campaign.workspaceId,
+      agentConfigId: config.id,
+      input: { campaignId: campaign.id, sendDate: due.sendDate },
+      triggeredBy: "schedule",
+    });
+    console.log(`[scheduler] campaign ${campaign.id} (${campaign.name}) for ${due.sendDate} — enqueued run ${run.id}`);
   }
 }
 

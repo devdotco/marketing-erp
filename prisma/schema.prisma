@@ -101,6 +101,8 @@ model Workspace {
   observations      Observation[]
   crawlerDaily      CrawlerDaily[]
   referralDaily     ReferralDaily[]
+  emailTemplates    EmailTemplate[]
+  emailCampaigns    EmailCampaign[]
   /// Whether this workspace may fall back to the platform's own Anthropic key.
   /// Off by default: every tenant brings its own, so model spend lands on the
   /// account that asked for the work. Only a super admin turns this on, and
@@ -268,6 +270,11 @@ enum IntegrationProvider {
   /// Google's Gemini API text-to-speech — the Podcast agent's alternative
   /// voice provider to Cartesia. AI Studio API key. See lib/voice/google-tts.ts.
   GOOGLE_TTS
+  /// SendGrid Marketing Campaigns — Email Marketing's campaign types create a
+  /// draft Single Send on each run and schedule it on approval. Credentials
+  /// carry the sender address and suppression group as well as the key. See
+  /// lib/integrations/sendgrid.ts.
+  SENDGRID
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────
@@ -818,4 +825,69 @@ model LogBatchReceipt {
   receivedAt  DateTime @default(now())
 
   @@index([receivedAt])
+}
+
+// ─── Email Marketing: templates and campaign types ──────────────────────────
+
+/// A master email the Email Marketing agent fills in. Everything outside the
+/// `<!--edit:key kind-->…<!--/edit:key-->` markers is locked: the agent only
+/// ever replaces what is between them, and a pre-approval check compares the
+/// locked skeleton byte for byte. See lib/email-campaigns/template.ts.
+model EmailTemplate {
+  id          String          @id @default(cuid())
+  workspaceId String
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  html        String          @db.Text
+  updatedBy   String?
+  campaigns   EmailCampaign[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([workspaceId])
+}
+
+/// A saved campaign type under the Email Marketing agent ("Press Release",
+/// "Dashboard"): its own template, audience, latitude, sources and monthly
+/// calendar. The scheduler drafts one run per send date; approving that run is
+/// what attaches the audience and schedules the SendGrid Single Send.
+model EmailCampaign {
+  id                 String        @id @default(cuid())
+  workspaceId        String
+  workspace          Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name               String
+  enabled            Boolean       @default(false)
+  templateId         String
+  template           EmailTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  /// SendGrid audience, attached at approval — never on the draft.
+  listIds            String[]
+  segmentIds         String[]
+  /// Section groups the agent may rewrite ("headline", "intro", "stats"…).
+  /// Every other marked section keeps the master's copy.
+  editableSections   String[]
+  /// "light" | "moderate" | "fresh" — how far the copy may move from the master.
+  changeLevel        String        @default("light")
+  /// Pages read for facts on every run. Nothing in the email may come from anywhere else.
+  sourceUrls         String[]
+  /// Standing instructions for this campaign type.
+  brief              String        @default("") @db.Text
+  /// "This month's push". Empty means the agent picks the angle from sourceUrls.
+  monthlyPush        String        @default("") @db.Text
+  /// Monthly, Nth weekday: 0 = Sunday … 6 = Saturday; nth 1–5, or -1 for the last.
+  sendWeekday        Int           @default(4)
+  sendNth            Int           @default(3)
+  /// "HH:MM" in `timezone`.
+  sendTime           String        @default("09:00")
+  timezone           String        @default("America/Denver")
+  /// The draft runs on the last `draftWeekday` before the send day, at `draftTime`.
+  draftWeekday       Int           @default(1)
+  draftTime          String        @default("16:00")
+  /// Who gets the "awaiting approval" heads-up. Empty means the workspace admins.
+  notifyEmails       String[]
+  updatedBy          String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([workspaceId])
+  @@index([enabled])
 }

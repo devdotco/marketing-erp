@@ -37,6 +37,35 @@ export async function sendPasswordReset(to: string, url: string) {
   });
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * A heads-up that an agent run needs a person: an Email Marketing draft is
+ * awaiting approval, or a scheduled draft failed its checks. `lines` are plain
+ * text (escaped here), shown one per line under the heading.
+ */
+export async function sendRunHeadsUp(
+  to: string[],
+  { subject, heading, lines, ctaText, ctaUrl }: { subject: string; heading: string; lines: string[]; ctaText: string; ctaUrl: string },
+) {
+  if (to.length === 0) return;
+  await sgMail.send({
+    to,
+    from: FROM,
+    subject,
+    html: emailTemplate({
+      heading: escapeHtml(heading),
+      body: lines.map(escapeHtml).join("<br>"),
+      ctaText,
+      ctaUrl,
+      footer: "You get this because you are listed to review this campaign in Marketing.",
+    }),
+    text: `${heading}\n\n${lines.join("\n")}\n\n${ctaText}: ${ctaUrl}`,
+  });
+}
+
 function emailTemplate({
   heading,
   body,

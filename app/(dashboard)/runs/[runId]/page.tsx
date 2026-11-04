@@ -17,6 +17,8 @@ import { checkOutput, normalizeOutput, REVIEW_KEY } from "@/lib/agents/integrity
 import { RunReview } from "@/components/runs/RunReview";
 import { RunInputs } from "@/components/runs/RunInputs";
 import { LocalTime } from "@/components/ui/LocalTime";
+import { CampaignReview } from "@/components/runs/CampaignReview";
+import { isCampaignOutput } from "@/lib/email-campaigns/approve";
 
 export const metadata = {
   title: "Run",
@@ -88,6 +90,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
     const clone = { ...withoutProvenance(o ?? {}) };
     delete clone[REVIEW_KEY];
     delete clone["nearRankCsv"]; // downloadable above; the same rows are in nearRankOpportunities
+    if (isCampaignOutput(o)) delete clone["html"]; // previewed above
     return clone;
   };
 
@@ -197,6 +200,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           )}
 
           {hasReadableOutput && <RunReview findings={findings} />}
+
+          {hasReadableOutput && isCampaignOutput(output) && (
+            <CampaignReview runId={run.id} output={output} editable={needsApproval} />
+          )}
 
           {runError?.code === "no_api_key" && (
             <ByokPrompt />

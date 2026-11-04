@@ -44,6 +44,7 @@ import {
 } from "./social-poster-shared";
 import { publishMetaBatch, isMetaBatchSettled, type MetaStagedPost } from "./meta-poster-delivery";
 import type { MetaCredentials } from "@/lib/integrations/meta";
+import { approveCampaignRun, isCampaignOutput } from "@/lib/email-campaigns/approve";
 
 export type OnApproveHandler = (
   run: AgentRun & { agentConfig: AgentConfig },
@@ -53,6 +54,10 @@ async function emailMarketingOnApprove(
   run: AgentRun & { agentConfig: AgentConfig },
 ): Promise<Record<string, unknown> | undefined> {
   const output = (run.output ?? {}) as Record<string, unknown>;
+
+  // A campaign-type run (Press Release, Dashboard…): schedule its SendGrid Single Send.
+  if (isCampaignOutput(output)) return approveCampaignRun(run);
+
   const channelDelivery = output.channelDelivery as Record<string, unknown> | undefined;
 
   // Nothing staged (Mailchimp/Klaviyo, or staging itself failed), or already activated by an
