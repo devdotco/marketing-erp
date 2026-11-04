@@ -446,6 +446,58 @@ export const KEY_SETUP_GUIDES: Partial<Record<string, SetupGuide>> = {
     docs: [{ label: "Mailchimp: About API Keys", url: "https://mailchimp.com/help/about-api-keys/" }],
   },
 
+  SENDGRID: {
+    provider: "SENDGRID",
+    summary:
+      "Connecting SendGrid lets Email Marketing's campaign types (Press Release, Dashboard…) create a draft Single Send on every run and schedule it when you approve the run.",
+    timeMinutes: 5,
+    youWillNeed: [
+      "A SendGrid account using Marketing Campaigns, with a verified sender under Marketing → Senders.",
+      "An unsubscribe group under Suppressions → Unsubscribe Groups.",
+    ],
+    steps: [
+      {
+        title: "Create an API key",
+        body: "In SendGrid, go to **Settings → API Keys → Create API Key**. Choose **Restricted Access** and give **Marketing** full access and **Suppressions** read access.",
+      },
+      {
+        title: "Copy it",
+        body: "Copy the key now. SendGrid shows it only once.",
+      },
+      {
+        title: "Find the sender and unsubscribe group",
+        body: "Note the verified sender address under **Marketing → Senders** (for example hello@digital.marketing) and the numeric ID of the group under **Suppressions → Unsubscribe Groups**.",
+      },
+      {
+        title: "Paste them into marketing-erp",
+        body: "Go to **Integrations → SendGrid → Connect**, fill in all three fields, and click **Connect**.",
+      },
+    ],
+    verify: [
+      "The connect form lists your Marketing senders and unsubscribe groups, both free and read-only, and refuses a sender that is missing or unverified.",
+      "A green \"Connected\" badge appears next to SendGrid in Integrations once it checks out.",
+    ],
+    troubleshooting: [
+      {
+        symptom: "\"SendGrid rejected that key, or it lacks Marketing and Suppressions access.\"",
+        fix: "Create a new restricted key with Marketing set to Full Access and Suppressions to Read Access, then reconnect.",
+      },
+      {
+        symptom: "\"SendGrid has no Marketing sender for …\"",
+        fix: "The sender must exist under Marketing → Senders, not only as a Single Sender for the transactional API. Add and verify it there.",
+      },
+      {
+        symptom: "A Single Send draft in SendGrid has no recipients",
+        fix: "Expected until the run is approved. Approval attaches the campaign type's lists and segments and schedules the send.",
+      },
+    ],
+    privacy: "Read and write. marketing-erp reads your senders, lists, segments and unsubscribe groups, creates Single Sends as drafts with no recipients and no send time, and only attaches recipients and schedules a send when a workspace admin approves the run. Disconnect any time from Integrations → SendGrid → Disconnect, or delete the key in SendGrid under Settings → API Keys.",
+    docs: [
+      { label: "SendGrid: API keys", url: "https://www.twilio.com/docs/sendgrid/ui/account-and-settings/api-keys" },
+      { label: "SendGrid: Single Sends API", url: "https://www.twilio.com/docs/sendgrid/api-reference/single-sends/create-single-send" },
+      { label: "SendGrid: Unsubscribe groups", url: "https://www.twilio.com/docs/sendgrid/ui/sending-email/create-and-manage-unsubscribe-groups" },
+    ],
+  },
   KLAVIYO: {
     provider: "KLAVIYO",
     summary:

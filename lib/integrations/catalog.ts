@@ -113,6 +113,33 @@ export const CONNECT_METHODS: Partial<Record<string, { name: string; method: Con
       ],
     },
   },
+  SENDGRID: {
+    name: "SendGrid",
+    method: {
+      kind: "key",
+      fields: [
+        {
+          key: "apiKey",
+          label: "API key",
+          placeholder: "SG.…",
+          secret: true,
+          hint: "Settings → API Keys in SendGrid. Needs Marketing (full access) to create and schedule Single Sends, plus read access to Suppressions. Email Marketing's campaign types only ever create drafts on a run; approving the run is what schedules a send.",
+        },
+        {
+          key: "senderEmail",
+          label: "Sender address",
+          placeholder: "hello@digital.marketing",
+          hint: "A verified sender under Marketing → Senders in SendGrid. Every campaign from this workspace sends from it.",
+        },
+        {
+          key: "suppressionGroupId",
+          label: "Unsubscribe group ID",
+          placeholder: "e.g. 12345",
+          hint: "Suppressions → Unsubscribe Groups in SendGrid. The {{{unsubscribe}}} links in your templates unsubscribe people from this group.",
+        },
+      ],
+    },
+  },
   KLAVIYO: {
     name: "Klaviyo",
     method: {
@@ -409,6 +436,12 @@ export function normaliseKeyCredentials(
     }
     if (url.protocol !== "https:") return { ok: false, error: "Site URL must use https" };
     credentials.siteUrl = url.origin + url.pathname.replace(/\/+$/, "");
+  }
+
+  if (provider === "SENDGRID") {
+    if (!/^\S+@\S+\.\S+$/.test(credentials.senderEmail)) return { ok: false, error: "Sender address must be an email address" };
+    credentials.senderEmail = credentials.senderEmail.toLowerCase();
+    if (!/^\d+$/.test(credentials.suppressionGroupId)) return { ok: false, error: "Unsubscribe group ID is a number, from Suppressions → Unsubscribe Groups" };
   }
 
   if (provider === "MAILCHIMP") {

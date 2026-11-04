@@ -182,6 +182,20 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ sl
               all, not a secondary setting. Only rendered for this one agent slug — see this
               component's own doc comment for why the ICP itself isn't duplicated into a generic
               agent-page field instead. */}
+          {slug === "email-marketing" && (
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <div>
+                  <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Campaign types and templates</h2>
+                  <p style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                    Monthly sends from locked master templates through SendGrid, drafted on a calendar and scheduled when you approve.
+                  </p>
+                </div>
+                <Link href="/agents/email-marketing/campaigns" className="btn btn-secondary btn-sm">Campaigns →</Link>
+              </div>
+            </div>
+          )}
+
           {slug === "outbound-scout" && (
             <ScoutIcpPanel workspaceId={workspaceId} plays={outboundPlays} isAdmin={isAdmin} />
           )}

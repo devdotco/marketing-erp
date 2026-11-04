@@ -98,6 +98,14 @@ const INTEGRATIONS = [
     comingSoon: true,
   },
   {
+    provider: "SENDGRID",
+    name: "SendGrid",
+    description: "Marketing Campaigns: draft Single Sends on each run, scheduled only when you approve",
+    agents: ["Email Marketing"],
+    color: "#1A82E2",
+    docsUrl: "#",
+  },
+  {
     provider: "KLAVIYO",
     name: "Klaviyo",
     description: "Email and SMS lifecycle marketing campaigns",

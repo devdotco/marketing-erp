@@ -7,6 +7,7 @@ import { VERIFIERS as CRM } from "./crm";
 import { VERIFIERS as IMAGES } from "./images";
 import { VERIFIERS as VOICE } from "./voice";
 import { VERIFIERS as ANSWER_ENGINES } from "./answer-engines";
+import { VERIFIERS as SENDGRID } from "./sendgrid";
 
 /** Every key verifier, by provider. Anthropic's lives in lib/ai/client.ts. */
-export const KEY_VERIFIERS: Partial<Record<string, KeyVerifier>> = { ...SEO_CONTENT, ...OUTBOUND, ...SEARCH_ATLAS, ...PAYLOAD, ...CRM, ...IMAGES, ...VOICE, ...ANSWER_ENGINES };
+export const KEY_VERIFIERS: Partial<Record<string, KeyVerifier>> = { ...SEO_CONTENT, ...OUTBOUND, ...SEARCH_ATLAS, ...PAYLOAD, ...CRM, ...IMAGES, ...VOICE, ...ANSWER_ENGINES, ...SENDGRID };
